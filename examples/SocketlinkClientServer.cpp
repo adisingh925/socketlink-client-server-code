@@ -415,14 +415,14 @@ void sendHTTPSPOSTRequestFireAndForget(
             ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
         }
 
-        /** Specify the endpoint using the IP address and port. 
-         *  Ensure the IP address is correctly formatted. */
-        boost::asio::ip::tcp::endpoint endpoint(
-            boost::asio::ip::make_address("167.71.239.154"),
-            443
-        );
-
         if (!ssl_socket->lowest_layer().is_open()) {
+            /** Specify the endpoint using the IP address and port. 
+             *  Ensure the IP address is correctly formatted. */
+            boost::asio::ip::tcp::endpoint endpoint(
+                boost::asio::ip::make_address("167.71.239.154"),
+                443
+            );
+
             /** Establish a connection to the endpoint. */
             ssl_socket->lowest_layer().connect(endpoint);
 
@@ -465,6 +465,8 @@ void sendHTTPSPOSTRequestFireAndForget(
         /** Properly shut down and close the connection. */
         ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
         ssl_socket->lowest_layer().close();
+
+        ssl_socket = nullptr;
     } catch (const std::exception& e) {
         /** Catch and log any exceptions that occur. */
         std::cerr << "Error: " << e.what() << std::endl;
