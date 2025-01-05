@@ -466,7 +466,11 @@ void sendHTTPSPOSTRequestFireAndForget(
 
         ssl_socket = nullptr; */
     } catch (const boost::system::system_error& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        if (e.code() == boost::asio::error::connection_reset) {
+            std::cerr << "Connection reset by peer : " << e.what() << std::endl;
+        } else {
+            std::cerr << "System error : " << e.what() << std::endl;
+        }
     }
 }
 
