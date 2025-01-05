@@ -22,7 +22,7 @@
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 9001;
+constexpr const int PORT = 443;
 
 /** 
  * Sending Constants
