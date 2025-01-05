@@ -14,6 +14,7 @@
 #include <cstring>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/system/error_code.hpp>
 
 /**
  * Internal Constants
@@ -21,7 +22,7 @@
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 443;
+constexpr const int PORT = 9001;
 
 /** 
  * Sending Constants
@@ -451,10 +452,7 @@ void sendHTTPSPOSTRequestFireAndForget(
         }
 
         /** Specify the content length and finalize the headers. */
-        request_stream << "Content-Length: " 
-                       << body.size() 
-                       << "\r\n"
-                       << "\r\n";
+        request_stream << "Content-Length: " << body.size() << "\r\n" << "\r\n";
 
         /** Send the request headers over the SSL socket. */
         boost::asio::write(*ssl_socket, request_buffer); 
@@ -467,9 +465,21 @@ void sendHTTPSPOSTRequestFireAndForget(
         ssl_socket->lowest_layer().close();
 
         ssl_socket = nullptr; */
-    } catch (const std::exception& e) {
+    } catch (const boost::system::system_error& e) {
         /** Catch and log any exceptions that occur. */
-        std::cerr << "Error: " << e.what() << std::endl;
+        if (e.code() == boost::asio::error::eof) {
+            /** Server has closed the connection */ 
+            std::cerr << "Server closed connection, reconnecting...\n";
+            ssl_socket->lowest_layer().close();  
+            ssl_socket = nullptr;  
+        } else if (e.code() == boost::asio::error::connection_refused) {
+            /** Handle connection refused (server might be down, etc.) */ 
+            std::cerr << "Connection refused, retrying...\n";
+            ssl_socket->lowest_layer().close();  
+            ssl_socket = nullptr;  
+        } else {
+            std::cerr << "Error: " << e.what() << std::endl;
+        }
     }
 }
 
@@ -522,6 +532,7 @@ void populateUserData(std::string data) {
 void fetchAndPopulateUserData() {
     try {
         std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        // std::string dropletId = "467836588";
 
         /** Headers for the HTTP request */ 
         httplib::Headers headers = {
