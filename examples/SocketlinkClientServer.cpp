@@ -468,13 +468,18 @@ void sendHTTPSPOSTRequestFireAndForget(
     } catch (const boost::system::system_error& e) {
         if (e.code() == boost::asio::error::broken_pipe) {
             /** broken pipe error, resending */
+            std::cout << "Broken pipe error, retrying" << std::endl;
             ssl_socket = nullptr;  
 
             /** dangerous retry */
             sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);
         }else if (e.code() == boost::asio::error::connection_reset) {
             /** connection reset by peer */
-            ssl_socket = nullptr;  
+            std::cout << "Connection reset by peer, retrying" << std::endl;
+            ssl_socket = nullptr;
+
+            /** dangerous retry */
+            sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);  
         } else {
             std::cerr << "System error : " << e.what() << std::endl;
         }
