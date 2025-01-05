@@ -398,6 +398,7 @@ HTTPResponse sendHTTPSPOSTRequest(
 void sendHTTPSPOSTRequestFireAndForget(
     boost::asio::io_context& io_context, 
     boost::asio::ssl::context& ssl_context,
+    boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& ssl_socket,
     const std::string& baseURL, 
     const std::string& path, 
     const std::string& body, 
@@ -418,11 +419,13 @@ void sendHTTPSPOSTRequestFireAndForget(
             443
         );
 
-        /** Establish a connection to the endpoint. */
-        ssl_socket.lowest_layer().connect(endpoint);
+        if (!ssl_socket.lowest_layer().is_open()) {
+            /** Establish a connection to the endpoint. */
+            ssl_socket.lowest_layer().connect(endpoint);
 
-        /** Perform the SSL handshake. */
-        ssl_socket.handshake(boost::asio::ssl::stream_base::client);
+            /** Perform the SSL handshake. */
+            ssl_socket.handshake(boost::asio::ssl::stream_base::client);
+        }
 
         /** Enable the TCP no-delay option to minimize latency. */
         boost::asio::ip::tcp::no_delay option(true);
@@ -576,7 +579,8 @@ void worker_t::work()
 
   boost::asio::io_context io_context;
   boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);
-  
+  boost::asio::ssl::stream<boost::asio::ip::tcp::socket>* ssl_socket = new boost::asio::ssl::stream<boost::asio::ip::tcp::socket>(io_context, ssl_context);
+
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
@@ -734,7 +738,7 @@ void worker_t::work()
             });
         } 
     },
-    .open = [&io_context, &ssl_context](auto *ws) {
+    .open = [&io_context, &ssl_context, &ssl_socket](auto *ws) {
         /**
          * Final check if a connection is already there with the same uid
          * probability of running this is very low
@@ -798,6 +802,7 @@ void worker_t::work()
             sendHTTPSPOSTRequestFireAndForget(
                 io_context,
                 ssl_context,
+                *ssl_socket,
                 UserData::getInstance().webHookBaseUrl,
                 UserData::getInstance().webhookPath,
                 body,
@@ -814,14 +819,14 @@ void worker_t::work()
                 payload << "{\"event\":\"ON_MAX_CONNECTION_LIMIT_REACHED\"}";
                 std::string body = payload.str();
 
-                sendHTTPSPOSTRequestFireAndForget(
+                /* sendHTTPSPOSTRequestFireAndForget(
                     io_context,
                     ssl_context,
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
                     {}
-                );
+                ); */
             }
         }
     },
@@ -836,14 +841,14 @@ void worker_t::work()
                 << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msg_size_allowed_in_bytes << "\"}";            
                 std::string body = payload.str(); 
                 
-                sendHTTPSPOSTRequestFireAndForget(
+                /* sendHTTPSPOSTRequestFireAndForget(
                     io_context,
                     ssl_context,
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
                     {}
-                );
+                ); */
             }
         }
         else if (ws->getUserData()->sendingAllowed)
@@ -857,14 +862,14 @@ void worker_t::work()
                     payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
                     std::string body = payload.str(); 
                     
-                    sendHTTPSPOSTRequestFireAndForget(
+                    /* sendHTTPSPOSTRequestFireAndForget(
                         io_context,
                         ssl_context,
                         UserData::getInstance().webHookBaseUrl,
                         UserData::getInstance().webhookPath,
                         body,
                         {}
-                    );
+                    ); */
                 }
             } else {
                 if (UserData::getInstance().msg_per_day == -1 ? true : globalMessagesSent.load(std::memory_order_relaxed) < UserData::getInstance().msg_per_day) {
@@ -899,14 +904,14 @@ void worker_t::work()
                         << "\"message\":\"" << message << "\"}";           
                         std::string body = payload.str(); 
                         
-                        sendHTTPSPOSTRequestFireAndForget(
+                        /* sendHTTPSPOSTRequestFireAndForget(
                             io_context,
                             ssl_context,
                             UserData::getInstance().webHookBaseUrl,
                             UserData::getInstance().webhookPath,
                             body,
                             {}
-                        );
+                        ); */
                     }
                 } else {
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
@@ -922,14 +927,14 @@ void worker_t::work()
                         << "\"msg_per_day\":\"" << UserData::getInstance().msg_per_day << "\"}";              
                         std::string body = payload.str(); 
                         
-                        sendHTTPSPOSTRequestFireAndForget(
+                        /* sendHTTPSPOSTRequestFireAndForget(
                             io_context,
                             ssl_context,
                             UserData::getInstance().webHookBaseUrl,
                             UserData::getInstance().webhookPath,
                             body,
                             {}
-                        );
+                        ); */
                     }
                 }
             }
@@ -948,14 +953,14 @@ void worker_t::work()
             << "\"message\":\"" << message << "\"}";           
             std::string body = payload.str(); 
             
-            sendHTTPSPOSTRequestFireAndForget(
+            /* sendHTTPSPOSTRequestFireAndForget(
                 io_context,
                 ssl_context,
                 UserData::getInstance().webHookBaseUrl,
                 UserData::getInstance().webhookPath,
                 body,
                 {}
-            );
+            ); */
         }
     },
     .drain = [&io_context, &ssl_context](auto *ws) {
@@ -967,14 +972,14 @@ void worker_t::work()
                 payload << "{\"event\":\"ON_RATE_LIMIT_LIFTED\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
                 std::string body = payload.str(); 
                 
-                sendHTTPSPOSTRequestFireAndForget(
+                /* sendHTTPSPOSTRequestFireAndForget(
                     io_context,
                     ssl_context,
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
                     {}
-                );
+                ); */
             }
         }
     },
@@ -1035,14 +1040,14 @@ void worker_t::work()
      
             std::string body = payload.str(); 
             
-            sendHTTPSPOSTRequestFireAndForget(
+            /* sendHTTPSPOSTRequestFireAndForget(
                 io_context,
                 ssl_context,
                 UserData::getInstance().webHookBaseUrl,
                 UserData::getInstance().webhookPath,
                 body,
                 {}
-            );
+            ); */
         }
     }
   }).get("/api/v1/metrics", [](auto *res, auto *req) {
@@ -1301,6 +1306,14 @@ void worker_t::work()
   });
 
   app_->run();
+
+  /** cleanup */
+  io_context.stop();
+
+  if (ssl_socket) {
+    delete ssl_socket;
+    ssl_socket = nullptr;
+  }
 
   std::cout << "Thread " << std::this_thread::get_id() << " exiting" << std::endl;
 }
