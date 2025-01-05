@@ -442,7 +442,7 @@ void sendHTTPSPOSTRequestFireAndForget(
         /** Construct the HTTP request headers. */
         request_stream << "POST " << path << " HTTP/1.1\r\n"
                        << "Host: " << baseURL << "\r\n"
-                       << "Connection: close\r\n"
+                       << "Connection: keep-alive\r\n"
                        << "Content-Type: application/json\r\n";
 
         /** Add any custom headers provided as a map. */
@@ -463,10 +463,10 @@ void sendHTTPSPOSTRequestFireAndForget(
         boost::asio::write(*ssl_socket, boost::asio::buffer(body)); 
 
         /** Properly shut down and close the connection. */
-        ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+        /* ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
         ssl_socket->lowest_layer().close();
 
-        ssl_socket = nullptr;
+        ssl_socket = nullptr; */
     } catch (const std::exception& e) {
         /** Catch and log any exceptions that occur. */
         std::cerr << "Error: " << e.what() << std::endl;
