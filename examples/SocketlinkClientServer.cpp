@@ -22,7 +22,7 @@
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 443;
+constexpr const int PORT = 9001;
 
 /** 
  * Sending Constants
@@ -108,7 +108,7 @@ struct worker_t
   struct uWS::Loop *loop_;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::SSLApp> app_;
+  std::shared_ptr<uWS::App> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -411,12 +411,9 @@ void sendHTTPSPOSTRequestFireAndForget(
          *  This is insecure and should only be used for testing purposes. */
         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
 
-        /** Initialize the ssl_socket if not already done */
-        if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {
+        if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {            
             ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
-        }
 
-        if (!ssl_socket->lowest_layer().is_open()) {
             /** Specify the endpoint using the IP address and port. 
              *  Ensure the IP address is correctly formatted. */
             boost::asio::ip::tcp::endpoint endpoint(
@@ -461,10 +458,10 @@ void sendHTTPSPOSTRequestFireAndForget(
         boost::asio::write(*ssl_socket, boost::asio::buffer(body)); 
 
         /** Properly shut down and close the connection. */
-        ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+        /* ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
         ssl_socket->lowest_layer().close();
 
-        ssl_socket = nullptr;
+        ssl_socket = nullptr; */
     } catch (const boost::system::system_error& e) {
         std::cerr << "Error: " << e.what() << std::endl;
     }
@@ -518,8 +515,8 @@ void populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        // std::string dropletId = "467836588";
+        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        std::string dropletId = "467836588";
 
         /** Headers for the HTTP request */ 
         httplib::Headers headers = {
@@ -575,8 +572,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::SSLApp>(
-    uWS::SSLApp({
+  app_ = std::make_shared<uWS::App>(
+    uWS::App({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
