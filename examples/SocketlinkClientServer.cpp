@@ -396,9 +396,9 @@ HTTPResponse sendHTTPSPOSTRequest(
     }
 }
 
-thread_local boost::asio::io_context io_context;                                           // Thread-local io_context
-thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);     // Thread-local ssl_context
-thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr;  // Thread-local ssl_socket
+thread_local boost::asio::io_context io_context;                                                           // Thread-local io_context
+thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);                     // Thread-local ssl_context
+thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr; // Thread-local ssl_socket
 
 void sendHTTPSPOSTRequestFireAndForget(
     const std::string& baseURL, 
@@ -411,7 +411,10 @@ void sendHTTPSPOSTRequestFireAndForget(
          *  This is insecure and should only be used for testing purposes. */
         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
 
-        if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {            
+        if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {      
+
+            std::cout << "Creating new socket" << std::endl;
+
             ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
 
             /** Specify the endpoint using the IP address and port. 
