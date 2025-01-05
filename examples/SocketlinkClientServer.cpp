@@ -467,8 +467,9 @@ void sendHTTPSPOSTRequestFireAndForget(
         ssl_socket = nullptr; */
     } catch (const boost::system::system_error& e) {
         if (e.code() == boost::asio::error::broken_pipe) {
-            std::cerr << "Broken pipe error : " << e.what() << std::endl;
+            /** broken pipe error, resending */
             ssl_socket = nullptr;  
+            sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);
         }else if (e.code() == boost::asio::error::connection_reset) {
             std::cerr << "Connection reset by peer : " << e.what() << std::endl;
             ssl_socket = nullptr;  
