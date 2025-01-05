@@ -468,24 +468,13 @@ void sendHTTPSPOSTRequestFireAndForget(
     } catch (const boost::system::system_error& e) {
         if (e.code() == boost::asio::error::broken_pipe) {
             std::cerr << "Broken pipe error : " << e.what() << std::endl;
+            ssl_socket = nullptr;  
         }else if (e.code() == boost::asio::error::connection_reset) {
             std::cerr << "Connection reset by peer : " << e.what() << std::endl;
+            ssl_socket = nullptr;  
         } else {
             std::cerr << "System error : " << e.what() << std::endl;
         }
-
-         // Safely close the socket only if it's open
-        if (ssl_socket && ssl_socket->lowest_layer().is_open()) {
-            try {
-                ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
-                ssl_socket->lowest_layer().close();
-                std::cerr << "Socket closed successfully after error handling." << std::endl;
-            } catch (const boost::system::system_error& shutdown_error) {
-                std::cerr << "Error during shutdown: " << shutdown_error.what() << std::endl;
-            }
-        }
-
-        ssl_socket = nullptr;  // Reset the ssl_socket after cleanup
     }
 }
 
