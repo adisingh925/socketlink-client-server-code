@@ -21,7 +21,7 @@
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 443;
+constexpr const int PORT = 9001;
 
 /** 
  * Sending Constants
@@ -107,7 +107,7 @@ struct worker_t
   struct uWS::Loop *loop_;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::SSLApp> app_;
+  std::shared_ptr<uWS::App> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -451,7 +451,9 @@ void sendHTTPSPOSTRequestFireAndForget(
         }
 
         /** Specify the content length and finalize the headers. */
-        request_stream << "Content-Length: " << body.size() << "\r\n"
+        request_stream << "Content-Length: " 
+                       << body.size() 
+                       << "\r\n"
                        << "\r\n";
 
         /** Send the request headers over the SSL socket. */
@@ -517,7 +519,8 @@ void populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        std::string dropletId = "467836588";
 
         /** Headers for the HTTP request */ 
         httplib::Headers headers = {
@@ -573,8 +576,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::SSLApp>(
-    uWS::SSLApp({
+  app_ = std::make_shared<uWS::App>(
+    uWS::App({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
@@ -787,8 +790,6 @@ void worker_t::work()
 
         /** fire connection open webhook */
         if(webhookStatus[Webhooks::ON_CONNECTION_OPEN] == 1){
-            std::cout << "ON_CONNECTION_OPEN" << std::endl;
-
             std::ostringstream payload;
             payload << "{\"event\":\"ON_CONNECTION_OPEN\", "
             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
