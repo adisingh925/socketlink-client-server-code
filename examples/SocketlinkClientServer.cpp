@@ -468,6 +468,9 @@ void sendHTTPSPOSTRequestFireAndForget(
     } catch (const boost::system::system_error& e) {
         if (e.code() == boost::asio::error::connection_reset) {
             std::cerr << "Connection reset by peer : " << e.what() << std::endl;
+            ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+            ssl_socket->lowest_layer().close();
+            ssl_socket = nullptr;
         } else {
             std::cerr << "System error : " << e.what() << std::endl;
         }
