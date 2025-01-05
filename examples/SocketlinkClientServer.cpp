@@ -432,8 +432,11 @@ void sendHTTPSPOSTRequestFireAndForget(
         }
 
         /** Enable the TCP no-delay option to minimize latency. */
-        boost::asio::ip::tcp::no_delay option(true);
-        ssl_socket->lowest_layer().set_option(option);
+        boost::asio::ip::tcp::no_delay no_delay_option(true);
+        ssl_socket->lowest_layer().set_option(no_delay_option);
+
+        boost::asio::socket_base::keep_alive keep_alive_option(true);
+        ssl_socket->lowest_layer().set_option(keep_alive_option);
 
         /** Prepare a buffer for the HTTP request using boost::asio::streambuf. 
          *  This ensures efficient memory management. */
