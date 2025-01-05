@@ -474,12 +474,18 @@ void sendHTTPSPOSTRequestFireAndForget(
             std::cerr << "System error : " << e.what() << std::endl;
         }
 
+         // Safely close the socket only if it's open
         if (ssl_socket && ssl_socket->lowest_layer().is_open()) {
-            ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
-            ssl_socket->lowest_layer().close();
+            try {
+                ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+                ssl_socket->lowest_layer().close();
+                std::cerr << "Socket closed successfully after error handling." << std::endl;
+            } catch (const boost::system::system_error& shutdown_error) {
+                std::cerr << "Error during shutdown: " << shutdown_error.what() << std::endl;
+            }
         }
-        
-        ssl_socket = nullptr;
+
+        ssl_socket = nullptr;  // Reset the ssl_socket after cleanup
     }
 }
 
