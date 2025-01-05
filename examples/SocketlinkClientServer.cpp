@@ -474,10 +474,11 @@ void sendHTTPSPOSTRequestFireAndForget(
             std::cerr << "System error : " << e.what() << std::endl;
         }
 
-        if (ssl_socket) {
+        if (ssl_socket && ssl_socket->lowest_layer().is_open()) {
             ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
             ssl_socket->lowest_layer().close();
         }
+        
         ssl_socket = nullptr;
     }
 }
