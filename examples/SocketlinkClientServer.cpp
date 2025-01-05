@@ -397,7 +397,7 @@ HTTPResponse sendHTTPSPOSTRequest(
 
 thread_local boost::asio::io_context io_context;                                           // Thread-local io_context
 thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);     // Thread-local ssl_context
-thread_local boost::asio::ssl::stream<boost::asio::ip::tcp::socket> *ssl_socket = nullptr; // Thread-local ssl_socket
+thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr;  // Thread-local ssl_socket
 
 void sendHTTPSPOSTRequestFireAndForget(
     const std::string& baseURL, 
@@ -410,8 +410,10 @@ void sendHTTPSPOSTRequestFireAndForget(
          *  This is insecure and should only be used for testing purposes. */
         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
 
-        /** Create an SSL socket with RAII management. */
-        boost::asio::ssl::stream<boost::asio::ip::tcp::socket> ssl_socket(io_context, ssl_context);
+        /** Initialize the ssl_socket if not already done */
+        if (!ssl_socket) {
+            ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
+        }
 
         /** Specify the endpoint using the IP address and port. 
          *  Ensure the IP address is correctly formatted. */
@@ -420,17 +422,17 @@ void sendHTTPSPOSTRequestFireAndForget(
             443
         );
 
-        if (!ssl_socket.lowest_layer().is_open()) {
+        if (!ssl_socket->lowest_layer().is_open()) {
             /** Establish a connection to the endpoint. */
-            ssl_socket.lowest_layer().connect(endpoint);
+            ssl_socket->lowest_layer().connect(endpoint);
 
             /** Perform the SSL handshake. */
-            ssl_socket.handshake(boost::asio::ssl::stream_base::client);
+            ssl_socket->handshake(boost::asio::ssl::stream_base::client);
         }
 
         /** Enable the TCP no-delay option to minimize latency. */
         boost::asio::ip::tcp::no_delay option(true);
-        ssl_socket.lowest_layer().set_option(option);
+        ssl_socket->lowest_layer().set_option(option);
 
         /** Prepare a buffer for the HTTP request using boost::asio::streambuf. 
          *  This ensures efficient memory management. */
@@ -453,14 +455,14 @@ void sendHTTPSPOSTRequestFireAndForget(
                        << "\r\n";
 
         /** Send the request headers over the SSL socket. */
-        boost::asio::write(ssl_socket, request_buffer);
+        boost::asio::write(*ssl_socket, request_buffer); 
 
         /** Send the request body over the SSL socket. */
-        boost::asio::write(ssl_socket, boost::asio::buffer(body));
+        boost::asio::write(*ssl_socket, boost::asio::buffer(body)); 
 
         /** Properly shut down and close the connection. */
-        ssl_socket.lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
-        ssl_socket.lowest_layer().close();
+        ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+        ssl_socket->lowest_layer().close();
     } catch (const std::exception& e) {
         /** Catch and log any exceptions that occur. */
         std::cerr << "Error: " << e.what() << std::endl;
@@ -569,8 +571,6 @@ void worker_t::work()
 {
   /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/ 
   loop_ = uWS::Loop::get();
-
-  ssl_socket = new boost::asio::ssl::stream<boost::asio::ip::tcp::socket>(io_context, ssl_context);
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
   app_ = std::make_shared<uWS::SSLApp>(
@@ -1305,11 +1305,6 @@ void worker_t::work()
 
   /** cleanup */
   io_context.stop();
-
-  if (ssl_socket) {
-    delete ssl_socket;
-    ssl_socket = nullptr;
-  }
 
   std::cout << "Thread " << std::this_thread::get_id() << " exiting" << std::endl;
 }
