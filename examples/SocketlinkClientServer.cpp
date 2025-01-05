@@ -366,14 +366,17 @@ HTTPResponse sendHTTPSPOSTRequest(
 }
 
 void sendHTTPSPOSTRequestFireAndForget(
-    boost::asio::io_context& io_context, 
-    boost::asio::ssl::context& ssl_context,
     const std::string& baseURL, 
     const std::string& path, 
     const std::string& body, 
     const std::map<std::string, std::string>& headers = {}
 ) {
     try {
+        boost::asio::io_context io_context;
+
+        /** Local SSL context */ 
+        boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);
+
         /** Disable certificate verification if needed */ 
         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
 
@@ -528,9 +531,6 @@ void worker_t::work()
         .cert_file_name = "ssl/cert.pem"
     })
   );
-
-  boost::asio::io_context io_context;
-  boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);
   
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
@@ -689,7 +689,7 @@ void worker_t::work()
             });
         } 
     },
-    .open = [&io_context, &ssl_context](auto *ws) {
+    .open = [](auto *ws) {
         /**
          * Final check if a connection is already there with the same uid
          * probability of running this is very low
@@ -749,8 +749,6 @@ void worker_t::work()
             std::string body = payload.str(); 
             
             sendHTTPSPOSTRequestFireAndForget(
-                io_context,
-                ssl_context,
                 UserData::getInstance().webHookBaseUrl,
                 UserData::getInstance().webhookPath,
                 body,
@@ -768,8 +766,6 @@ void worker_t::work()
                 std::string body = payload.str();
 
                 sendHTTPSPOSTRequestFireAndForget(
-                    io_context,
-                    ssl_context,
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
@@ -778,7 +774,7 @@ void worker_t::work()
             }
         }
     },
-    .message = [this, &io_context, &ssl_context](auto *ws, std::string_view message, uWS::OpCode opCode) {
+    .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
         if(message.size() > UserData::getInstance().msg_size_allowed_in_bytes){
             ws->end(1009, "{\"event\":\"MESSAGE_SIZE_EXCEEDED\"}");
 
@@ -790,8 +786,6 @@ void worker_t::work()
                 std::string body = payload.str(); 
                 
                 sendHTTPSPOSTRequestFireAndForget(
-                    io_context,
-                    ssl_context,
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
@@ -811,8 +805,6 @@ void worker_t::work()
                     std::string body = payload.str(); 
                     
                     sendHTTPSPOSTRequestFireAndForget(
-                        io_context,
-                        ssl_context,
                         UserData::getInstance().webHookBaseUrl,
                         UserData::getInstance().webhookPath,
                         body,
@@ -853,8 +845,6 @@ void worker_t::work()
                         std::string body = payload.str(); 
                         
                         sendHTTPSPOSTRequestFireAndForget(
-                            io_context,
-                            ssl_context,
                             UserData::getInstance().webHookBaseUrl,
                             UserData::getInstance().webhookPath,
                             body,
@@ -876,8 +866,6 @@ void worker_t::work()
                         std::string body = payload.str(); 
                         
                         sendHTTPSPOSTRequestFireAndForget(
-                            io_context,
-                            ssl_context,
                             UserData::getInstance().webHookBaseUrl,
                             UserData::getInstance().webhookPath,
                             body,
@@ -890,7 +878,7 @@ void worker_t::work()
             ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
         }       
     },
-    .dropped = [&io_context, &ssl_context](auto *ws, std::string_view message, uWS::OpCode /*opCode*/) {
+    .dropped = [](auto *ws, std::string_view message, uWS::OpCode /*opCode*/) {
         droppedMessages.fetch_add(1, std::memory_order_relaxed);
 
         if(webhookStatus[Webhooks::ON_MESSAGE_DROPPED] == 1){
@@ -902,8 +890,6 @@ void worker_t::work()
             std::string body = payload.str(); 
             
             sendHTTPSPOSTRequestFireAndForget(
-                io_context,
-                ssl_context,
                 UserData::getInstance().webHookBaseUrl,
                 UserData::getInstance().webhookPath,
                 body,
@@ -911,7 +897,7 @@ void worker_t::work()
             );
         }
     },
-    .drain = [&io_context, &ssl_context](auto *ws) {
+    .drain = [](auto *ws) {
         if(ws->getBufferedAmount() < 2 * 1024 * 1024){
             ws->getUserData()->sendingAllowed = true;
             ws->send("{\"event\":\"RATE_LIMIT_LIFTED\"}", uWS::OpCode::TEXT, true);
@@ -921,8 +907,6 @@ void worker_t::work()
                 std::string body = payload.str(); 
                 
                 sendHTTPSPOSTRequestFireAndForget(
-                    io_context,
-                    ssl_context,
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
@@ -947,7 +931,7 @@ void worker_t::work()
             ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
         }
     },
-    .close = [&io_context, &ssl_context](auto *ws, int code, std::string_view message) {
+    .close = [](auto *ws, int code, std::string_view message) {
         std::string rid = ws->getUserData()->rid;
         globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
         topics[rid]--;
@@ -989,8 +973,6 @@ void worker_t::work()
             std::string body = payload.str(); 
             
             sendHTTPSPOSTRequestFireAndForget(
-                io_context,
-                ssl_context,
                 UserData::getInstance().webHookBaseUrl,
                 UserData::getInstance().webhookPath,
                 body,
