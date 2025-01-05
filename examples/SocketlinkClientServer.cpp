@@ -412,9 +412,6 @@ void sendHTTPSPOSTRequestFireAndForget(
         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
 
         if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {      
-
-            std::cout << "Creating new socket" << std::endl;
-
             ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
 
             /** Specify the endpoint using the IP address and port. 
@@ -471,14 +468,12 @@ void sendHTTPSPOSTRequestFireAndForget(
     } catch (const boost::system::system_error& e) {
         if (e.code() == boost::asio::error::broken_pipe) {
             /** broken pipe error, resending */
-            std::cout << "Broken pipe error, retrying" << std::endl;
             ssl_socket = nullptr;  
 
             /** dangerous retry */
             sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);
         }else if (e.code() == boost::asio::error::connection_reset) {
             /** connection reset by peer */
-            std::cout << "Connection reset by peer, retrying" << std::endl;
             ssl_socket = nullptr;
 
             /** dangerous retry */
