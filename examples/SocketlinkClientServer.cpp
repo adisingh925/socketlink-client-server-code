@@ -43,19 +43,49 @@ constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 /**
  * webhooks
  */
-enum class Webhooks : uint16_t
+enum class Webhooks : uint32_t
 {
-    ON_CONNECTION_UPGRADE_REJECTED = 1 << 0,   // 1 (binary 00000001)
-    ON_CONNECTION_OPEN = 1 << 1,               // 2 (binary 00000010)
-    ON_CONNECTION_CLOSE = 1 << 2,              // 4 (binary 00000100)
-    ON_MESSAGE = 1 << 3,                       // 8 (binary 00001000)
-    ON_RATE_LIMIT_EXCEEDED = 1 << 4,           // 16 (binary 00010000)
-    ON_RATE_LIMIT_LIFTED = 1 << 5,             // 32 (binary 00100000)
-    ON_MESSAGE_DROPPED = 1 << 6,               // 64 (binary 01000000)
-    ON_DAILY_MESSAGE_LIMIT_EXHAUSTED = 1 << 7, // 128 (binary 10000000)
-    ON_MESSAGE_SIZE_EXCEEDED = 1 << 8,         // 256 (binary 100000000)
-    ON_MAX_CONNECTION_LIMIT_REACHED = 1 << 9,  // 512 (binary 0000001000000000)
-    ON_VERIFICATION_REQUEST = 1 << 10          // 1024 (binary 00000010000000000)
+    ON_CONNECTION_UPGRADE_REJECTED = 1 << 0,            // 1 (binary 00000001)
+    ON_CONNECTION_OPEN = 1 << 1,                        // 2 (binary 00000010)
+    ON_CONNECTION_CLOSE = 1 << 2,                       // 4 (binary 00000100)
+    ON_MESSAGE = 1 << 3,                                // 8 (binary 00001000)
+
+    /** Message events in different room types */
+    ON_MESSAGE_PUBLIC_ROOM = 1 << 4,                    // 16 (binary 00010000)
+    ON_MESSAGE_PRIVATE_ROOM = 1 << 5,                   // 32 (binary 00100000)
+    ON_MESSAGE_PRIVATE_STATE_ROOM = 1 << 6,             // 64 (binary 01000000)
+    ON_MESSAGE_PUBLIC_STATE_ROOM = 1 << 7,              // 128 (binary 10000000)
+
+    /** common webhooks */
+    ON_RATE_LIMIT_EXCEEDED = 1 << 8,                    // 256 (binary 100000000)
+    ON_RATE_LIMIT_LIFTED = 1 << 9,                      // 512 (binary 1000000000)
+    ON_MESSAGE_DROPPED = 1 << 10,                       // 1024 (binary 10000000000)
+    ON_DAILY_MESSAGE_LIMIT_EXHAUSTED = 1 << 11,         // 2048 (binary 100000000000)
+    ON_MESSAGE_SIZE_EXCEEDED = 1 << 12,                 // 4096 (binary 1000000000000)
+    ON_MAX_CONNECTION_LIMIT_REACHED = 1 << 13,          // 8192 (binary 10000000000000)
+    ON_VERIFICATION_REQUEST = 1 << 14,                  // 16384 (binary 100000000000000)
+
+    /** Connection open/close events in different room types */
+    ON_CONNECTION_OPEN_PUBLIC_ROOM = 1 << 15,           // 32768 (binary 100000000000000)
+    ON_CONNECTION_OPEN_PRIVATE_ROOM = 1 << 16,          // 65536 (binary 1000000000000000)
+    ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM = 1 << 17,    // 131072 (binary 10000000000000000)
+    ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM = 1 << 18,     // 262144 (binary 100000000000000000)
+
+    ON_CONNECTION_CLOSE_PUBLIC_ROOM = 1 << 19,          // 524288 (binary 100000000000000000)
+    ON_CONNECTION_CLOSE_PRIVATE_ROOM = 1 << 20,         // 1048576 (binary 1000000000000000000)
+    ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM = 1 << 21,   // 2097152 (binary 10000000000000000000)
+    ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM = 1 << 22,    // 4194304 (binary 100000000000000000000)
+
+    /** Room occupied/vacated events */
+    ON_ROOM_OCCUPIED_PUBLIC_ROOM = 1 << 23,             // 8388608 (binary 1000000000000000000000)
+    ON_ROOM_OCCUPIED_PRIVATE_ROOM = 1 << 24,            // 16777216 (binary 10000000000000000000000)
+    ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM = 1 << 25,      // 33554432 (binary 100000000000000000000000)
+    ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM = 1 << 26,       // 67108864 (binary 1000000000000000000000000)
+
+    ON_ROOM_VACATED_PUBLIC_ROOM = 1 << 27,              // 134217728 (binary 10000000000000000000000000)
+    ON_ROOM_VACATED_PRIVATE_ROOM = 1 << 28,             // 268435456 (binary 100000000000000000000000000)
+    ON_ROOM_VACATED_PRIVATE_STATE_ROOM = 1 << 29,       // 536870912 (binary 1000000000000000000000000000)
+    ON_ROOM_VACATED_PUBLIC_STATE_ROOM = 1 << 30         // 1073741824 (binary 10000000000000000000000000000)
 };
 
 struct HTTPResponse {
@@ -374,46 +404,61 @@ void sendHTTPSPOSTRequestFireAndForget(
     const std::map<std::string, std::string>& headers = {}
 ) {
     try {
-        /** Disable certificate verification if needed */ 
+        /** Disable SSL certificate verification if needed. 
+         *  This is insecure and should only be used for testing purposes. */
         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
 
+        /** Create an SSL socket with RAII management. */
         boost::asio::ssl::stream<boost::asio::ip::tcp::socket> ssl_socket(io_context, ssl_context);
 
-        /** Form the endpoint directly from IP and port */ 
+        /** Specify the endpoint using the IP address and port. 
+         *  Ensure the IP address is correctly formatted. */
         boost::asio::ip::tcp::endpoint endpoint(
             boost::asio::ip::make_address("167.71.239.154"),
             443
         );
 
+        /** Establish a connection to the endpoint. */
         ssl_socket.lowest_layer().connect(endpoint);
+
+        /** Perform the SSL handshake. */
         ssl_socket.handshake(boost::asio::ssl::stream_base::client);
 
+        /** Enable the TCP no-delay option to minimize latency. */
         boost::asio::ip::tcp::no_delay option(true);
         ssl_socket.lowest_layer().set_option(option);
 
-        std::ostringstream request_stream;
-        request_stream << "POST " << path << " HTTP/1.1\r\n"
-        << "Host: " << baseURL << "\r\n"
-        << "Connection: close\r\n"
-        << "Content-Type: application/json\r\n";
+        /** Prepare a buffer for the HTTP request using boost::asio::streambuf. 
+         *  This ensures efficient memory management. */
+        boost::asio::streambuf request_buffer;
+        std::ostream request_stream(&request_buffer);
 
+        /** Construct the HTTP request headers. */
+        request_stream << "POST " << path << " HTTP/1.1\r\n"
+                       << "Host: " << baseURL << "\r\n"
+                       << "Connection: close\r\n"
+                       << "Content-Type: application/json\r\n";
+
+        /** Add any custom headers provided as a map. */
         for (const auto& header : headers) {
             request_stream << header.first << ": " << header.second << "\r\n";
         }
 
+        /** Specify the content length and finalize the headers. */
         request_stream << "Content-Length: " << body.size() << "\r\n"
-        << "\r\n";  
+                       << "\r\n";
 
-        /** Convert headers to a buffer and send them */ 
-        std::string request_headers = request_stream.str();
-        boost::asio::write(ssl_socket, boost::asio::buffer(request_headers));
+        /** Send the request headers over the SSL socket. */
+        boost::asio::write(ssl_socket, request_buffer);
 
-        /** Now write the body using boost::asio::buffer to avoid extra copy */ 
+        /** Send the request body over the SSL socket. */
         boost::asio::write(ssl_socket, boost::asio::buffer(body));
 
+        /** Properly shut down and close the connection. */
         ssl_socket.lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
         ssl_socket.lowest_layer().close();
     } catch (const std::exception& e) {
+        /** Catch and log any exceptions that occur. */
         std::cerr << "Error: " << e.what() << std::endl;
     }
 }
@@ -739,6 +784,8 @@ void worker_t::work()
 
         /** fire connection open webhook */
         if(webhookStatus[Webhooks::ON_CONNECTION_OPEN] == 1){
+            std::cout << "ON_CONNECTION_OPEN" << std::endl;
+
             std::ostringstream payload;
             payload << "{\"event\":\"ON_CONNECTION_OPEN\", "
             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
