@@ -828,14 +828,12 @@ void worker_t::work()
                 payload << "{\"event\":\"ON_MAX_CONNECTION_LIMIT_REACHED\"}";
                 std::string body = payload.str();
 
-                /* sendHTTPSPOSTRequestFireAndForget(
-                    io_context,
-                    ssl_context,
+                sendHTTPSPOSTRequestFireAndForget(
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
                     {}
-                ); */
+                );
             }
         }
     },
@@ -850,14 +848,12 @@ void worker_t::work()
                 << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msg_size_allowed_in_bytes << "\"}";            
                 std::string body = payload.str(); 
                 
-                /* sendHTTPSPOSTRequestFireAndForget(
-                    io_context,
-                    ssl_context,
+                sendHTTPSPOSTRequestFireAndForget(
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
                     {}
-                ); */
+                );
             }
         }
         else if (ws->getUserData()->sendingAllowed)
@@ -871,14 +867,12 @@ void worker_t::work()
                     payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
                     std::string body = payload.str(); 
                     
-                    /* sendHTTPSPOSTRequestFireAndForget(
-                        io_context,
-                        ssl_context,
+                    sendHTTPSPOSTRequestFireAndForget(
                         UserData::getInstance().webHookBaseUrl,
                         UserData::getInstance().webhookPath,
                         body,
                         {}
-                    ); */
+                    );
                 }
             } else {
                 if (UserData::getInstance().msg_per_day == -1 ? true : globalMessagesSent.load(std::memory_order_relaxed) < UserData::getInstance().msg_per_day) {
@@ -913,14 +907,12 @@ void worker_t::work()
                         << "\"message\":\"" << message << "\"}";           
                         std::string body = payload.str(); 
                         
-                        /* sendHTTPSPOSTRequestFireAndForget(
-                            io_context,
-                            ssl_context,
+                        sendHTTPSPOSTRequestFireAndForget(
                             UserData::getInstance().webHookBaseUrl,
                             UserData::getInstance().webhookPath,
                             body,
                             {}
-                        ); */
+                        );
                     }
                 } else {
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
@@ -936,14 +928,12 @@ void worker_t::work()
                         << "\"msg_per_day\":\"" << UserData::getInstance().msg_per_day << "\"}";              
                         std::string body = payload.str(); 
                         
-                        /* sendHTTPSPOSTRequestFireAndForget(
-                            io_context,
-                            ssl_context,
+                        sendHTTPSPOSTRequestFireAndForget(
                             UserData::getInstance().webHookBaseUrl,
                             UserData::getInstance().webhookPath,
                             body,
                             {}
-                        ); */
+                        );
                     }
                 }
             }
@@ -962,14 +952,12 @@ void worker_t::work()
             << "\"message\":\"" << message << "\"}";           
             std::string body = payload.str(); 
             
-            /* sendHTTPSPOSTRequestFireAndForget(
-                io_context,
-                ssl_context,
+            sendHTTPSPOSTRequestFireAndForget(
                 UserData::getInstance().webHookBaseUrl,
                 UserData::getInstance().webhookPath,
                 body,
                 {}
-            ); */
+            );
         }
     },
     .drain = [](auto *ws) {
@@ -981,14 +969,12 @@ void worker_t::work()
                 payload << "{\"event\":\"ON_RATE_LIMIT_LIFTED\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
                 std::string body = payload.str(); 
                 
-                /* sendHTTPSPOSTRequestFireAndForget(
-                    io_context,
-                    ssl_context,
+                sendHTTPSPOSTRequestFireAndForget(
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
                     {}
-                ); */
+                );
             }
         }
     },
@@ -1049,14 +1035,12 @@ void worker_t::work()
      
             std::string body = payload.str(); 
             
-            /* sendHTTPSPOSTRequestFireAndForget(
-                io_context,
-                ssl_context,
+            sendHTTPSPOSTRequestFireAndForget(
                 UserData::getInstance().webHookBaseUrl,
                 UserData::getInstance().webhookPath,
                 body,
                 {}
-            ); */
+            );
         }
     }
   }).get("/api/v1/metrics", [](auto *res, auto *req) {
