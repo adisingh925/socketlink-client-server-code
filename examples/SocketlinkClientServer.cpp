@@ -1249,6 +1249,19 @@ void worker_t::work()
             }
         } else {
             ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
+
+            if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
+                std::ostringstream payload;
+                payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
+                std::string body = payload.str(); 
+                
+                sendHTTPSPOSTRequestFireAndForget(
+                    UserData::getInstance().webHookBaseUrl,
+                    UserData::getInstance().webhookPath,
+                    body,
+                    {}
+                );
+            }
         }       
     },
     .dropped = [](auto *ws, std::string_view message, uWS::OpCode /*opCode*/) {
@@ -1274,6 +1287,7 @@ void worker_t::work()
         if(ws->getBufferedAmount() < 2 * 1024 * 1024){
             ws->getUserData()->sendingAllowed = true;
             ws->send("{\"event\":\"RATE_LIMIT_LIFTED\"}", uWS::OpCode::TEXT, true);
+            
             if(webhookStatus[Webhooks::ON_RATE_LIMIT_LIFTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_RATE_LIMIT_LIFTED\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
