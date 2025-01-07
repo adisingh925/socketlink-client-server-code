@@ -47,46 +47,46 @@ constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 enum class Webhooks : uint32_t
 {
     /** Connection-related events */
-    ON_CONNECTION_UPGRADE_REJECTED = 1 << 0, // 1 (binary 00000001)
+    ON_CONNECTION_UPGRADE_REJECTED = 1 << 0,            // 1 (binary 00000001)
 
     /** Message-related events */
-    ON_MESSAGE_PUBLIC_ROOM = 1 << 1,        // 2 (binary 00000010)
-    ON_MESSAGE_PRIVATE_ROOM = 1 << 2,       // 4 (binary 00000100)
-    ON_MESSAGE_PRIVATE_STATE_ROOM = 1 << 3, // 8 (binary 00001000)
-    ON_MESSAGE_PUBLIC_STATE_ROOM = 1 << 4,  // 16 (binary 00010000)
+    ON_MESSAGE_PUBLIC_ROOM = 1 << 1,                    // 2 (binary 00000010)
+    ON_MESSAGE_PRIVATE_ROOM = 1 << 2,                   // 4 (binary 00000100)
+    ON_MESSAGE_PRIVATE_STATE_ROOM = 1 << 3,             // 8 (binary 00001000)
+    ON_MESSAGE_PUBLIC_STATE_ROOM = 1 << 4,              // 16 (binary 00010000)
 
     /** Common webhooks */
-    ON_RATE_LIMIT_EXCEEDED = 1 << 5,           // 32 (binary 00100000)
-    ON_RATE_LIMIT_LIFTED = 1 << 6,             // 64 (binary 01000000)
-    ON_MESSAGE_DROPPED = 1 << 7,               // 128 (binary 10000000)
-    ON_DAILY_MESSAGE_LIMIT_EXHAUSTED = 1 << 8, // 256 (binary 100000000)
-    ON_MESSAGE_SIZE_EXCEEDED = 1 << 9,         // 512 (binary 1000000000)
-    ON_MAX_CONNECTION_LIMIT_REACHED = 1 << 10, // 1024 (binary 10000000000)
-    ON_VERIFICATION_REQUEST = 1 << 11,         // 2048 (binary 100000000000)
+    ON_RATE_LIMIT_EXCEEDED = 1 << 5,                    // 32 (binary 00100000)
+    ON_RATE_LIMIT_LIFTED = 1 << 6,                      // 64 (binary 01000000)
+    ON_MESSAGE_DROPPED = 1 << 7,                        // 128 (binary 10000000)
+    ON_DAILY_MESSAGE_LIMIT_EXHAUSTED = 1 << 8,          // 256 (binary 100000000)
+    ON_MESSAGE_SIZE_EXCEEDED = 1 << 9,                  // 512 (binary 1000000000)
+    ON_MAX_CONNECTION_LIMIT_REACHED = 1 << 10,          // 1024 (binary 10000000000)
+    ON_VERIFICATION_REQUEST = 1 << 11,                  // 2048 (binary 100000000000)
 
     /** Connection open events */
-    ON_CONNECTION_OPEN_PUBLIC_ROOM = 1 << 12,        // 4096 (binary 10000000000000)
-    ON_CONNECTION_OPEN_PRIVATE_ROOM = 1 << 13,       // 8192 (binary 100000000000000)
-    ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM = 1 << 14, // 16384 (binary 1000000000000000)
-    ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM = 1 << 15,  // 32768 (binary 10000000000000000)
+    ON_CONNECTION_OPEN_PUBLIC_ROOM = 1 << 12,           // 4096 (binary 10000000000000)
+    ON_CONNECTION_OPEN_PRIVATE_ROOM = 1 << 13,          // 8192 (binary 100000000000000)
+    ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM = 1 << 14,    // 16384 (binary 1000000000000000)
+    ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM = 1 << 15,     // 32768 (binary 10000000000000000)
 
     /** Connection close events */
-    ON_CONNECTION_CLOSE_PUBLIC_ROOM = 1 << 16,        // 65536 (binary 100000000000000000)
-    ON_CONNECTION_CLOSE_PRIVATE_ROOM = 1 << 17,       // 131072 (binary 1000000000000000000)
-    ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM = 1 << 18, // 262144 (binary 10000000000000000000)
-    ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM = 1 << 19,  // 524288 (binary 100000000000000000000)
+    ON_CONNECTION_CLOSE_PUBLIC_ROOM = 1 << 16,          // 65536 (binary 100000000000000000)
+    ON_CONNECTION_CLOSE_PRIVATE_ROOM = 1 << 17,         // 131072 (binary 1000000000000000000)
+    ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM = 1 << 18,   // 262144 (binary 10000000000000000000)
+    ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM = 1 << 19,    // 524288 (binary 100000000000000000000)
 
     /** Room occupied events */
-    ON_ROOM_OCCUPIED_PUBLIC_ROOM = 1 << 20,        // 1048576 (binary 1000000000000000000000)
-    ON_ROOM_OCCUPIED_PRIVATE_ROOM = 1 << 21,       // 2097152 (binary 10000000000000000000000)
-    ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM = 1 << 22, // 4194304 (binary 100000000000000000000000)
-    ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM = 1 << 23,  // 8388608 (binary 1000000000000000000000000)
+    ON_ROOM_OCCUPIED_PUBLIC_ROOM = 1 << 20,             // 1048576 (binary 1000000000000000000000)
+    ON_ROOM_OCCUPIED_PRIVATE_ROOM = 1 << 21,            // 2097152 (binary 10000000000000000000000)
+    ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM = 1 << 22,      // 4194304 (binary 100000000000000000000000)
+    ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM = 1 << 23,       // 8388608 (binary 1000000000000000000000000)
 
     /** Room vacated events */
-    ON_ROOM_VACATED_PUBLIC_ROOM = 1 << 24,        // 16777216 (binary 10000000000000000000000000)
-    ON_ROOM_VACATED_PRIVATE_ROOM = 1 << 25,       // 33554432 (binary 100000000000000000000000000)
-    ON_ROOM_VACATED_PRIVATE_STATE_ROOM = 1 << 26, // 67108864 (binary 1000000000000000000000000000)
-    ON_ROOM_VACATED_PUBLIC_STATE_ROOM = 1 << 27   // 134217728 (binary 10000000000000000000000000000)
+    ON_ROOM_VACATED_PUBLIC_ROOM = 1 << 24,              // 16777216 (binary 10000000000000000000000000)
+    ON_ROOM_VACATED_PRIVATE_ROOM = 1 << 25,             // 33554432 (binary 100000000000000000000000000)
+    ON_ROOM_VACATED_PRIVATE_STATE_ROOM = 1 << 26,       // 67108864 (binary 1000000000000000000000000000)
+    ON_ROOM_VACATED_PUBLIC_STATE_ROOM = 1 << 27         // 134217728 (binary 10000000000000000000000000000)
 };
 
 constexpr uint8_t PUBLIC_ROOM = 0;
@@ -405,6 +405,7 @@ thread_local boost::asio::io_context io_context;                                
 thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);                     // Thread-local ssl_context
 thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr; // Thread-local ssl_socket
 
+/** send a FIRE-AND-FOREGET http post request for webhook */
 void sendHTTPSPOSTRequestFireAndForget(
     const std::string& baseURL, 
     const std::string& path, 
@@ -586,6 +587,8 @@ struct PerSocketData {
     bool sendingAllowed = true;
 };
 
+constexpr const int USER_BANNED_ERROR_CODE = 3001;
+
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
@@ -639,19 +642,23 @@ void worker_t::work()
         /**
          * check if user is banned
          */
-        if(bannedConnections.find(upgradeData->uid) != bannedConnections.end()){
+        if(bannedConnections.find(upgradeData->uid) != bannedConnections.end()) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end(YOU_HAVE_BEEN_BANNED);
+
+            std::ostringstream payload;
+            payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                    << "\"code\":3001, "  
+                    << "\"uid\":\"" << upgradeData->uid << "\", "
+                    << "\"rid\":\"" << upgradeData->rid << "\", "
+                    << "\"message\":\"CONNECTION_BANNED\"}";
+
+            std::string body = payload.str(); 
+
+            res->writeStatus("403 Forbidden");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(body);
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                        << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"CONNECTION_BANNED\"}";
-
-                std::string body = payload.str(); 
-                
                 sendHTTPSPOSTRequestFireAndForget(
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
@@ -718,33 +725,6 @@ void worker_t::work()
         }
 
         /**
-         * API key should be 67 characters long
-         */
-        if(upgradeData->key.length() != 67) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end(API_KEY_INVALID);
-
-            if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                        << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"INVALID_API_KEY\"}";
-
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            }
-
-            return;
-        }
-
-        /**
          * Check if API key is valid or not
          */
         if(UserData::getInstance().clientApiKey != upgradeData->key){
@@ -771,7 +751,7 @@ void worker_t::work()
             return;
         }
 
-        int roomType = 0;
+        int roomType = -1;
 
         /**
          * Max rid size is 160 characters
@@ -1287,7 +1267,7 @@ void worker_t::work()
         if(ws->getBufferedAmount() < 2 * 1024 * 1024){
             ws->getUserData()->sendingAllowed = true;
             ws->send("{\"event\":\"RATE_LIMIT_LIFTED\"}", uWS::OpCode::TEXT, true);
-            
+
             if(webhookStatus[Webhooks::ON_RATE_LIMIT_LIFTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_RATE_LIMIT_LIFTED\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
