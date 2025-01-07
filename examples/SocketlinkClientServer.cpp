@@ -594,7 +594,7 @@ struct PerSocketData {
  * UID_ALREADY_EXIST - 3002
  * CONNECTION_LIMIT_REACHED - 3003
  * INVALID_API_KEY - 3004
- * INVALID_ROOM_NAME_LENGTH - 3005
+ * INVALID_ROOM_ID_LENGTH - 3005
  * INVALID_ROOM_TYPE - 3006
  * ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED - 3007
  * 
@@ -761,7 +761,7 @@ void worker_t::work()
                         << "\"code\":3004, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"Your API key is invalid.\"}";
+                        << "\"message\":\"The API key is invalid.\"}";
 
                 std::string body = payload.str(); 
                 
@@ -781,16 +781,16 @@ void worker_t::work()
          */
         if(upgradeData->rid.length() > 160 || upgradeData->rid.length() <= 0){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end("INVALID_ROOM_NAME_LENGTH");
+            res->writeStatus("403 Forbidden")->end("INVALID_ROOM_ID_LENGTH");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                        << "\"trigger\":\"INVALID_ROOM_NAME_LENGTH\", "  
+                        << "\"trigger\":\"INVALID_ROOM_ID_LENGTH\", "  
                         << "\"code\":3005, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"The maximum room name length allowed is 160 characters.\"}";
+                        << "\"message\":\"The room id length should be between 1 to 160 characters.\"}";
 
                 std::string body = payload.str(); 
                 
