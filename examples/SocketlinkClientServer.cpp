@@ -587,7 +587,26 @@ struct PerSocketData {
     bool sendingAllowed = true;
 };
 
-constexpr const int USER_BANNED_ERROR_CODE = 3001;
+/**
+ * HTTP Webhook Error Codes
+ * 
+ * CONNECTION_BANNED - 3001
+ * UID_ALREADY_EXIST - 3002
+ * CONNECTION_LIMIT_REACHED - 3003
+ * INVALID_API_KEY - 3004
+ * INVALID_ROOM_NAME_LENGTH - 3005
+ * INVALID_ROOM_TYPE - 3006
+ * ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED - 3007
+ * 
+ * Verification Codes
+ * 
+ * INIT
+ * 
+ * INIT_PRIVATE_ROOM_VERIFICATION - 4001
+ * INIT_PRIVATE_STATE_ROOM_VERIFICATION - 4002
+ * 
+ * 
+ */
 
 /* uWebSocket worker thread function. */
 void worker_t::work()
@@ -640,25 +659,25 @@ void worker_t::work()
         });
 
         /**
-         * check if user is banned
+         * Check if the user is banned and reject the connection
          */
-        if(bannedConnections.find(upgradeData->uid) != bannedConnections.end()) {
+        if(bannedConnections.find(upgradeData->uid) != bannedConnections.end()){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                    << "\"code\":3001, "  
-                    << "\"uid\":\"" << upgradeData->uid << "\", "
-                    << "\"rid\":\"" << upgradeData->rid << "\", "
-                    << "\"message\":\"CONNECTION_BANNED\"}";
-
-            std::string body = payload.str(); 
-
             res->writeStatus("403 Forbidden");
             res->writeHeader("Content-Type", "application/json");
-            res->end(body);
+            res->end("CONNECTION_BANNED");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
+                std::ostringstream payload;
+                payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                        << "\"trigger\":\"CONNECTION_BANNED\", "  
+                        << "\"code\":3001, "
+                        << "\"uid\":\"" << upgradeData->uid << "\", "
+                        << "\"rid\":\"" << upgradeData->rid << "\", "
+                        << "\"message\":\"This connection is banned by the admin.\"}";
+
+                std::string body = payload.str(); 
+                
                 sendHTTPSPOSTRequestFireAndForget(
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
@@ -675,14 +694,16 @@ void worker_t::work()
          */
         if(uid.find(upgradeData->uid) != uid.end()){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end(ACCESS_DENIED);
+            res->writeStatus("403 Forbidden")->end("UID_ALREADY_EXIST");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                        << "\"trigger\":\"UID_ALREADY_EXIST\", "  
+                        << "\"code\":3002, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"UID_ALREADY_EXIST\"}";
+                        << "\"message\":\"There is already a connection using this UID.\"}";
 
                 std::string body = payload.str(); 
                 
@@ -702,14 +723,16 @@ void worker_t::work()
          */
         if (globalConnectionCounter.load(std::memory_order_relaxed) >= UserData::getInstance().connections) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end(CONNECTION_LIMIT_EXCEEDED);
+            res->writeStatus("403 Forbidden")->end("CONNECTION_LIMIT_REACHED");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                        << "\"trigger\":\"CONNECTION_LIMIT_REACHED\", "  
+                        << "\"code\":3003, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"CONNECTION_LIMIT_EXCEEDED\"}";
+                        << "\"message\":\"You have reached the max limit of allowed connections.\"}";
 
                 std::string body = payload.str(); 
                 
@@ -729,14 +752,16 @@ void worker_t::work()
          */
         if(UserData::getInstance().clientApiKey != upgradeData->key){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end(API_KEY_INVALID);
+            res->writeStatus("403 Forbidden")->end("INVALID_API_KEY");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                        << "\"trigger\":\"INVALID_API_KEY\", "  
+                        << "\"code\":3004, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"INVALID_API_KEY\"}";
+                        << "\"message\":\"Your API key is invalid.\"}";
 
                 std::string body = payload.str(); 
                 
@@ -750,22 +775,22 @@ void worker_t::work()
 
             return;
         }
-
-        int roomType = -1;
 
         /**
          * Max rid size is 160 characters
          */
         if(upgradeData->rid.length() > 160 || upgradeData->rid.length() <= 0){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end(ROOM_NAME_INVALID);
+            res->writeStatus("403 Forbidden")->end("INVALID_ROOM_NAME_LENGTH");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                        << "\"trigger\":\"INVALID_ROOM_NAME_LENGTH\", "  
+                        << "\"code\":3005, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"INVALID_ROOM_NAME\"}";
+                        << "\"message\":\"The maximum room name length allowed is 160 characters.\"}";
 
                 std::string body = payload.str(); 
                 
@@ -779,6 +804,8 @@ void worker_t::work()
 
             return;
         }
+
+        uint8_t roomType = -1;
 
         /**
          * rid name should start with "pub" or "pri"
@@ -802,14 +829,16 @@ void worker_t::work()
         else
         {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end(ROOM_NAME_INVALID);
+            res->writeStatus("403 Forbidden")->end("INVALID_ROOM_TYPE");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                        << "\"trigger\":\"INVALID_ROOM_TYPE\", "  
+                        << "\"code\":3006, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"INVALID_ROOM_NAME\"}";
+                        << "\"message\":\"The provided room type is invalid.\"}";
 
                 std::string body = payload.str(); 
                 
@@ -827,9 +856,21 @@ void worker_t::work()
         if(roomType == PRIVATE_ROOM || roomType == PRIVATE_STATE_ROOM){
             if(webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1){
                 std::ostringstream payload;
-                payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                << "\"uid\":\"" << upgradeData->uid << "\", "
-                << "\"rid\":\"" << upgradeData->rid << "\"}";            
+
+                if(roomType == PRIVATE_ROOM){
+                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                            << "\"trigger\":\"INIT_PRIVATE_ROOM_VERIFICATION\", "
+                            << "\"code\":4001, "
+                            << "\"uid\":\"" << upgradeData->uid << "\", "
+                            << "\"rid\":\"" << upgradeData->rid << "\"}";
+                } else {
+                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                            << "\"trigger\":\"INIT_PRIVATE_STATE_ROOM_VERIFICATION\", "
+                            << "\"code\":4002, "
+                            << "\"uid\":\"" << upgradeData->uid << "\", "
+                            << "\"rid\":\"" << upgradeData->rid << "\"}";
+                }
+
                 std::string body = payload.str(); 
                 
                 int status = sendHTTPSPOSTRequest(
@@ -841,19 +882,21 @@ void worker_t::work()
 
                 if(status != 200){
                     totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                    res->writeStatus("403 Forbidden")->end(ACCESS_DENIED);
+                    res->writeStatus("403 Forbidden")->end("ACCESS_DENIED");
                     return;
                 }
             } else {
                 totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                res->writeStatus("403 Forbidden")->end(ACCESS_DENIED);
+                res->writeStatus("403 Forbidden")->end("ACCESS_DENIED");
 
                 if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                            << "\"trigger\":\"ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED\", "  
+                            << "\"code\":3007, "
                             << "\"uid\":\"" << upgradeData->uid << "\", "
                             << "\"rid\":\"" << upgradeData->rid << "\", "
-                            << "\"message\":\"ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED\"}";
+                            << "\"message\":\"Please enable ON_VERIFICATION_REQUEST webhook to use private rooms.\"}";
 
                     std::string body = payload.str(); 
                     
