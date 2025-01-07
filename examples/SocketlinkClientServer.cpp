@@ -150,7 +150,7 @@ public:
     std::string webHookBaseUrl;
     std::string webhookPath;
     std::string webhookSecret;
-    uint16_t webhooks;
+    uint32_t webhooks;
 
     /** Public static method to get the single instance */ 
     static UserData& getInstance() {
@@ -335,12 +335,12 @@ public:
 };
 
 /** Function to populate the global unordered_map with active (1) and inactive (0) statuses */
-void populateWebhookStatus(uint16_t bitmask)
+void populateWebhookStatus(uint32_t bitmask)
 {
     /** Clear the existing statuses in case this is called multiple times */
     webhookStatus.clear();
 
-    for (int i = 0; i < 28; ++i)
+    for (uint32_t i = 0; i < 28; ++i)
     {
         Webhooks webhook = static_cast<Webhooks>(1 << i);
         webhookStatus[webhook] = (bitmask & (1 << i)) ? 1 : 0;
@@ -525,7 +525,7 @@ void populateUserData(std::string data) {
     UserData::getInstance().msg_per_second_per_connection = parsedJson["msg_per_second_per_connection"].get<int>();
     UserData::getInstance().connections = parsedJson["connections"].get<int>();
     UserData::getInstance().msg_size_allowed_in_bytes = parsedJson["msg_size_allowed_in_bytes"].get<int>();
-    UserData::getInstance().webhooks = parsedJson["webhooks"].get<uint16_t>();
+    UserData::getInstance().webhooks = parsedJson["webhooks"].get<uint32_t>();
     UserData::getInstance().webHookBaseUrl = parsedJson["webhook_base_url"];
     UserData::getInstance().webhookPath = parsedJson["webhook_path"];
     UserData::getInstance().webhookSecret = parsedJson["webhook_secret"];
