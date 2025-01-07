@@ -1652,8 +1652,6 @@ void worker_t::work()
 
             if (last) { 
                 try {
-                    std::cout << body << std::endl;
-                    
                     /** Parse the JSON response */ 
                     populateUserData(body);
 
