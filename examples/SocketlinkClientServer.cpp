@@ -204,7 +204,8 @@ public:
     UserData& operator=(const UserData&) = delete;
 };
 
-constexpr size_t BATCH_SIZE = 1000;
+constexpr size_t BATCH_SIZE = 1000;  /** Batch size for writes */
+constexpr size_t MAX_MESSAGES_PER_ROOM = 1000000;  /** Maximum number of messages per room */
 
 void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content) {
     MDB_txn* txn;  
@@ -212,7 +213,7 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
 
     static std::vector<std::tuple<std::string, std::string>> batch;
 
-    // Collect writes in a batch
+    /** Collect writes in a batch */
     auto timestamp = std::chrono::system_clock::now().time_since_epoch();
     auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp).count();
     std::string timestamp_str = std::to_string(timestamp_ms);
@@ -220,23 +221,45 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
     std::string combined_key = timestamp_str + ":" + user_id;
     batch.push_back({combined_key, message_content});
 
+    /** Begin a new write transaction only when the batch size is reached */
     if (batch.size() >= BATCH_SIZE) {
-        // Begin a new write transaction only when the batch size is reached
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             std::cerr << "Failed to begin write transaction.\n";
             return;
         }
 
+        /** Open the database */
         if (mdb_dbi_open(txn, room_id.c_str(), MDB_CREATE, &dbi) != 0) {
             std::cerr << "Failed to open database.\n";
             mdb_txn_abort(txn);
             return;
         }
 
-        // Write the batch into the database
-        for (const auto& [key_str, value_str] : batch) {
-            MDB_val key, value;
+        /** Check the number of messages in the room */
+        MDB_val key, value;
+        key.mv_size = sizeof("message_count");
+        key.mv_data = (void*)"message_count";  /** Special key to track the number of messages */
 
+        int message_count = 0;
+
+        /** Fetch the current message count for the room */
+        if (mdb_get(txn, dbi, &key, &value) == 0) {
+            message_count = std::stoi(std::string((char*)value.mv_data, value.mv_size));
+        }
+
+        /** Check if we have exceeded the max message count */
+        if (message_count >= MAX_MESSAGES_PER_ROOM) {
+            /** Option 1: Remove the oldest message (if needed) */
+            /** Option 2: Reject the new message (you can choose to discard or handle it differently) */
+            std::cerr << "Room message limit reached. Discarding new message.\n";
+
+            /** Abort the transaction and return */
+            mdb_txn_abort(txn);
+            return;
+        }
+
+        /** Write the batch into the database */
+        for (const auto& [key_str, value_str] : batch) {
             key.mv_size = key_str.size();
             key.mv_data = (void*)key_str.data();
             value.mv_size = value_str.size();
@@ -249,13 +272,26 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
             }
         }
 
-        // Commit the transaction after the batch
+        /** Update the message count after writing the batch */
+        message_count += batch.size();
+        std::string message_count_str = std::to_string(message_count);
+        value.mv_size = message_count_str.size();
+        value.mv_data = (void*)message_count_str.data();
+
+        /** Put the updated message count back into the database */
+        if (mdb_put(txn, dbi, &key, &value, MDB_NOOVERWRITE) != 0) {
+            std::cerr << "Failed to update message count.\n";
+            mdb_txn_abort(txn);
+            return;
+        }
+
+        /** Commit the transaction after the batch */
         if (mdb_txn_commit(txn) != 0) {
             std::cerr << "Failed to commit transaction.\n";
             mdb_txn_abort(txn);
         }
 
-        // Clear the batch
+        /** Clear the batch */
         batch.clear();
         mdb_dbi_close(env, dbi);
     }
