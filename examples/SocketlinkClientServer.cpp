@@ -204,53 +204,61 @@ public:
     UserData& operator=(const UserData&) = delete;
 };
 
+constexpr size_t BATCH_SIZE = 1000;
+
 void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content) {
-    /** Lock the mutex to ensure that only one thread can write at a time */
-    std::lock_guard<std::mutex> lock(write_mutex);
+    MDB_txn* txn;  
+    MDB_dbi dbi;   
 
-    MDB_txn* txn;  /** Transaction handle */
-    MDB_dbi dbi;   /** Database handle */
+    static std::vector<std::tuple<std::string, std::string>> batch;
 
-    /** Begin a new write transaction */
-    if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-        std::cerr << "Failed to begin write transaction.\n";
-        return;
-    }
-
-    /** Open (or create) the main room database */
-    if (mdb_dbi_open(txn, room_id.c_str(), MDB_CREATE, &dbi) != 0) {
-        std::cerr << "Failed to open database.\n";
-        mdb_txn_abort(txn); /** Abort the transaction if database opening fails */
-        return;
-    }
-
-    MDB_val key, value;
-
-    /** Prepare the timestamp as the new message key */
+    // Collect writes in a batch
     auto timestamp = std::chrono::system_clock::now().time_since_epoch();
     auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp).count();
     std::string timestamp_str = std::to_string(timestamp_ms);
 
-    /** Create a combined key that includes user_id and timestamp */
     std::string combined_key = timestamp_str + ":" + user_id;
+    batch.push_back({combined_key, message_content});
 
-    /** Prepare the key-value pair for the new message */
-    key.mv_size = combined_key.size();
-    key.mv_data = (void*)combined_key.data();
-    value.mv_size = message_content.size();
-    value.mv_data = (void*)message_content.data();
+    if (batch.size() >= BATCH_SIZE) {
+        // Begin a new write transaction only when the batch size is reached
+        if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
+            std::cerr << "Failed to begin write transaction.\n";
+            return;
+        }
 
-    /** Write the new message into the room's database */
-    if (mdb_put(txn, dbi, &key, &value, 0) == 0) {
-        /** Commit the transaction if everything was successful */
-        mdb_txn_commit(txn);
-    } else {
-        std::cerr << "Write failed.\n";
-        mdb_txn_abort(txn); /** Abort the transaction if writing fails */
+        if (mdb_dbi_open(txn, room_id.c_str(), MDB_CREATE, &dbi) != 0) {
+            std::cerr << "Failed to open database.\n";
+            mdb_txn_abort(txn);
+            return;
+        }
+
+        // Write the batch into the database
+        for (const auto& [key_str, value_str] : batch) {
+            MDB_val key, value;
+
+            key.mv_size = key_str.size();
+            key.mv_data = (void*)key_str.data();
+            value.mv_size = value_str.size();
+            value.mv_data = (void*)value_str.data();
+
+            if (mdb_put(txn, dbi, &key, &value, 0) != 0) {
+                std::cerr << "Write failed.\n";
+                mdb_txn_abort(txn);
+                return;
+            }
+        }
+
+        // Commit the transaction after the batch
+        if (mdb_txn_commit(txn) != 0) {
+            std::cerr << "Failed to commit transaction.\n";
+            mdb_txn_abort(txn);
+        }
+
+        // Clear the batch
+        batch.clear();
+        mdb_dbi_close(env, dbi);
     }
-
-    /** Close the database handle */
-    mdb_dbi_close(env, dbi);
 }
 
 void read_worker(const std::string& room_id, int n) {
