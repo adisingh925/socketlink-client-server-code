@@ -203,15 +203,12 @@ public:
     UserData& operator=(const UserData&) = delete;
 };
 
-const int MAX_MESSAGES = 100; /** Max number of messages allowed in the database */
-
 void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content) {
     /** Lock the mutex to ensure that only one thread can write at a time */
     std::lock_guard<std::mutex> lock(write_mutex);
 
     MDB_txn* txn;  /** Transaction handle */
     MDB_dbi dbi;   /** Database handle */
-    MDB_dbi meta_dbi; /** Meta database for tracking message count */
 
     /** Begin a new write transaction */
     if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
@@ -226,41 +223,7 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
         return;
     }
 
-    /** Open the meta database for tracking message count */
-    if (mdb_dbi_open(txn, "_meta", MDB_CREATE, &meta_dbi) != 0) {
-        std::cerr << "Failed to open meta database.\n";
-        mdb_txn_abort(txn); /** Abort the transaction if opening meta database fails */
-        return;
-    }
-
     MDB_val key, value;
-
-    /** Check the current number of messages in the database */
-    key.mv_size = sizeof("count");
-    key.mv_data = (void*)"count";  /** Special key for storing the count of messages */
-    int message_count = 0;
-
-    if (mdb_get(txn, meta_dbi, &key, &value) == 0) {
-        message_count = *static_cast<int*>(value.mv_data);  /** Extract the current message count */
-    }
-
-    /** If the message count exceeds the limit, delete the oldest message */
-    if (message_count >= MAX_MESSAGES) {
-        /** Get the oldest message using a cursor */
-        MDB_cursor* cursor;
-        if (mdb_cursor_open(txn, dbi, &cursor) == 0) {
-            /** Retrieve the oldest message (the first entry in the cursor) */
-            if (mdb_cursor_get(cursor, &key, &value, MDB_FIRST) == 0) {
-                /** Remove the oldest message from the database */
-                if (mdb_del(txn, dbi, &key, nullptr) != 0) {
-                    std::cerr << "Failed to delete oldest message.\n";
-                }
-            }
-            mdb_cursor_close(cursor);  /** Close the cursor */
-        }
-        /** Decrease the message count */
-        message_count--;
-    }
 
     /** Prepare the timestamp as the new message key */
     auto timestamp = std::chrono::system_clock::now().time_since_epoch();
@@ -278,16 +241,6 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
 
     /** Write the new message into the room's database */
     if (mdb_put(txn, dbi, &key, &value, 0) == 0) {
-        /** Update the message count in the meta database */
-        message_count++;
-        value.mv_size = sizeof(message_count);
-        value.mv_data = &message_count;
-        if (mdb_put(txn, meta_dbi, &key, &value, 0) != 0) {
-            std::cerr << "Failed to update message count.\n";
-            mdb_txn_abort(txn);
-            return;
-        }
-
         /** Commit the transaction if everything was successful */
         mdb_txn_commit(txn);
     } else {
@@ -295,9 +248,8 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
         mdb_txn_abort(txn); /** Abort the transaction if writing fails */
     }
 
-    /** Close the database handles */
+    /** Close the database handle */
     mdb_dbi_close(env, dbi);
-    mdb_dbi_close(env, meta_dbi);
 }
 
 void read_worker(const std::string& room_id, int n) {
