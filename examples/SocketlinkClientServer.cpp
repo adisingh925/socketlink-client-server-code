@@ -209,15 +209,16 @@ public:
     UserData& operator=(const UserData&) = delete;
 };
 
-const std::chrono::milliseconds TIME_LIMIT(1000); /** 1 seconds in milliseconds. */
+std::mutex write_worker_mutex;
 
 void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content) {
-    static std::vector<std::tuple<std::string, std::string>> batch;
-    static auto last_commit_time = std::chrono::steady_clock::now(); /** Time of the last commit */
-    static bool is_first_message = true;
-
     MDB_txn* txn;
     MDB_dbi dbi;
+
+    /** Lock the mutex to ensure thread-safety for shared resources */ 
+    std::lock_guard<std::mutex> lock(write_worker_mutex);
+
+    static std::vector<std::tuple<std::string, std::string>> batch;
 
     /** Collect writes in a batch */
     auto timestamp = std::chrono::system_clock::now().time_since_epoch();
@@ -227,12 +228,9 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
     std::string combined_key = timestamp_str + ":" + user_id;
     batch.push_back({combined_key, message_content});
 
-    /** Check if the batch size has reached the limit or 5 seconds have passed since the last commit */
-    auto current_time = std::chrono::steady_clock::now();
-    bool time_to_commit = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_commit_time) >= TIME_LIMIT;
-    
-    if (batch.size() >= BATCH_SIZE || time_to_commit || is_first_message) {
-        /** Begin a new write transaction */
+    /** Begin a new write transaction only when the batch size is reached */
+    if (batch.size() >= BATCH_SIZE) {
+        /** Begin a new write transaction */ 
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             std::cerr << "Failed to begin write transaction.\n";
             return;
@@ -267,10 +265,8 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
             mdb_txn_abort(txn);
         }
 
-        /** Clear the batch and update the last commit time */
+        /** Clear the batch */
         batch.clear();
-        last_commit_time = current_time;
-        is_first_message = false;
         mdb_dbi_close(env, dbi);
     }
 }
