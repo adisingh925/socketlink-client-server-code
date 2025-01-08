@@ -83,6 +83,11 @@ constexpr const char* BROADCAST = "BROADCAST";
 constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 
 /**
+ * DB constants
+ */
+constexpr size_t BATCH_SIZE = 1000;  /** Batch size for writes */
+
+/**
  * webhooks
  */
 enum class Webhooks : uint32_t
@@ -204,13 +209,15 @@ public:
     UserData& operator=(const UserData&) = delete;
 };
 
-constexpr size_t BATCH_SIZE = 1000;  /** Batch size for writes */
+const std::chrono::milliseconds TIME_LIMIT(1000); /** 1 seconds in milliseconds. */
 
 void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content) {
-    MDB_txn* txn;  
-    MDB_dbi dbi;   
-
     static std::vector<std::tuple<std::string, std::string>> batch;
+    static auto last_commit_time = std::chrono::steady_clock::now(); /** Time of the last commit */
+    static bool is_first_message = true;
+
+    MDB_txn* txn;
+    MDB_dbi dbi;
 
     /** Collect writes in a batch */
     auto timestamp = std::chrono::system_clock::now().time_since_epoch();
@@ -220,8 +227,12 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
     std::string combined_key = timestamp_str + ":" + user_id;
     batch.push_back({combined_key, message_content});
 
-    /** Begin a new write transaction only when the batch size is reached */
-    if (batch.size() >= BATCH_SIZE) {
+    /** Check if the batch size has reached the limit or 5 seconds have passed since the last commit */
+    auto current_time = std::chrono::steady_clock::now();
+    bool time_to_commit = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_commit_time) >= TIME_LIMIT;
+    
+    if (batch.size() >= BATCH_SIZE || time_to_commit || is_first_message) {
+        /** Begin a new write transaction */
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             std::cerr << "Failed to begin write transaction.\n";
             return;
@@ -256,30 +267,34 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
             mdb_txn_abort(txn);
         }
 
-        /** Clear the batch */
+        /** Clear the batch and update the last commit time */
         batch.clear();
+        last_commit_time = current_time;
+        is_first_message = false;
         mdb_dbi_close(env, dbi);
     }
 }
 
-void read_worker(const std::string& room_id, int n) {
+using json = nlohmann::json;  /** Create an alias for the json object */
+
+std::string read_worker(const std::string& room_id, int n) {
     MDB_txn* txn;  /** Transaction handle */
     MDB_dbi dbi;   /** Database handle */
     MDB_cursor* cursor;  /** Cursor for iterating through the database */
 
-    std::cout << "Starting read_worker\n";
-
+    std::string result;  /** Output string to accumulate messages in JSON format */
+    
     /** Start a read-only transaction */
     if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
         std::cerr << "Failed to begin read transaction: " << mdb_strerror(errno) << "\n";
-        return;
+        return "";  /** Return empty string on failure */
     }
 
     /** Open the database for the specified room_id */
     if (mdb_dbi_open(txn, room_id.c_str(), 0, &dbi) != 0) {
         std::cerr << "Failed to open database: " << mdb_strerror(errno) << "\n";
         mdb_txn_abort(txn); /** Abort the transaction if opening the database fails */
-        return;
+        return "";  /** Return empty string on failure */
     }
 
     /** Open a cursor to iterate through the database */
@@ -287,7 +302,7 @@ void read_worker(const std::string& room_id, int n) {
         std::cerr << "Failed to open cursor: " << mdb_strerror(errno) << "\n";
         mdb_txn_abort(txn); /** Abort the transaction if opening the cursor fails */
         mdb_dbi_close(env, dbi); /** Close the database handle */
-        return;
+        return "";  /** Return empty string on failure */
     }
 
     MDB_val key, value;  /** Key-value pair to store the retrieved data */
@@ -296,18 +311,33 @@ void read_worker(const std::string& room_id, int n) {
     /** Start from the last message (most recent) */
     if (mdb_cursor_get(cursor, &key, &value, MDB_LAST) == 0) {
         /** Iterate backward (MDB_PREV) to get the previous messages */
+        result += "[\n";  // Start JSON array
         do {
-            /** Display the retrieved value (message) */
-            std::cout << "Read message: " << std::string((char*)value.mv_data, value.mv_size) << "\n";
+            /** Extract timestamp and user_id from the key */
+            std::string key_str((char*)key.mv_data, key.mv_size);
+            size_t colon_pos = key_str.find(':');
+            std::string timestamp_str = key_str.substr(0, colon_pos);
+            std::string user_id = key_str.substr(colon_pos + 1);
+
+            /** Create the message JSON inline */
+            result += "  {\n";
+            result += "    \"timestamp\": \"" + timestamp_str + "\",\n";
+            result += "    \"message\": \"" + std::string((char*)value.mv_data, value.mv_size) + "\",\n";
+            result += "    \"uid\": \"" + user_id + "\"\n";
+            result += "  }";
+            
             messages_read++; /** Increment the message counter */
 
-            /** Stop if we have read `n` messages */
+            /** If we have read `n` messages, stop */
             if (messages_read >= n) {
                 break;
             }
 
-        /** Move to the previous message using MDB_PREV */
+            result += ",\n";  // Add comma between messages if not last
+
         } while (mdb_cursor_get(cursor, &key, &value, MDB_PREV) == 0);
+
+        result += "\n]";  // End JSON array
     } else {
         std::cerr << "Failed to read the last message: " << mdb_strerror(errno) << "\n";
     }
@@ -321,7 +351,8 @@ void read_worker(const std::string& room_id, int n) {
     mdb_cursor_close(cursor);
     mdb_dbi_close(env, dbi);
 
-    std::cout << "Read operation completed.\n";
+    /** Return the JSON string */
+    return result;  /** Return the JSON formatted string */
 }
 
 class FileWriter {
@@ -700,7 +731,6 @@ void populateUserData(std::string data) {
 void fetchAndPopulateUserData() {
     try {
         std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        // std::string dropletId = "468316038";
 
         /** Headers for the HTTP request */ 
         httplib::Headers headers = {
@@ -2015,6 +2045,25 @@ void worker_t::work()
         res->writeStatus("200 OK");
         res->writeHeader("Content-Type", "application/json");
         res->end(json_response.dump());  
+	}).get("/api/v1/messages/room/:rid", [this](auto *res, auto *req) {
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        std::string_view rid = req->getParameter("rid");
+        std::string_view apiKey = req->getHeader("api-key");
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            return;
+        }
+
+        res->writeStatus("200 OK");
+        res->writeHeader("Content-Type", "application/json");
+        res->end(read_worker(std::string(rid), 10));  
 	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
         res->writeStatus("200 OK");
 	    res->end("pong!");
