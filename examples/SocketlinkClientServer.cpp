@@ -205,7 +205,6 @@ public:
 };
 
 constexpr size_t BATCH_SIZE = 1000;  /** Batch size for writes */
-constexpr size_t MAX_MESSAGES_PER_ROOM = 1000000;  /** Maximum number of messages per room */
 
 void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content) {
     MDB_txn* txn;  
@@ -235,31 +234,10 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
             return;
         }
 
-        /** Check the number of messages in the room */
-        MDB_val key, value;
-        key.mv_size = sizeof("message_count");
-        key.mv_data = (void*)"message_count";  /** Special key to track the number of messages */
-
-        int message_count = 0;
-
-        /** Fetch the current message count for the room */
-        if (mdb_get(txn, dbi, &key, &value) == 0) {
-            message_count = std::stoi(std::string((char*)value.mv_data, value.mv_size));
-        }
-
-        /** Check if we have exceeded the max message count */
-        if (message_count >= MAX_MESSAGES_PER_ROOM) {
-            /** Option 1: Remove the oldest message (if needed) */
-            /** Option 2: Reject the new message (you can choose to discard or handle it differently) */
-            std::cerr << "Room message limit reached. Discarding new message.\n";
-
-            /** Abort the transaction and return */
-            mdb_txn_abort(txn);
-            return;
-        }
-
         /** Write the batch into the database */
         for (const auto& [key_str, value_str] : batch) {
+            MDB_val key, value;
+
             key.mv_size = key_str.size();
             key.mv_data = (void*)key_str.data();
             value.mv_size = value_str.size();
@@ -270,19 +248,6 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
                 mdb_txn_abort(txn);
                 return;
             }
-        }
-
-        /** Update the message count after writing the batch */
-        message_count += batch.size();
-        std::string message_count_str = std::to_string(message_count);
-        value.mv_size = message_count_str.size();
-        value.mv_data = (void*)message_count_str.data();
-
-        /** Put the updated message count back into the database */
-        if (mdb_put(txn, dbi, &key, &value, MDB_NOOVERWRITE) != 0) {
-            std::cerr << "Failed to update message count.\n";
-            mdb_txn_abort(txn);
-            return;
         }
 
         /** Commit the transaction after the batch */
