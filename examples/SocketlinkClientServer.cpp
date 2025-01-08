@@ -33,7 +33,8 @@ void init_env() {
         exit(-1);
     }
 
-    if (mdb_env_set_mapsize(env, 10485760) != 0) { 
+    /** map size is 10 GB */
+    if (mdb_env_set_mapsize(env, 10ULL * 1024 * 1024 * 1024) != 0) { 
         std::cerr << "Failed to set map size.\n";
         exit(-1);
     }
