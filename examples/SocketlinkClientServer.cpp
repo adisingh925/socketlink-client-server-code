@@ -15,6 +15,46 @@
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/system/error_code.hpp>
+#include <lmdb.h>
+#include <chrono>
+
+/**
+ * database
+ */
+
+/** Global variables */ 
+MDB_env* env;
+std::mutex write_mutex;
+
+/** Initialize LMDB environment */ 
+void init_env() {
+    if (mdb_env_create(&env) != 0) {
+        std::cerr << "Failed to create LMDB environment.\n";
+        exit(-1);
+    }
+
+    if (mdb_env_set_mapsize(env, 10485760) != 0) { 
+        std::cerr << "Failed to set map size.\n";
+        exit(-1);
+    }
+
+    if (mdb_env_set_maxreaders(env, 16) != 0) {
+        std::cerr << "Failed to set max readers.\n";
+        exit(-1);
+    }
+
+    if (mdb_env_set_maxdbs(env, 10) != 0) {
+        std::cerr << "Failed to set max databases.\n";
+        exit(-1);
+    }
+
+    if (mdb_env_open(env, "./messages_db", 0, 0664) != 0) {
+        std::cerr << "Failed to open LMDB environment.\n";
+        exit(-1);
+    }
+
+    std::cout << "Environment initialized successfully.\n";
+}
 
 /**
  * Internal Constants
@@ -22,7 +62,7 @@
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 443;
+constexpr const int PORT = 9001;
 
 /** 
  * Sending Constants
@@ -113,7 +153,7 @@ struct worker_t
   struct uWS::Loop *loop_;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::SSLApp> app_;
+  std::shared_ptr<uWS::App> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -162,6 +202,165 @@ public:
     UserData(const UserData&) = delete;
     UserData& operator=(const UserData&) = delete;
 };
+
+const int MAX_MESSAGES = 100; /** Max number of messages allowed in the database */
+
+void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content) {
+    /** Lock the mutex to ensure that only one thread can write at a time */
+    std::lock_guard<std::mutex> lock(write_mutex);
+
+    MDB_txn* txn;  /** Transaction handle */
+    MDB_dbi dbi;   /** Database handle */
+    MDB_dbi meta_dbi; /** Meta database for tracking message count */
+
+    /** Begin a new write transaction */
+    if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
+        std::cerr << "Failed to begin write transaction.\n";
+        return;
+    }
+
+    /** Open (or create) the main room database */
+    if (mdb_dbi_open(txn, room_id.c_str(), MDB_CREATE, &dbi) != 0) {
+        std::cerr << "Failed to open database.\n";
+        mdb_txn_abort(txn); /** Abort the transaction if database opening fails */
+        return;
+    }
+
+    /** Open the meta database for tracking message count */
+    if (mdb_dbi_open(txn, "_meta", MDB_CREATE, &meta_dbi) != 0) {
+        std::cerr << "Failed to open meta database.\n";
+        mdb_txn_abort(txn); /** Abort the transaction if opening meta database fails */
+        return;
+    }
+
+    MDB_val key, value;
+
+    /** Check the current number of messages in the database */
+    key.mv_size = sizeof("count");
+    key.mv_data = (void*)"count";  /** Special key for storing the count of messages */
+    int message_count = 0;
+
+    if (mdb_get(txn, meta_dbi, &key, &value) == 0) {
+        message_count = *static_cast<int*>(value.mv_data);  /** Extract the current message count */
+    }
+
+    /** If the message count exceeds the limit, delete the oldest message */
+    if (message_count >= MAX_MESSAGES) {
+        /** Get the oldest message using a cursor */
+        MDB_cursor* cursor;
+        if (mdb_cursor_open(txn, dbi, &cursor) == 0) {
+            /** Retrieve the oldest message (the first entry in the cursor) */
+            if (mdb_cursor_get(cursor, &key, &value, MDB_FIRST) == 0) {
+                /** Remove the oldest message from the database */
+                if (mdb_del(txn, dbi, &key, nullptr) != 0) {
+                    std::cerr << "Failed to delete oldest message.\n";
+                }
+            }
+            mdb_cursor_close(cursor);  /** Close the cursor */
+        }
+        /** Decrease the message count */
+        message_count--;
+    }
+
+    /** Prepare the timestamp as the new message key */
+    auto timestamp = std::chrono::system_clock::now().time_since_epoch();
+    auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp).count();
+    std::string timestamp_str = std::to_string(timestamp_ms);
+
+    /** Create a combined key that includes user_id and timestamp */
+    std::string combined_key = timestamp_str + ":" + user_id;
+
+    /** Prepare the key-value pair for the new message */
+    key.mv_size = combined_key.size();
+    key.mv_data = (void*)combined_key.data();
+    value.mv_size = message_content.size();
+    value.mv_data = (void*)message_content.data();
+
+    /** Write the new message into the room's database */
+    if (mdb_put(txn, dbi, &key, &value, 0) == 0) {
+        /** Update the message count in the meta database */
+        message_count++;
+        value.mv_size = sizeof(message_count);
+        value.mv_data = &message_count;
+        if (mdb_put(txn, meta_dbi, &key, &value, 0) != 0) {
+            std::cerr << "Failed to update message count.\n";
+            mdb_txn_abort(txn);
+            return;
+        }
+
+        /** Commit the transaction if everything was successful */
+        mdb_txn_commit(txn);
+    } else {
+        std::cerr << "Write failed.\n";
+        mdb_txn_abort(txn); /** Abort the transaction if writing fails */
+    }
+
+    /** Close the database handles */
+    mdb_dbi_close(env, dbi);
+    mdb_dbi_close(env, meta_dbi);
+}
+
+void read_worker(const std::string& room_id, int n) {
+    MDB_txn* txn;  /** Transaction handle */
+    MDB_dbi dbi;   /** Database handle */
+    MDB_cursor* cursor;  /** Cursor for iterating through the database */
+
+    std::cout << "Starting read_worker\n";
+
+    /** Start a read-only transaction */
+    if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
+        std::cerr << "Failed to begin read transaction: " << mdb_strerror(errno) << "\n";
+        return;
+    }
+
+    /** Open the database for the specified room_id */
+    if (mdb_dbi_open(txn, room_id.c_str(), 0, &dbi) != 0) {
+        std::cerr << "Failed to open database: " << mdb_strerror(errno) << "\n";
+        mdb_txn_abort(txn); /** Abort the transaction if opening the database fails */
+        return;
+    }
+
+    /** Open a cursor to iterate through the database */
+    if (mdb_cursor_open(txn, dbi, &cursor) != 0) {
+        std::cerr << "Failed to open cursor: " << mdb_strerror(errno) << "\n";
+        mdb_txn_abort(txn); /** Abort the transaction if opening the cursor fails */
+        mdb_dbi_close(env, dbi); /** Close the database handle */
+        return;
+    }
+
+    MDB_val key, value;  /** Key-value pair to store the retrieved data */
+    int messages_read = 0; /** Counter for the number of messages read */
+
+    /** Start from the last message (most recent) */
+    if (mdb_cursor_get(cursor, &key, &value, MDB_LAST) == 0) {
+        /** Iterate backward (MDB_PREV) to get the previous messages */
+        do {
+            /** Display the retrieved value (message) */
+            std::cout << "Read message: " << std::string((char*)value.mv_data, value.mv_size) << "\n";
+            messages_read++; /** Increment the message counter */
+
+            /** Stop if we have read `n` messages */
+            if (messages_read >= n) {
+                break;
+            }
+
+        /** Move to the previous message using MDB_PREV */
+        } while (mdb_cursor_get(cursor, &key, &value, MDB_PREV) == 0);
+    } else {
+        std::cerr << "Failed to read the last message: " << mdb_strerror(errno) << "\n";
+    }
+
+    /** Commit the transaction */
+    if (mdb_txn_commit(txn) != 0) {
+        std::cerr << "Failed to commit transaction: " << mdb_strerror(errno) << "\n";
+    }
+
+    /** Close the cursor and database handle */
+    mdb_cursor_close(cursor);
+    mdb_dbi_close(env, dbi);
+
+    std::cout << "Read operation completed.\n";
+}
 
 class FileWriter {
 public:
@@ -538,7 +737,8 @@ void populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        std::string dropletId = "468316038";
 
         /** Headers for the HTTP request */ 
         httplib::Headers headers = {
@@ -648,8 +848,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::SSLApp>(
-    uWS::SSLApp({
+  app_ = std::make_shared<uWS::App>(
+    uWS::App({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
@@ -1229,6 +1429,8 @@ void worker_t::work()
                     /** Writing data to the file */
                     /**FileWriter& writer = GlobalFileWriter::getInstance();
                     writer.writeMessage(std::string(message));*/
+
+                    write_worker(rid, ws->getUserData()->uid, std::string(message));
 
                     /** publishing message */
                     ws->publish(rid, message, opCode, true);
@@ -1876,6 +2078,7 @@ void worker_t::work()
 int main() {
   /** Fetch and populated data before starting the threads */
   fetchAndPopulateUserData();
+  init_env();
 
   workers.resize(std::thread::hardware_concurrency());
   
@@ -1890,6 +2093,8 @@ int main() {
   std::for_each(workers.begin(), workers.end(), [](worker_t &w) {
       w.thread_->join();
   });
+
+  mdb_env_close(env);
   
   return 0;
 }
