@@ -880,7 +880,6 @@ void worker_t::work()
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
-    .compression = uWS::CompressOptions(uWS::DEDICATED_COMPRESSOR_4KB | uWS::DEDICATED_DECOMPRESSOR_512B),
     .maxPayloadLength = 1024 * 1024,
     .idleTimeout = 60,
     .maxBackpressure = 4 * 1024,
@@ -1401,7 +1400,7 @@ void worker_t::work()
         }
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-        if(message.size() > 10000000){
+        if(message.size() > UserData::getInstance().msg_size_allowed_in_bytes){
             ws->end(1009, "{\"event\":\"MESSAGE_SIZE_EXCEEDED\"}");
 
             if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
