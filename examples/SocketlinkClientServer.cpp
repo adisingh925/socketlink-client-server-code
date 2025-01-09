@@ -63,7 +63,7 @@ void init_env() {
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 443;
+constexpr const int PORT = 9001;
 
 /** 
  * Sending Constants
@@ -159,7 +159,7 @@ struct worker_t
   struct uWS::Loop *loop_;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::SSLApp> app_;
+  std::shared_ptr<uWS::App> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -215,47 +215,56 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
     MDB_txn* txn;
     MDB_dbi dbi;
 
-    /** Lock the mutex to ensure thread-safety for shared resources */ 
+    /** Lock the mutex to ensure thread-safety for shared resources */
     std::lock_guard<std::mutex> lock(write_worker_mutex);
 
+    /** Batch to store messages before writing them to the database */
     static std::vector<std::tuple<std::string, std::string>> batch;
 
-    /** Collect writes in a batch */
-    if(!needsCommit){
+    /** Collect writes in a batch if commit is not immediately required */
+    if (!needsCommit) {
+        /** Get the current timestamp in milliseconds */
         auto timestamp = std::chrono::system_clock::now().time_since_epoch();
         auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp).count();
         std::string timestamp_str = std::to_string(timestamp_ms);
 
-        std::string combined_key = timestamp_str + ":" + user_id;
+        /** Create the key format: room_id:timestamp:user_id */
+        std::string combined_key = room_id + ":" + timestamp_str + ":" + user_id;
+
+        /** Add the key-value pair to the batch */
         batch.push_back({combined_key, message_content});
     }
 
-    /** Begin a new write transaction only when the batch size is reached */
+    /** Begin a write transaction when batch size reaches limit or a commit is explicitly needed */
     if (batch.size() >= BATCH_SIZE || needsCommit) {
         std::cout << "Writing batch of size: " << batch.size() << std::endl;
 
-        /** Begin a new write transaction */ 
+        /** Begin a new write transaction */
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             std::cerr << "Failed to begin write transaction.\n";
             return;
         }
 
-        /** Open the database */
-        if (mdb_dbi_open(txn, room_id.c_str(), MDB_CREATE, &dbi) != 0) {
+        /** Open the database (common for all rooms) */
+        if (mdb_dbi_open(txn, "common_db", MDB_CREATE, &dbi) != 0) {
             std::cerr << "Failed to open database.\n";
             mdb_txn_abort(txn);
             return;
         }
 
-        /** Write the batch into the database */
+        /** Write each key-value pair from the batch into the database */
         for (const auto& [key_str, value_str] : batch) {
             MDB_val key, value;
 
+            /** Prepare the key */
             key.mv_size = key_str.size();
             key.mv_data = (void*)key_str.data();
+
+            /** Prepare the value */
             value.mv_size = value_str.size();
             value.mv_data = (void*)value_str.data();
 
+            /** Insert the key-value pair into the database */
             if (mdb_put(txn, dbi, &key, &value, 0) != 0) {
                 std::cerr << "Write failed.\n";
                 mdb_txn_abort(txn);
@@ -263,14 +272,16 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
             }
         }
 
-        /** Commit the transaction after the batch */
+        /** Commit the transaction after writing the batch */
         if (mdb_txn_commit(txn) != 0) {
             std::cerr << "Failed to commit transaction.\n";
             mdb_txn_abort(txn);
         }
 
-        /** Clear the batch */
+        /** Clear the batch after a successful commit */
         batch.clear();
+
+        /** Close the database handle */
         mdb_dbi_close(env, dbi);
     }
 }
@@ -290,8 +301,8 @@ std::string read_worker(const std::string& room_id, int n) {
         return "";  /** Return empty string on failure */
     }
 
-    /** Open the database for the specified room_id */
-    if (mdb_dbi_open(txn, room_id.c_str(), 0, &dbi) != 0) {
+    /** Open the common database for all rooms */
+    if (mdb_dbi_open(txn, "common_db", 0, &dbi) != 0) {
         std::cerr << "Failed to open database: " << mdb_strerror(errno) << "\n";
         mdb_txn_abort(txn); /** Abort the transaction if opening the database fails */
         return "";  /** Return empty string on failure */
@@ -308,16 +319,31 @@ std::string read_worker(const std::string& room_id, int n) {
     MDB_val key, value;  /** Key-value pair to store the retrieved data */
     int messages_read = 0; /** Counter for the number of messages read */
 
-    /** Start from the last message (most recent) */
-    if (mdb_cursor_get(cursor, &key, &value, MDB_LAST) == 0) {
-        /** Iterate backward (MDB_PREV) to get the previous messages */
-        result += "[\n";  // Start JSON array
+    /** Construct the prefix for the given room_id */
+    std::string room_prefix = room_id + ":";
+    key.mv_size = room_prefix.size();
+    key.mv_data = (void*)room_prefix.data();
+
+    /** Start JSON array */
+    result += "[\n";
+
+    /** Position the cursor at the first key matching the room_id */
+    if (mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE) == 0) {
+        /** Iterate through messages for the given room_id */
         do {
-            /** Extract timestamp and user_id from the key */
+            /** Extract the key as a string */
             std::string key_str((char*)key.mv_data, key.mv_size);
-            size_t colon_pos = key_str.find(':');
-            std::string timestamp_str = key_str.substr(0, colon_pos);
-            std::string user_id = key_str.substr(colon_pos + 1);
+
+            /** Check if the key still belongs to the desired room_id */
+            if (key_str.find(room_prefix) != 0) {
+                break; /** Stop if we reach keys for a different room */
+            }
+
+            /** Extract the timestamp and user_id from the key */
+            size_t first_colon = key_str.find(':');
+            size_t second_colon = key_str.find(':', first_colon + 1);
+            std::string timestamp_str = key_str.substr(first_colon + 1, second_colon - first_colon - 1);
+            std::string user_id = key_str.substr(second_colon + 1);
 
             /** Create the message JSON inline */
             result += "  {\n";
@@ -325,7 +351,7 @@ std::string read_worker(const std::string& room_id, int n) {
             result += "    \"message\": \"" + std::string((char*)value.mv_data, value.mv_size) + "\",\n";
             result += "    \"uid\": \"" + user_id + "\"\n";
             result += "  }";
-            
+
             messages_read++; /** Increment the message counter */
 
             /** If we have read `n` messages, stop */
@@ -333,13 +359,18 @@ std::string read_worker(const std::string& room_id, int n) {
                 break;
             }
 
-            result += ",\n";  // Add comma between messages if not last
+            result += ",\n";  /** Add comma between messages if not the last */
 
-        } while (mdb_cursor_get(cursor, &key, &value, MDB_PREV) == 0);
-
-        result += "\n]";  // End JSON array
+        } while (mdb_cursor_get(cursor, &key, &value, MDB_NEXT) == 0);
     } else {
-        std::cerr << "Failed to read the last message: " << mdb_strerror(errno) << "\n";
+        std::cerr << "Failed to find messages for the given room: " << mdb_strerror(errno) << "\n";
+    }
+
+    /** End JSON array */
+    if (messages_read > 0) {
+        result += "\n]"; /** Close JSON array if messages were added */
+    } else {
+        result = "[]"; /** Return an empty JSON array if no messages were found */
     }
 
     /** Commit the transaction */
@@ -730,8 +761,8 @@ void populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        // std::string dropletId = "468316038";
+        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        std::string dropletId = "468316038";
 
         /** Headers for the HTTP request */ 
         httplib::Headers headers = {
@@ -841,8 +872,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::SSLApp>(
-    uWS::SSLApp({
+  app_ = std::make_shared<uWS::App>(
+    uWS::App({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
