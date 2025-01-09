@@ -1401,7 +1401,7 @@ void worker_t::work()
         }
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-        if(message.size() > UserData::getInstance().msg_size_allowed_in_bytes){
+        if(message.size() > 10000000){
             ws->end(1009, "{\"event\":\"MESSAGE_SIZE_EXCEEDED\"}");
 
             if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
@@ -1423,7 +1423,7 @@ void worker_t::work()
         }
         else if (ws->getUserData()->sendingAllowed)
         {
-            if(ws->getBufferedAmount() > 1024 * 1024 * 1024){
+            if(ws->getBufferedAmount() > 4 * 1024 * 1024){
                 ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
                 ws->getUserData()->sendingAllowed = false;
 
