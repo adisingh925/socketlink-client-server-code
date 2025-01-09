@@ -63,7 +63,7 @@ void init_env() {
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 9001;
+constexpr const int PORT = 443;
 
 /** 
  * Sending Constants
@@ -159,7 +159,7 @@ struct worker_t
   struct uWS::Loop *loop_;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::App> app_;
+  std::shared_ptr<uWS::SSLApp> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -237,8 +237,6 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
 
     /** Begin a write transaction when batch size reaches limit or a commit is explicitly needed */
     if (batch.size() >= BATCH_SIZE || needsCommit) {
-        std::cout << "Writing batch of size: " << batch.size() << std::endl;
-
         /** Begin a new write transaction */
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             std::cerr << "Failed to begin write transaction.\n";
@@ -761,8 +759,8 @@ void populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        std::string dropletId = "468316038";
+        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        // std::string dropletId = "468316038";
 
         /** Headers for the HTTP request */ 
         httplib::Headers headers = {
@@ -872,8 +870,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::App>(
-    uWS::App({
+  app_ = std::make_shared<uWS::SSLApp>(
+    uWS::SSLApp({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
