@@ -1423,7 +1423,7 @@ void worker_t::work()
         }
         else if (ws->getUserData()->sendingAllowed)
         {
-            if(ws->getBufferedAmount() > 4 * 1024 * 1024){
+            if(ws->getBufferedAmount() > 1024 * 1024 * 1024){
                 ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
                 ws->getUserData()->sendingAllowed = false;
 
