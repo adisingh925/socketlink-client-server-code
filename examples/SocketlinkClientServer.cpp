@@ -44,7 +44,7 @@ void init_env() {
         exit(-1);
     }
 
-    if (mdb_env_set_maxdbs(env, 10) != 0) {
+    if (mdb_env_set_maxdbs(env, 1) != 0) {
         std::cerr << "Failed to set max databases.\n";
         exit(-1);
     }
@@ -880,6 +880,7 @@ void worker_t::work()
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
+    .compression = uWS::CompressOptions(uWS::DEDICATED_COMPRESSOR_4KB | uWS::DEDICATED_DECOMPRESSOR_512B),
     .maxPayloadLength = 1024 * 1024,
     .idleTimeout = 60,
     .maxBackpressure = 4 * 1024,
