@@ -85,7 +85,7 @@ constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 /**
  * DB constants
  */
-constexpr size_t BATCH_SIZE = 1000;  /** Batch size for writes */
+constexpr size_t BATCH_SIZE = 1;  /** Batch size for writes */
 
 /**
  * webhooks
@@ -211,7 +211,7 @@ public:
 
 std::mutex write_worker_mutex;
 
-void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content) {
+void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content, bool needsCommit = false) {
     MDB_txn* txn;
     MDB_dbi dbi;
 
@@ -221,15 +221,17 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
     static std::vector<std::tuple<std::string, std::string>> batch;
 
     /** Collect writes in a batch */
-    auto timestamp = std::chrono::system_clock::now().time_since_epoch();
-    auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp).count();
-    std::string timestamp_str = std::to_string(timestamp_ms);
+    if(!needsCommit){
+        auto timestamp = std::chrono::system_clock::now().time_since_epoch();
+        auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp).count();
+        std::string timestamp_str = std::to_string(timestamp_ms);
 
-    std::string combined_key = timestamp_str + ":" + user_id;
-    batch.push_back({combined_key, message_content});
+        std::string combined_key = timestamp_str + ":" + user_id;
+        batch.push_back({combined_key, message_content});
+    }
 
     /** Begin a new write transaction only when the batch size is reached */
-    if (batch.size() >= BATCH_SIZE) {
+    if (batch.size() >= BATCH_SIZE || needsCommit) {
         /** Begin a new write transaction */ 
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             std::cerr << "Failed to begin write transaction.\n";
@@ -727,6 +729,7 @@ void populateUserData(std::string data) {
 void fetchAndPopulateUserData() {
     try {
         std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        // std::string dropletId = "468316038";
 
         /** Headers for the HTTP request */ 
         httplib::Headers headers = {
@@ -2045,9 +2048,11 @@ void worker_t::work()
         res->onAborted([]() {
             /** connection aborted */
         });
-
+        
         std::string_view rid = req->getParameter("rid");
         std::string_view apiKey = req->getHeader("api-key");
+
+        write_worker(std::string(rid), "", "", true);
 
         if(apiKey != UserData::getInstance().adminApiKey){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
