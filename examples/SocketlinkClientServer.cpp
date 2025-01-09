@@ -232,6 +232,8 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
 
     /** Begin a new write transaction only when the batch size is reached */
     if (batch.size() >= BATCH_SIZE || needsCommit) {
+        std::cout << "Writing batch of size: " << batch.size() << std::endl;
+        
         /** Begin a new write transaction */ 
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             std::cerr << "Failed to begin write transaction.\n";
