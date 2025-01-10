@@ -1403,7 +1403,7 @@ void worker_t::work()
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
         if(message.size() > UserData::getInstance().msg_size_allowed_in_bytes){
-            ws->end(1009, "{\"event\":\"MESSAGE_SIZE_EXCEEDED\"}");
+            // ws->end(1009, "{\"event\":\"MESSAGE_SIZE_EXCEEDED\"}");
 
             if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
                 std::ostringstream payload;
