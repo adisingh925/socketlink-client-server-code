@@ -286,24 +286,24 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
 
 using json = nlohmann::json;  /** Create an alias for the json object */
 
-std::string read_worker(const std::string& room_id, int n) {
+std::string read_worker(const std::string& room_id, int n, int m) {
     MDB_txn* txn;  /** Transaction handle */
     MDB_dbi dbi;   /** Database handle */
     MDB_cursor* cursor;  /** Cursor for iterating through the database */
 
-    std::string result;  /** Output string to accumulate messages in JSON format */
-    
+    std::ostringstream result;  /** Output stream to accumulate messages in JSON format */
+
     /** Start a read-only transaction */
     if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
         std::cerr << "Failed to begin read transaction: " << mdb_strerror(errno) << "\n";
-        return "";  /** Return empty string on failure */
+        return "[]";  /** Return empty JSON array on failure */
     }
 
     /** Open the common database for all rooms */
     if (mdb_dbi_open(txn, "common_db", 0, &dbi) != 0) {
         std::cerr << "Failed to open database: " << mdb_strerror(errno) << "\n";
         mdb_txn_abort(txn); /** Abort the transaction if opening the database fails */
-        return "";  /** Return empty string on failure */
+        return "[]";  /** Return empty JSON array on failure */
     }
 
     /** Open a cursor to iterate through the database */
@@ -311,64 +311,67 @@ std::string read_worker(const std::string& room_id, int n) {
         std::cerr << "Failed to open cursor: " << mdb_strerror(errno) << "\n";
         mdb_txn_abort(txn); /** Abort the transaction if opening the cursor fails */
         mdb_dbi_close(env, dbi); /** Close the database handle */
-        return "";  /** Return empty string on failure */
+        return "[]";  /** Return empty JSON array on failure */
     }
 
     MDB_val key, value;  /** Key-value pair to store the retrieved data */
-    int messages_read = 0; /** Counter for the number of messages read */
+    int messages_skipped = 0;  /** Counter for skipped messages */
+    int messages_read = 0;  /** Counter for read messages */
 
     /** Construct the prefix for the given room_id */
     std::string room_prefix = room_id + ":";
-    key.mv_size = room_prefix.size();
-    key.mv_data = (void*)room_prefix.data();
 
-    /** Start JSON array */
-    result += "[\n";
-
-    /** Position the cursor at the first key matching the room_id */
-    if (mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE) == 0) {
-        /** Iterate through messages for the given room_id */
-        do {
-            /** Extract the key as a string */
+    /** Position the cursor at the first key in the database */
+    if (mdb_cursor_get(cursor, &key, &value, MDB_LAST) == 0) {
+        /** Skip the first `m` messages */
+        while (messages_skipped < m) {
             std::string key_str((char*)key.mv_data, key.mv_size);
+            if (key_str.find(room_prefix) != 0) break;  /** Stop if the key doesn't match room_id */
+            if (mdb_cursor_get(cursor, &key, &value, MDB_PREV) != 0) break;  /** Move to the next key */
+            messages_skipped++;
+        }
 
-            /** Check if the key still belongs to the desired room_id */
-            if (key_str.find(room_prefix) != 0) {
-                break; /** Stop if we reach keys for a different room */
-            }
+        /** If offset `m` is larger than the number of messages, return an empty JSON array */
+        if (messages_skipped < m) {
+            mdb_cursor_close(cursor);
+            mdb_dbi_close(env, dbi);
+            mdb_txn_abort(txn);
+            return "[]";  /** Offset exceeds the number of messages */
+        }
 
-            /** Extract the timestamp and user_id from the key */
+        /** Start JSON array */
+        result << "[\n";
+
+        /** Read the next `n` messages */
+        while (messages_read < n) {
+            std::string key_str((char*)key.mv_data, key.mv_size);
+            if (key_str.find(room_prefix) != 0) break;  /** Stop if the key doesn't match room_id */
+
+            /** Parse the key to extract metadata */
             size_t first_colon = key_str.find(':');
             size_t second_colon = key_str.find(':', first_colon + 1);
             std::string timestamp_str = key_str.substr(first_colon + 1, second_colon - first_colon - 1);
             std::string user_id = key_str.substr(second_colon + 1);
 
-            /** Create the message JSON inline */
-            result += "  {\n";
-            result += "    \"timestamp\": \"" + timestamp_str + "\",\n";
-            result += "    \"message\": \"" + std::string((char*)value.mv_data, value.mv_size) + "\",\n";
-            result += "    \"uid\": \"" + user_id + "\"\n";
-            result += "  }";
+            /** Append message JSON to result */
+            result << "  {\n";
+            result << "    \"timestamp\": \"" << timestamp_str << "\",\n";
+            result << "    \"message\": \"" << std::string((char*)value.mv_data, value.mv_size) << "\",\n";
+            result << "    \"uid\": \"" << user_id << "\"\n";
+            result << "  }";
 
-            messages_read++; /** Increment the message counter */
+            messages_read++;
+            if (messages_read < n) result << ",\n";  /** Add a comma if not the last message */
 
-            /** If we have read `n` messages, stop */
-            if (messages_read >= n) {
-                break;
-            }
+            /** Move to the next key */
+            if (mdb_cursor_get(cursor, &key, &value, MDB_PREV) != 0) break;  // Break if no more keys
+        }
 
-            result += ",\n";  /** Add comma between messages if not the last */
-
-        } while (mdb_cursor_get(cursor, &key, &value, MDB_NEXT) == 0);
+        /** End JSON array */
+        result << "\n]";
     } else {
         std::cerr << "Failed to find messages for the given room: " << mdb_strerror(errno) << "\n";
-    }
-
-    /** End JSON array */
-    if (messages_read > 0) {
-        result += "\n]"; /** Close JSON array if messages were added */
-    } else {
-        result = "[]"; /** Return an empty JSON array if no messages were found */
+        result << "[]"; /** Return an empty JSON array if no messages were found */
     }
 
     /** Commit the transaction */
@@ -381,7 +384,7 @@ std::string read_worker(const std::string& room_id, int n) {
     mdb_dbi_close(env, dbi);
 
     /** Return the JSON string */
-    return result;  /** Return the JSON formatted string */
+    return result.str();
 }
 
 class FileWriter {
@@ -760,7 +763,6 @@ void populateUserData(std::string data) {
 void fetchAndPopulateUserData() {
     try {
         std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        // std::string dropletId = "468316038";
 
         /** Headers for the HTTP request */ 
         httplib::Headers headers = {
@@ -883,7 +885,7 @@ void worker_t::work()
     .maxPayloadLength = 1024 * 1024,
     .idleTimeout = 60,
     .maxBackpressure = 4 * 1024,
-    .closeOnBackpressureLimit = true,
+    .closeOnBackpressureLimit = false,
     .resetIdleTimeoutOnSend = true,
     .sendPingsAutomatically = true,
     /* Handlers */
@@ -2082,6 +2084,19 @@ void worker_t::work()
         
         std::string_view rid = req->getParameter("rid");
         std::string_view apiKey = req->getHeader("api-key");
+        int limit, offset;
+
+        try {
+            limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
+        } catch (const std::exception& e) {
+            limit = 10; // Default value if conversion fails
+        }
+
+        try {
+            offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
+        } catch (const std::exception& e) {
+            offset = 0; // Default value if conversion fails
+        }
 
         write_worker(std::string(rid), "", "", true);
 
@@ -2095,7 +2110,7 @@ void worker_t::work()
 
         res->writeStatus("200 OK");
         res->writeHeader("Content-Type", "application/json");
-        res->end(read_worker(std::string(rid), 10));  
+        res->end(read_worker(std::string(rid), limit, offset));  
 	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
         res->writeStatus("200 OK");
 	    res->end("pong!");
