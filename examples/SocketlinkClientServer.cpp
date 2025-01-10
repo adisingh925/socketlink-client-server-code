@@ -882,7 +882,7 @@ void worker_t::work()
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
-    .compression = uWS::SHARED_COMPRESSOR,
+    .compression = uWS::DEDICATED_COMPRESSOR_16KB,
     .maxPayloadLength = 1024 * 1024,
     .idleTimeout = 60,
     .maxBackpressure = 4 * 1024,
