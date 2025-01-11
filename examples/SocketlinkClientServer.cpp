@@ -18,13 +18,216 @@
 #include <lmdb.h>
 #include <chrono>
 
-/**
- * database
- */
-
 /** Global variables */ 
 MDB_env* env;
+
+/**
+ * Mutexes for thread-safety
+ */
 std::mutex write_mutex;
+std::mutex rateLimitMutex;
+std::mutex write_worker_mutex;
+
+/**
+ * Rate limiting variables
+ */
+std::chrono::steady_clock::time_point lastReset = std::chrono::steady_clock::now();
+
+/**
+ * Global atomic variables and data structures
+ */
+std::atomic<int> globalConnectionCounter(0);
+std::atomic<unsigned long long> globalMessagesSent{0}; 
+std::atomic<unsigned long long> totalPayloadSent{0};
+std::atomic<unsigned long long> totalRejectedRquests{0};
+std::atomic<double> averagePayloadSize{0.0};
+std::atomic<double> averageLatency{0.0};
+std::atomic<unsigned long long> droppedMessages{0};
+std::atomic<unsigned int> messageCount(0);
+std::unordered_map<std::string, std::set<std::string>> topics;
+std::unordered_set<std::string> bannedConnections;
+std::unordered_set<std::string> uid;
+
+/**
+ * Thread local variables
+ */
+thread_local boost::asio::io_context io_context;                                                           // Thread-local io_context
+thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);                     // Thread-local ssl_context
+thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr; // Thread-local ssl_socket
+
+/**
+ * Internal Constants
+ */
+constexpr const char* INTERNAL_IP = "169.254.169.254";
+constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
+constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
+constexpr const int PORT = 443;
+
+/** 
+ * Sending Constants
+ */
+constexpr const char* ACCESS_DENIED = "Access Denied";
+constexpr const char* ROOM_NAME_INVALID = "ROOM_NAME_INVALID";
+constexpr const char* API_KEY_INVALID = "API_KEY_INVALID";
+constexpr const char* CONNECTION_LIMIT_EXCEEDED = "CONNECTION_LIMIT_EXCEEDED";
+constexpr const char* DAILY_MSG_LIMIT_EXHAUSTED = "DAILY_MSG_LIMIT_EXHAUSTED";
+constexpr const char* SOMEONE_JOINED_THE_ROOM = "SOMEONE_JOINED_THE_ROOM";
+constexpr const char* CONNECTED_TO_ROOM = "CONNECTED_TO_ROOM";
+constexpr const char* SOMEONE_LEFT_THE_ROOM = "SOMEONE_LEFT_THE_ROOM";
+constexpr const char* MESSAGE_SIZE_EXCEEDED = "MESSAGE_SIZE_EXCEEDED";
+constexpr const char* YOU_ARE_RATE_LIMITED = "YOU_ARE_RATE_LIMITED";
+constexpr const char* RATE_LIMIT_LIFTED = "RATE_LIMIT_LIFTED";    
+constexpr const char* BROADCAST = "BROADCAST";
+constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
+
+/**
+ * Room Types
+ */
+constexpr uint8_t PUBLIC_ROOM = 0;
+constexpr uint8_t PRIVATE_ROOM = 1;
+constexpr uint8_t PUBLIC_STATE_ROOM = 2;
+constexpr uint8_t PRIVATE_STATE_ROOM = 3;
+
+using json = nlohmann::json;  /** Create an alias for the json object */
+
+/**
+ * HTTP Response
+ */
+struct HTTPResponse {
+    std::string body;
+    int status;
+};
+
+/* ws->getUserData returns one of these */
+struct PerSocketData {
+    /* Define your user data */
+    std::string rid;
+    std::string key;
+    std::string uid;
+
+    /**
+     * 0 - public
+     * 1 - private
+     * 2 - state public
+     * 3 - state private
+     */
+    int roomType;
+
+    /**
+     * true - sending allowed
+     * false - sending not allowed
+     */
+    bool sendingAllowed = true;
+};
+
+class UserData {
+private:
+    /** Private constructor to prevent instantiation */ 
+    UserData() = default;
+
+public:
+    int duration;
+    int msgSizeAllowedInBytes;
+    unsigned long long maxMonthlyPayloadInBytes;
+    int connections;
+    std::string clientApiKey;
+    std::string adminApiKey;
+    std::string webHookBaseUrl;
+    std::string webhookPath;
+    std::string webhookSecret;
+    uint32_t webhooks;
+    int maxMessagesPerSecond = 10000;
+    int batchSize = 1000;
+
+    /** Public static method to get the single instance */ 
+    static UserData& getInstance() {
+        static UserData instance;
+        return instance;
+    }
+
+    /** Delete copy constructor and assignment operator */ 
+    UserData(const UserData&) = delete;
+    UserData& operator=(const UserData&) = delete;
+};
+
+/**
+ * uWebSocket worker runs in a separate thread
+ */
+struct worker_t
+{
+  void work();
+  
+  /* uWebSocket worker listens on separate port, or share the same port (works on Linux). */
+  struct us_listen_socket_t *listen_socket_;
+
+  /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/
+  struct uWS::Loop *loop_;
+
+  /* Need to capture the uWS::App object (instance). */
+  std::shared_ptr<uWS::SSLApp> app_;
+
+  /* Thread object for uWebSocket worker */
+  std::shared_ptr<std::thread> thread_;
+};
+
+/**
+ * webhooks
+ */
+enum class Webhooks : uint32_t
+{
+    /** Connection-related events */
+    ON_CONNECTION_UPGRADE_REJECTED = 1 << 0,            // 1 (binary 00000001)
+
+    /** Message-related events */
+    ON_MESSAGE_PUBLIC_ROOM = 1 << 1,                    // 2 (binary 00000010)
+    ON_MESSAGE_PRIVATE_ROOM = 1 << 2,                   // 4 (binary 00000100)
+    ON_MESSAGE_PRIVATE_STATE_ROOM = 1 << 3,             // 8 (binary 00001000)
+    ON_MESSAGE_PUBLIC_STATE_ROOM = 1 << 4,              // 16 (binary 00010000)
+
+    /** Common webhooks */
+    ON_RATE_LIMIT_EXCEEDED = 1 << 5,                    // 32 (binary 00100000)
+    ON_RATE_LIMIT_LIFTED = 1 << 6,                      // 64 (binary 01000000)
+    ON_MESSAGE_DROPPED = 1 << 7,                        // 128 (binary 10000000)
+    ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED = 1 << 8,  // 256 (binary 100000000)
+    ON_MESSAGE_SIZE_EXCEEDED = 1 << 9,                  // 512 (binary 1000000000)
+    ON_MAX_CONNECTION_LIMIT_REACHED = 1 << 10,          // 1024 (binary 10000000000)
+    ON_VERIFICATION_REQUEST = 1 << 11,                  // 2048 (binary 100000000000)
+
+    /** Connection open events */
+    ON_CONNECTION_OPEN_PUBLIC_ROOM = 1 << 12,           // 4096 (binary 10000000000000)
+    ON_CONNECTION_OPEN_PRIVATE_ROOM = 1 << 13,          // 8192 (binary 100000000000000)
+    ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM = 1 << 14,    // 16384 (binary 1000000000000000)
+    ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM = 1 << 15,     // 32768 (binary 10000000000000000)
+
+    /** Connection close events */
+    ON_CONNECTION_CLOSE_PUBLIC_ROOM = 1 << 16,          // 65536 (binary 100000000000000000)
+    ON_CONNECTION_CLOSE_PRIVATE_ROOM = 1 << 17,         // 131072 (binary 1000000000000000000)
+    ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM = 1 << 18,   // 262144 (binary 10000000000000000000)
+    ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM = 1 << 19,    // 524288 (binary 100000000000000000000)
+
+    /** Room occupied events */
+    ON_ROOM_OCCUPIED_PUBLIC_ROOM = 1 << 20,             // 1048576 (binary 1000000000000000000000)
+    ON_ROOM_OCCUPIED_PRIVATE_ROOM = 1 << 21,            // 2097152 (binary 10000000000000000000000)
+    ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM = 1 << 22,      // 4194304 (binary 100000000000000000000000)
+    ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM = 1 << 23,       // 8388608 (binary 1000000000000000000000000)
+
+    /** Room vacated events */
+    ON_ROOM_VACATED_PUBLIC_ROOM = 1 << 24,              // 16777216 (binary 10000000000000000000000000)
+    ON_ROOM_VACATED_PRIVATE_ROOM = 1 << 25,             // 33554432 (binary 100000000000000000000000000)
+    ON_ROOM_VACATED_PRIVATE_STATE_ROOM = 1 << 26,       // 67108864 (binary 1000000000000000000000000000)
+    ON_ROOM_VACATED_PUBLIC_STATE_ROOM = 1 << 27         // 134217728 (binary 10000000000000000000000000000)
+};
+
+std::unordered_map<Webhooks, int> webhookStatus;
+
+void resetMessageCounter() {
+    std::lock_guard<std::mutex> lock(rateLimitMutex);
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - lastReset).count() >= 1) {
+        messageCount.store(0, std::memory_order_relaxed);
+        lastReset = now;
+    }
+}
 
 /** Initialize LMDB environment */ 
 void init_env() {
@@ -57,159 +260,8 @@ void init_env() {
     std::cout << "Environment initialized successfully.\n";
 }
 
-/**
- * Internal Constants
- */
-constexpr const char* INTERNAL_IP = "169.254.169.254";
-constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
-constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 443;
-
-/** 
- * Sending Constants
- */
-constexpr const char* ACCESS_DENIED = "Access Denied";
-constexpr const char* ROOM_NAME_INVALID = "ROOM_NAME_INVALID";
-constexpr const char* API_KEY_INVALID = "API_KEY_INVALID";
-constexpr const char* CONNECTION_LIMIT_EXCEEDED = "CONNECTION_LIMIT_EXCEEDED";
-constexpr const char* DAILY_MSG_LIMIT_EXHAUSTED = "DAILY_MSG_LIMIT_EXHAUSTED";
-constexpr const char* SOMEONE_JOINED_THE_ROOM = "SOMEONE_JOINED_THE_ROOM";
-constexpr const char* CONNECTED_TO_ROOM = "CONNECTED_TO_ROOM";
-constexpr const char* SOMEONE_LEFT_THE_ROOM = "SOMEONE_LEFT_THE_ROOM";
-constexpr const char* MESSAGE_SIZE_EXCEEDED = "MESSAGE_SIZE_EXCEEDED";
-constexpr const char* YOU_ARE_RATE_LIMITED = "YOU_ARE_RATE_LIMITED";
-constexpr const char* RATE_LIMIT_LIFTED = "RATE_LIMIT_LIFTED";    
-constexpr const char* BROADCAST = "BROADCAST";
-constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
-
-/**
- * DB constants
- */
-constexpr size_t BATCH_SIZE = 1000;  /** Batch size for writes */
-
-/**
- * webhooks
- */
-enum class Webhooks : uint32_t
-{
-    /** Connection-related events */
-    ON_CONNECTION_UPGRADE_REJECTED = 1 << 0,            // 1 (binary 00000001)
-
-    /** Message-related events */
-    ON_MESSAGE_PUBLIC_ROOM = 1 << 1,                    // 2 (binary 00000010)
-    ON_MESSAGE_PRIVATE_ROOM = 1 << 2,                   // 4 (binary 00000100)
-    ON_MESSAGE_PRIVATE_STATE_ROOM = 1 << 3,             // 8 (binary 00001000)
-    ON_MESSAGE_PUBLIC_STATE_ROOM = 1 << 4,              // 16 (binary 00010000)
-
-    /** Common webhooks */
-    ON_RATE_LIMIT_EXCEEDED = 1 << 5,                    // 32 (binary 00100000)
-    ON_RATE_LIMIT_LIFTED = 1 << 6,                      // 64 (binary 01000000)
-    ON_MESSAGE_DROPPED = 1 << 7,                        // 128 (binary 10000000)
-    ON_DAILY_MESSAGE_LIMIT_EXHAUSTED = 1 << 8,          // 256 (binary 100000000)
-    ON_MESSAGE_SIZE_EXCEEDED = 1 << 9,                  // 512 (binary 1000000000)
-    ON_MAX_CONNECTION_LIMIT_REACHED = 1 << 10,          // 1024 (binary 10000000000)
-    ON_VERIFICATION_REQUEST = 1 << 11,                  // 2048 (binary 100000000000)
-
-    /** Connection open events */
-    ON_CONNECTION_OPEN_PUBLIC_ROOM = 1 << 12,           // 4096 (binary 10000000000000)
-    ON_CONNECTION_OPEN_PRIVATE_ROOM = 1 << 13,          // 8192 (binary 100000000000000)
-    ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM = 1 << 14,    // 16384 (binary 1000000000000000)
-    ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM = 1 << 15,     // 32768 (binary 10000000000000000)
-
-    /** Connection close events */
-    ON_CONNECTION_CLOSE_PUBLIC_ROOM = 1 << 16,          // 65536 (binary 100000000000000000)
-    ON_CONNECTION_CLOSE_PRIVATE_ROOM = 1 << 17,         // 131072 (binary 1000000000000000000)
-    ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM = 1 << 18,   // 262144 (binary 10000000000000000000)
-    ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM = 1 << 19,    // 524288 (binary 100000000000000000000)
-
-    /** Room occupied events */
-    ON_ROOM_OCCUPIED_PUBLIC_ROOM = 1 << 20,             // 1048576 (binary 1000000000000000000000)
-    ON_ROOM_OCCUPIED_PRIVATE_ROOM = 1 << 21,            // 2097152 (binary 10000000000000000000000)
-    ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM = 1 << 22,      // 4194304 (binary 100000000000000000000000)
-    ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM = 1 << 23,       // 8388608 (binary 1000000000000000000000000)
-
-    /** Room vacated events */
-    ON_ROOM_VACATED_PUBLIC_ROOM = 1 << 24,              // 16777216 (binary 10000000000000000000000000)
-    ON_ROOM_VACATED_PRIVATE_ROOM = 1 << 25,             // 33554432 (binary 100000000000000000000000000)
-    ON_ROOM_VACATED_PRIVATE_STATE_ROOM = 1 << 26,       // 67108864 (binary 1000000000000000000000000000)
-    ON_ROOM_VACATED_PUBLIC_STATE_ROOM = 1 << 27         // 134217728 (binary 10000000000000000000000000000)
-};
-
-constexpr uint8_t PUBLIC_ROOM = 0;
-constexpr uint8_t PRIVATE_ROOM = 1;
-constexpr uint8_t PUBLIC_STATE_ROOM = 2;
-constexpr uint8_t PRIVATE_STATE_ROOM = 3;
-
-struct HTTPResponse {
-    std::string body;
-    int status;
-};
-
-/**
- * uWebSocket worker runs in a separate thread
- */
-struct worker_t
-{
-  void work();
-  
-  /* uWebSocket worker listens on separate port, or share the same port (works on Linux). */
-  struct us_listen_socket_t *listen_socket_;
-
-  /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/
-  struct uWS::Loop *loop_;
-
-  /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::SSLApp> app_;
-
-  /* Thread object for uWebSocket worker */
-  std::shared_ptr<std::thread> thread_;
-};
-
 /* uWebSocket workers. */
 std::vector<worker_t> workers;
-
-std::atomic<int> globalConnectionCounter(0);
-std::atomic<unsigned long long> globalMessagesSent{0}; 
-std::atomic<unsigned long long> totalPayloadSent{0};
-std::atomic<unsigned long long> totalRejectedRquests{0};
-std::atomic<double> averagePayloadSize{0.0};
-std::atomic<double> averageLatency{0.0};
-std::atomic<unsigned long long> droppedMessages{0};
-std::unordered_map<std::string, std::set<std::string>> topics;
-std::unordered_set<std::string> bannedConnections;
-std::unordered_map<Webhooks, int> webhookStatus;
-std::unordered_set<std::string> uid;
-
-class UserData {
-private:
-    /** Private constructor to prevent instantiation */ 
-    UserData() = default;
-
-public:
-    int duration;
-    int msg_per_day;
-    int msg_per_second_per_connection;
-    int msg_size_allowed_in_bytes;
-    int connections;
-    std::string clientApiKey;
-    std::string adminApiKey;
-    std::string webHookBaseUrl;
-    std::string webhookPath;
-    std::string webhookSecret;
-    uint32_t webhooks;
-
-    /** Public static method to get the single instance */ 
-    static UserData& getInstance() {
-        static UserData instance;
-        return instance;
-    }
-
-    /** Delete copy constructor and assignment operator */ 
-    UserData(const UserData&) = delete;
-    UserData& operator=(const UserData&) = delete;
-};
-
-std::mutex write_worker_mutex;
 
 void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content, bool needsCommit = false) {
     MDB_txn* txn;
@@ -236,7 +288,7 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
     }
 
     /** Begin a write transaction when batch size reaches limit or a commit is explicitly needed */
-    if (batch.size() >= BATCH_SIZE || needsCommit) {
+    if (batch.size() >= UserData::getInstance().batchSize || needsCommit) {
         /** Begin a new write transaction */
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             std::cerr << "Failed to begin write transaction.\n";
@@ -283,8 +335,6 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
         mdb_dbi_close(env, dbi);
     }
 }
-
-using json = nlohmann::json;  /** Create an alias for the json object */
 
 std::string read_worker(const std::string& room_id, int n, int m) {
     MDB_txn* txn;  /** Transaction handle */
@@ -625,10 +675,6 @@ HTTPResponse sendHTTPSPOSTRequest(
     }
 }
 
-thread_local boost::asio::io_context io_context;                                                           // Thread-local io_context
-thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);                     // Thread-local ssl_context
-thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr; // Thread-local ssl_socket
-
 /** send a FIRE-AND-FOREGET http post request for webhook */
 void sendHTTPSPOSTRequestFireAndForget(
     const std::string& baseURL, 
@@ -745,10 +791,10 @@ void populateUserData(std::string data) {
 
     UserData::getInstance().clientApiKey = parsedJson["client_api_key"];
     UserData::getInstance().adminApiKey = parsedJson["admin_api_key"];
-    UserData::getInstance().msg_per_day = parsedJson["msg_per_day"].get<int>();
-    UserData::getInstance().msg_per_second_per_connection = parsedJson["msg_per_second_per_connection"].get<int>();
+    UserData::getInstance().maxMessagesPerSecond = parsedJson["msg_per_second_per_connection"].get<int>();
     UserData::getInstance().connections = parsedJson["connections"].get<int>();
-    UserData::getInstance().msg_size_allowed_in_bytes = parsedJson["msg_size_allowed_in_bytes"].get<int>();
+    UserData::getInstance().msgSizeAllowedInBytes = parsedJson["msg_size_allowed_in_bytes"].get<int>();
+    UserData::getInstance().maxMonthlyPayloadInBytes = parsedJson["max_monthly_payload_in_bytes"].get<unsigned long long>();
     UserData::getInstance().webhooks = parsedJson["webhooks"].get<uint32_t>();
     UserData::getInstance().webHookBaseUrl = parsedJson["webhook_base_url"];
     UserData::getInstance().webhookPath = parsedJson["webhook_path"];
@@ -788,28 +834,6 @@ void fetchAndPopulateUserData() {
         std::cerr << "An unknown error occurred." << std::endl;
     }
 }
-
-/* ws->getUserData returns one of these */
-struct PerSocketData {
-    /* Define your user data */
-    std::string rid;
-    std::string key;
-    std::string uid;
-
-    /**
-     * 0 - public
-     * 1 - private
-     * 2 - state public
-     * 3 - state private
-     */
-    int roomType;
-
-    /**
-     * true - sending allowed
-     * false - sending not allowed
-     */
-    bool sendingAllowed = true;
-};
 
 /**
  * HTTP Webhook Error Codes
@@ -1402,7 +1426,7 @@ void worker_t::work()
         }
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-        if(message.size() > UserData::getInstance().msg_size_allowed_in_bytes){
+        if(message.size() > UserData::getInstance().msgSizeAllowedInBytes){
             droppedMessages.fetch_add(1, std::memory_order_relaxed);
 
             if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
@@ -1410,7 +1434,7 @@ void worker_t::work()
                 payload << "{\"event\":\"ON_MESSAGE_SIZE_EXCEEDED\", "
                         << "\"code\":3010, "
                         << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msg_size_allowed_in_bytes << "\"}";            
+                        << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msgSizeAllowedInBytes << "\"}";            
                 
                 std::string body = payload.str(); 
                 
@@ -1445,7 +1469,7 @@ void worker_t::work()
                     );
                 }
             } else {
-                if (UserData::getInstance().msg_per_day == -1 ? true : globalMessagesSent.load(std::memory_order_relaxed) < UserData::getInstance().msg_per_day) {
+                if (totalPayloadSent.load(std::memory_order_relaxed) < UserData::getInstance().maxMonthlyPayloadInBytes) {
                     std::string rid = ws->getUserData()->rid;
                     unsigned int subscribers = app_->numSubscribers(rid);
                     globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
@@ -1540,13 +1564,13 @@ void worker_t::work()
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
                     ws->send("{\"event\":\"DAILY_MSG_LIMIT_EXHAUSTED\"}", uWS::OpCode::TEXT, true);
 
-                    if(webhookStatus[Webhooks::ON_DAILY_MESSAGE_LIMIT_EXHAUSTED] == 1){
+                    if(webhookStatus[Webhooks::ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED] == 1){
                         std::ostringstream payload;
-                        payload << "{\"event\":\"ON_DAILY_MESSAGE_LIMIT_EXHAUSTED\", "
+                        payload << "{\"event\":\"ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\", "
                                 << "\"code\":3009, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"msg_per_day\":\"" << UserData::getInstance().msg_per_day << "\"}";              
+                                << "\"max_monthly_payload_in_bytes\":\"" << UserData::getInstance().maxMonthlyPayloadInBytes << "\"}";              
                         std::string body = payload.str(); 
                         
                         sendHTTPSPOSTRequestFireAndForget(
