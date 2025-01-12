@@ -126,7 +126,6 @@ private:
     UserData() = default;
 
 public:
-    int duration;
     int msgSizeAllowedInBytes;
     unsigned long long maxMonthlyPayloadInBytes;
     int connections;
@@ -136,7 +135,6 @@ public:
     std::string webhookPath;
     std::string webhookSecret;
     uint32_t webhooks;
-    int maxMessagesPerSecond = 10000;
     int batchSize = 1000;
 
     /** Public static method to get the single instance */ 
@@ -219,15 +217,6 @@ enum class Webhooks : uint32_t
 };
 
 std::unordered_map<Webhooks, int> webhookStatus;
-
-void resetMessageCounter() {
-    std::lock_guard<std::mutex> lock(rateLimitMutex);
-    auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration_cast<std::chrono::seconds>(now - lastReset).count() >= 1) {
-        messageCount.store(0, std::memory_order_relaxed);
-        lastReset = now;
-    }
-}
 
 /** Initialize LMDB environment */ 
 void init_env() {
@@ -791,7 +780,6 @@ void populateUserData(std::string data) {
 
     UserData::getInstance().clientApiKey = parsedJson["client_api_key"];
     UserData::getInstance().adminApiKey = parsedJson["admin_api_key"];
-    UserData::getInstance().maxMessagesPerSecond = parsedJson["msg_per_second_per_connection"].get<int>();
     UserData::getInstance().connections = parsedJson["connections"].get<int>();
     UserData::getInstance().msgSizeAllowedInBytes = parsedJson["msg_size_allowed_in_bytes"].get<int>();
     UserData::getInstance().maxMonthlyPayloadInBytes = parsedJson["max_monthly_payload_in_bytes"].get<unsigned long long>();
@@ -799,6 +787,10 @@ void populateUserData(std::string data) {
     UserData::getInstance().webHookBaseUrl = parsedJson["webhook_base_url"];
     UserData::getInstance().webhookPath = parsedJson["webhook_path"];
     UserData::getInstance().webhookSecret = parsedJson["webhook_secret"];
+
+    if (parsedJson.contains("total_payload_sent")) {
+        totalPayloadSent = parsedJson["total_payload_sent"].get<unsigned long long>();
+    }
 
     populateWebhookStatus(UserData::getInstance().webhooks);
 }
