@@ -2132,6 +2132,8 @@ void worker_t::work()
 	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
         res->writeStatus("200 OK");
 	    res->end("pong!");
+	}).any("/*", [](auto *res, auto */*req*/) {
+        res->end("Invalid request.");
 	}).listen(PORT, [this](auto *token) {
     listen_socket_ = token;
     if (listen_socket_) {
