@@ -61,7 +61,7 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 443;
+constexpr const int PORT = 9001;
 
 /** 
  * Sending Constants
@@ -136,6 +136,7 @@ public:
     std::string webhookSecret;
     uint32_t webhooks;
     int batchSize = 1000;
+    std::string webhookIP;
 
     /** Public static method to get the single instance */ 
     static UserData& getInstance() {
@@ -682,7 +683,7 @@ void sendHTTPSPOSTRequestFireAndForget(
             /** Specify the endpoint using the IP address and port. 
              *  Ensure the IP address is correctly formatted. */
             boost::asio::ip::tcp::endpoint endpoint(
-                boost::asio::ip::make_address("167.71.239.154"),
+                boost::asio::ip::make_address(UserData::getInstance().webhookIP),
                 443
             );
 
@@ -774,6 +775,44 @@ HTTPResponse sendHTTPSRequest(std::string baseURL, std::string path, const httpl
     }
 }
 
+/**
+ * Resolves the IPv4 address for the given hostname and stores it.
+ * This function ensures proper memory management and handles errors gracefully.
+ * 
+ * @param hostname The domain name to resolve (e.g., "www.example.com").
+ */
+void resolveAndStoreIPAddress(const std::string& hostname) {
+    /** Define the hints structure to specify address family and socket type */
+    struct addrinfo hints, *res = nullptr;
+    char ipAddress[INET_ADDRSTRLEN]; 
+
+    /** Zero out the hints structure */
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;        
+    hints.ai_socktype = SOCK_STREAM; 
+
+    /** Resolve the hostname to an IP address using getaddrinfo */
+    int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &res);
+    if (status != 0) {
+        /** Print an error message if resolution fails */
+        std::cerr << "getaddrinfo error : " << gai_strerror(status) << std::endl;
+        return;
+    }
+
+    /** Extract and convert the IPv4 address to a readable format */
+    struct sockaddr_in* ipv4 = (struct sockaddr_in*)res->ai_addr; 
+    inet_ntop(AF_INET, &(ipv4->sin_addr), ipAddress, sizeof(ipAddress)); 
+
+    /** Print the resolved IP address */
+    std::cout << "Resolved IPv4 address for " << hostname << " : " << ipAddress << std::endl;
+
+    /** storing the address */
+    UserData::getInstance().webhookIP = ipAddress;
+
+    /** Free the allocated memory for the addrinfo structure */
+    freeaddrinfo(res);
+}
+
 /** This function will parse and populate the userdata */
 void populateUserData(std::string data) {
     nlohmann::json parsedJson = nlohmann::json::parse(data);
@@ -793,6 +832,7 @@ void populateUserData(std::string data) {
     }
 
     populateWebhookStatus(UserData::getInstance().webhooks);
+    resolveAndStoreIPAddress(UserData::getInstance().webHookBaseUrl);
 }
 
 /**
