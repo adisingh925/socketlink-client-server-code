@@ -2270,38 +2270,22 @@ void worker_t::work()
 
             MDB_val key, value; /** Variables to hold key-value pairs */
             bool first = true; /** Flag to track the first element in the JSON array */
-            std::string buffer; /** Buffer for constructing JSON fragments */
-
-            /** Reserve buffer space upfront for efficiency */
-            buffer.reserve(4096); /** Start with a reasonable chunk size, like 4KB */
 
             /** Iterate over the database using the cursor */
             while (mdb_cursor_get(cursor, &key, &value, MDB_NEXT) == 0) {
                 /** Add a comma between JSON objects if it's not the first element */
                 if (!first) {
-                    buffer += ",";
+                    res->write(",");
                 } else {
                     first = false;
                 }
 
-                /** Construct the JSON object for the key-value pair */
-                buffer += R"({"key":")";
-                buffer.append(static_cast<char*>(key.mv_data), key.mv_size); /** Append key */
-                buffer += R"(","value":")";
-                buffer.append(static_cast<char*>(value.mv_data), value.mv_size); /** Append value */
-                buffer += R"("})";
-
-                /** Stream buffer content if it exceeds the chunk size */
-                if (buffer.size() > 4096) { /** 4KB chunk size */
-                    res->write(buffer); /** Write buffer to response */
-                    buffer.clear(); /** Clear the buffer for reuse */
-                    buffer.reserve(4096); /** Re-reserve space to avoid reallocating */
-                }
-            }
-
-            /** Write any remaining data in the buffer */
-            if (!buffer.empty()) {
-                res->write(buffer);
+                /** Construct and stream the JSON object for the key-value pair */
+                res->write(R"({"key":")");
+                res->write(std::string_view(static_cast<char*>(key.mv_data), key.mv_size)); /** Append key */
+                res->write(R"(","value":")");
+                res->write(std::string_view(static_cast<char*>(value.mv_data), value.mv_size)); /** Append value */
+                res->write(R"("})");
             }
 
             /** End the JSON array */
