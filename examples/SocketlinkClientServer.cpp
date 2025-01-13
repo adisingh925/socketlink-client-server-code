@@ -2264,9 +2264,11 @@ void worker_t::work()
             }
 
             /** Begin streaming response */
-            res->writeStatus("200 OK");
-            res->writeHeader("Content-Type", "application/json");
-            res->write("["); /** Start JSON array */
+            res->cork([res]() {
+                res->writeStatus("200 OK");
+                res->writeHeader("Content-Type", "application/json");
+                res->write("["); /** Start JSON array */
+            });
 
             MDB_val key, value; /** Variables to hold key-value pairs */
             bool first = true; /** Flag to track the first element in the JSON array */
@@ -2280,19 +2282,23 @@ void worker_t::work()
                     first = false;
                 }
 
-                /** Construct and stream the JSON object for the key-value pair */
-                res->write(R"({"key":")");
-                res->write(std::string_view(static_cast<char*>(key.mv_data), key.mv_size)); /** Append key */
-                res->write(R"(","value":")");
-                res->write(std::string_view(static_cast<char*>(value.mv_data), value.mv_size)); /** Append value */
-                res->write(R"("})");
+                res->cork([res, key, value]() {
+                    /** Construct and stream the JSON object for the key-value pair */
+                    res->write(R"({"key":")");
+                    res->write(std::string_view(static_cast<char*>(key.mv_data), key.mv_size)); /** Append key */
+                    res->write(R"(","value":")");
+                    res->write(std::string_view(static_cast<char*>(value.mv_data), value.mv_size)); /** Append value */
+                    res->write(R"("})");
+                });
             }
 
-            /** End the JSON array */
-            res->write("]");
+            res->cork([res]() {
+                /** End the JSON array */
+                res->write("]");
 
-            /** End the response */
-            res->end();
+                /** End the response */
+                res->end();
+            });
 
             /** Close the cursor */
             mdb_cursor_close(cursor);
