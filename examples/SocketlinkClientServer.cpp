@@ -29,11 +29,6 @@ std::mutex rateLimitMutex;
 std::mutex write_worker_mutex;
 
 /**
- * Rate limiting variables
- */
-std::chrono::steady_clock::time_point lastReset = std::chrono::steady_clock::now();
-
-/**
  * Global atomic variables and data structures
  */
 std::atomic<int> globalConnectionCounter(0);
@@ -61,7 +56,7 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 9001;
+constexpr const int PORT = 443;
 
 /** 
  * Sending Constants
@@ -803,9 +798,6 @@ void resolveAndStoreIPAddress(const std::string& hostname) {
     struct sockaddr_in* ipv4 = (struct sockaddr_in*)res->ai_addr; 
     inet_ntop(AF_INET, &(ipv4->sin_addr), ipAddress, sizeof(ipAddress)); 
 
-    /** Print the resolved IP address */
-    std::cout << "Resolved IPv4 address for " << hostname << " : " << ipAddress << std::endl;
-
     /** storing the address */
     UserData::getInstance().webhookIP = ipAddress;
 
@@ -842,13 +834,10 @@ void fetchAndPopulateUserData() {
     try {
         std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
 
-        /** Headers for the HTTP request */ 
-        httplib::Headers headers = {
-            {"secret", SECRET}
-        };
-
         /** Make the HTTP request */ 
-        std::string userData = sendHTTPSRequest(MASTER_SERVER_URL, "/api/v1/init/" + dropletId, headers).body;
+        std::string userData = sendHTTPSRequest(MASTER_SERVER_URL, "/api/v1/init/" + dropletId, {
+            {"secret", SECRET}
+        }).body;
 
         /** populate the userdata */
         populateUserData(userData);
