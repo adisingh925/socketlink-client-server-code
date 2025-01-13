@@ -2158,6 +2158,173 @@ void worker_t::work()
         res->writeStatus("200 OK");
         res->writeHeader("Content-Type", "application/json");
         res->end(read_worker(std::string(rid), limit, offset));  
+	}).del("/api/v1/database", [this](auto *res, auto *req) {
+         /** Handle connection abortion immediately */
+        res->onAborted([]() {
+            /** Connection aborted, clean up resources if necessary */
+        });
+
+        /** Extract the API key from the request header */
+        std::string_view apiKey = req->getHeader("api-key");
+
+        /** Check if the provided API key is valid */
+        if (apiKey != UserData::getInstance().adminApiKey) {
+            /** Increment the rejected request counter to track unauthorized access */
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            /** Respond with 403 Forbidden if the API key is invalid */
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            return;
+        }
+
+        MDB_txn* txn = nullptr;  /** Pointer for LMDB transaction */
+        MDB_dbi dbi;  /** Handle for LMDB database */
+
+        try {
+            /** Begin a write transaction, avoid creating a new txn each time for efficiency */
+            if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
+                throw std::runtime_error("Failed to begin transaction.");
+            }
+
+            /** Open the database only once and reuse the handle */
+            if (mdb_dbi_open(txn, "common_db", 0, &dbi) != 0) {
+                mdb_txn_abort(txn);  /** Abort transaction if database fails to open */
+                throw std::runtime_error("Failed to open database.");
+            }
+
+            /** Drop all keys in the database while keeping its structure */
+            if (mdb_drop(txn, dbi, 0) != 0) {  /** Pass `0` to truncate the database */
+                mdb_txn_abort(txn);  /** Abort transaction if drop operation fails */
+                throw std::runtime_error("Failed to drop database.");
+            }
+
+            /** Commit the transaction to apply changes, keeping memory use low */
+            if (mdb_txn_commit(txn) != 0) {
+                throw std::runtime_error("Failed to commit transaction.");
+            }
+
+            /** Respond with a success message */
+            res->writeStatus("200 OK");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"message": "Database truncated successfully."})");
+        } catch (const std::exception& e) {
+            /** Handle any errors efficiently without leaking resources */
+
+            /** If an error occurs, make sure the transaction is aborted to free resources */
+            if (txn) mdb_txn_abort(txn);
+
+            /** Respond with the error message */
+            res->writeStatus("500 Internal Server Error");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
+        }
+	}).get("/api/v1/database", [this](auto *res, auto *req) {
+        /** Handle connection aborted scenario */
+        res->onAborted([]() {
+            /** Connection aborted, no further action needed */
+        });
+
+        /** Validate API key */
+        std::string_view apiKey = req->getHeader("api-key");
+
+        if (apiKey != UserData::getInstance().adminApiKey) {
+            /** Log rejected request and respond with 403 Forbidden */
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            return;
+        }
+
+        /** Commit any buffered writes before starting the read operation */
+        write_worker("", "", "", true);
+
+        MDB_txn* txn = nullptr; /** Pointer for LMDB transaction */
+        MDB_dbi dbi;            /** Handle for LMDB database */
+        MDB_cursor* cursor = nullptr; /** Pointer for LMDB cursor */
+
+        try {
+            /** Begin a read-only transaction */
+            if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
+                throw std::runtime_error("Failed to begin transaction.");
+            }
+
+            /** Open the database in the transaction context */
+            if (mdb_dbi_open(txn, "common_db", 0, &dbi) != 0) {
+                mdb_txn_abort(txn); /** Abort transaction if the database fails to open */
+                throw std::runtime_error("Failed to open database.");
+            }
+
+            /** Open a cursor to iterate over the database */
+            if (mdb_cursor_open(txn, dbi, &cursor) != 0) {
+                mdb_txn_abort(txn); /** Abort transaction if cursor fails to open */
+                throw std::runtime_error("Failed to open cursor.");
+            }
+
+            /** Begin streaming response */
+            res->writeStatus("200 OK");
+            res->writeHeader("Content-Type", "application/json");
+            res->write("["); /** Start JSON array */
+
+            MDB_val key, value; /** Variables to hold key-value pairs */
+            bool first = true; /** Flag to track the first element in the JSON array */
+            std::string buffer; /** Buffer for constructing JSON fragments */
+
+            /** Reserve buffer space upfront for efficiency */
+            buffer.reserve(4096); /** Start with a reasonable chunk size, like 4KB */
+
+            /** Iterate over the database using the cursor */
+            while (mdb_cursor_get(cursor, &key, &value, MDB_NEXT) == 0) {
+                /** Add a comma between JSON objects if it's not the first element */
+                if (!first) {
+                    buffer += ",";
+                } else {
+                    first = false;
+                }
+
+                /** Construct the JSON object for the key-value pair */
+                buffer += R"({"key":")";
+                buffer.append(static_cast<char*>(key.mv_data), key.mv_size); /** Append key */
+                buffer += R"(","value":")";
+                buffer.append(static_cast<char*>(value.mv_data), value.mv_size); /** Append value */
+                buffer += R"("})";
+
+                /** Stream buffer content if it exceeds the chunk size */
+                if (buffer.size() > 4096) { /** 4KB chunk size */
+                    res->write(buffer); /** Write buffer to response */
+                    buffer.clear(); /** Clear the buffer for reuse */
+                    buffer.reserve(4096); /** Re-reserve space to avoid reallocating */
+                }
+            }
+
+            /** Write any remaining data in the buffer */
+            if (!buffer.empty()) {
+                res->write(buffer);
+            }
+
+            /** End the JSON array */
+            res->write("]");
+
+            /** End the response */
+            res->end();
+
+            /** Close the cursor */
+            mdb_cursor_close(cursor);
+
+            /** Abort the transaction (read-only transactions are aborted, not committed) */
+            mdb_txn_abort(txn);
+        } catch (const std::exception& e) {
+            /** Handle any exceptions that occur during processing */
+            if (cursor) mdb_cursor_close(cursor); /** Ensure the cursor is closed */
+            if (txn) mdb_txn_abort(txn);          /** Ensure the transaction is aborted */
+
+            /** Respond with an error message */
+            res->writeStatus("500 Internal Server Error");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
+        }
 	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
         res->writeStatus("200 OK");
 	    res->end("pong!");
