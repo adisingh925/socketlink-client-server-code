@@ -1499,12 +1499,12 @@ void worker_t::work()
                     std::string rid = ws->getUserData()->rid;
                     unsigned int subscribers = app_->numSubscribers(rid);
 
-                    /** Cooldown check */
-                    auto now = std::chrono::steady_clock::now();
-                    auto cooldownDuration = std::chrono::microseconds(static_cast<int>(subscribers * 200));
+                    // /** Cooldown check */
+                    // auto now = std::chrono::steady_clock::now();
+                    // auto cooldownDuration = std::chrono::microseconds(static_cast<int>(subscribers * 200));
 
-                    if(now >= globalCooldownEnd.load(std::memory_order_relaxed)){
-                        globalCooldownEnd.store(now + cooldownDuration, std::memory_order_relaxed);
+                    // if(now >= globalCooldownEnd.load(std::memory_order_relaxed)){
+                    //     globalCooldownEnd.store(now + cooldownDuration, std::memory_order_relaxed);
                         globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
                         totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
 
@@ -1593,12 +1593,12 @@ void worker_t::work()
                                 {}
                             );
                         }
-                    }
-                    else
-                    {
-                        droppedMessages.fetch_add(1, std::memory_order_relaxed);
-                        ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
-                    }
+                    // }
+                    // else
+                    // {
+                    //     droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                    //     ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
+                    // }
                 } else {
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
                     ws->send("{\"event\":\"DAILY_MSG_LIMIT_EXHAUSTED\"}", uWS::OpCode::TEXT, true);
