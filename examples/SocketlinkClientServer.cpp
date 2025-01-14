@@ -48,6 +48,10 @@ std::unordered_set<std::string> uid;
  */
 std::atomic<std::chrono::steady_clock::time_point> globalCooldownEnd(std::chrono::steady_clock::now());
 
+/** Configuration parameters */ 
+constexpr double k = 0.01;      // Scaling factor
+constexpr double M = 1000.0;    // Normalization constant for payload size
+
 /**
  * Thread local variables
  */
@@ -1499,10 +1503,12 @@ void worker_t::work()
                     std::string rid = ws->getUserData()->rid;
                     unsigned int subscribers = app_->numSubscribers(rid);
 
+                    /** Calculate cooldown duration */
+                    double cooldownMillis = k * subscribers * (static_cast<double>(message.size()) / M);
+                    auto cooldownDuration = std::chrono::milliseconds(static_cast<int>(cooldownMillis));
+
                     /** Cooldown check */
                     auto now = std::chrono::steady_clock::now();
-                    auto cooldownDuration = std::chrono::microseconds(static_cast<int>(subscribers * 200));
-
                     if(now >= globalCooldownEnd.load(std::memory_order_relaxed)){
                         globalCooldownEnd.store(now + cooldownDuration, std::memory_order_relaxed);
                         globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
