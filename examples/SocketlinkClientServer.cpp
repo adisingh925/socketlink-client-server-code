@@ -939,7 +939,7 @@ void worker_t::work()
     .maxPayloadLength = 1024 * 1024,
     .idleTimeout = 60,
     .maxBackpressure = 4 * 1024,
-    .closeOnBackpressureLimit = true,
+    .closeOnBackpressureLimit = false,
     .resetIdleTimeoutOnSend = true,
     .sendPingsAutomatically = true,
     /* Handlers */
