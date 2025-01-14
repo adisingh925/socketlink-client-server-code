@@ -1501,7 +1501,7 @@ void worker_t::work()
 
                     /** Cooldown check */
                     auto now = std::chrono::steady_clock::now();
-                    auto cooldownDuration = std::chrono::microseconds(static_cast<int>(subscribers * 500));
+                    auto cooldownDuration = std::chrono::microseconds(static_cast<int>(subscribers * 200));
 
                     if(now >= globalCooldownEnd.load(std::memory_order_relaxed)){
                         globalCooldownEnd.store(now + cooldownDuration, std::memory_order_relaxed);
