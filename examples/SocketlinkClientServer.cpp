@@ -1500,7 +1500,7 @@ void worker_t::work()
                     /**FileWriter& writer = GlobalFileWriter::getInstance();
                     writer.writeMessage(std::string(message));*/
 
-                    write_worker(rid, ws->getUserData()->uid, std::string(message));
+                    /* write_worker(rid, ws->getUserData()->uid, std::string(message)); */
 
                     /** publishing message */
                     ws->publish(rid, message, opCode, true);
@@ -2220,102 +2220,104 @@ void worker_t::work()
             res->writeHeader("Content-Type", "application/json");
             res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
         }
-	}).get("/api/v1/database", [this](auto *res, auto *req) {
-        /** Handle connection aborted scenario */
-        res->onAborted([]() {
-            /** Connection aborted, no further action needed */
-        });
+	})
+    // .get("/api/v1/database", [this](auto *res, auto *req) {
+    //     /** Handle connection aborted scenario */
+    //     res->onAborted([]() {
+    //         /** Connection aborted, no further action needed */
+    //     });
 
-        /** Validate API key */
-        std::string_view apiKey = req->getHeader("api-key");
+    //     /** Validate API key */
+    //     std::string_view apiKey = req->getHeader("api-key");
 
-        if (apiKey != UserData::getInstance().adminApiKey) {
-            /** Log rejected request and respond with 403 Forbidden */
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-            return;
-        }
+    //     if (apiKey != UserData::getInstance().adminApiKey) {
+    //         /** Log rejected request and respond with 403 Forbidden */
+    //         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+    //         res->writeStatus("403");
+    //         res->writeHeader("Content-Type", "application/json");
+    //         res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+    //         return;
+    //     }
 
-        /** Commit any buffered writes before starting the read operation */
-        write_worker("", "", "", true);
+    //     /** Commit any buffered writes before starting the read operation */
+    //     write_worker("", "", "", true);
 
-        MDB_txn* txn = nullptr; /** Pointer for LMDB transaction */
-        MDB_dbi dbi;            /** Handle for LMDB database */
-        MDB_cursor* cursor = nullptr; /** Pointer for LMDB cursor */
+    //     MDB_txn* txn = nullptr; /** Pointer for LMDB transaction */
+    //     MDB_dbi dbi;            /** Handle for LMDB database */
+    //     MDB_cursor* cursor = nullptr; /** Pointer for LMDB cursor */
 
-        try {
-            /** Begin a read-only transaction */
-            if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
-                throw std::runtime_error("Failed to begin transaction.");
-            }
+    //     try {
+    //         /** Begin a read-only transaction */
+    //         if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
+    //             throw std::runtime_error("Failed to begin transaction.");
+    //         }
 
-            /** Open the database in the transaction context */
-            if (mdb_dbi_open(txn, "common_db", 0, &dbi) != 0) {
-                mdb_txn_abort(txn); /** Abort transaction if the database fails to open */
-                throw std::runtime_error("Failed to open database.");
-            }
+    //         /** Open the database in the transaction context */
+    //         if (mdb_dbi_open(txn, "common_db", 0, &dbi) != 0) {
+    //             mdb_txn_abort(txn); /** Abort transaction if the database fails to open */
+    //             throw std::runtime_error("Failed to open database.");
+    //         }
 
-            /** Open a cursor to iterate over the database */
-            if (mdb_cursor_open(txn, dbi, &cursor) != 0) {
-                mdb_txn_abort(txn); /** Abort transaction if cursor fails to open */
-                throw std::runtime_error("Failed to open cursor.");
-            }
+    //         /** Open a cursor to iterate over the database */
+    //         if (mdb_cursor_open(txn, dbi, &cursor) != 0) {
+    //             mdb_txn_abort(txn); /** Abort transaction if cursor fails to open */
+    //             throw std::runtime_error("Failed to open cursor.");
+    //         }
 
-            /** Begin streaming response */
-            res->cork([res]() {
-                res->writeStatus("200 OK");
-                res->writeHeader("Content-Type", "application/json");
-                res->write("["); /** Start JSON array */
-            });
+    //         /** Begin streaming response */
+    //         res->cork([res]() {
+    //             res->writeStatus("200 OK");
+    //             res->writeHeader("Content-Type", "application/json");
+    //             res->write("["); /** Start JSON array */
+    //         });
 
-            MDB_val key, value; /** Variables to hold key-value pairs */
-            bool first = true; /** Flag to track the first element in the JSON array */
+    //         MDB_val key, value; /** Variables to hold key-value pairs */
+    //         bool first = true; /** Flag to track the first element in the JSON array */
 
-            /** Iterate over the database using the cursor */
-            while (mdb_cursor_get(cursor, &key, &value, MDB_NEXT) == 0) {
-                /** Add a comma between JSON objects if it's not the first element */
-                if (!first) {
-                    res->write(",");
-                } else {
-                    first = false;
-                }
+    //         /** Iterate over the database using the cursor */
+    //         while (mdb_cursor_get(cursor, &key, &value, MDB_NEXT) == 0) {
+    //             /** Add a comma between JSON objects if it's not the first element */
+    //             if (!first) {
+    //                 res->write(",");
+    //             } else {
+    //                 first = false;
+    //             }
 
-                res->cork([res, key, value]() {
-                    /** Construct and stream the JSON object for the key-value pair */
-                    res->write(R"({"key":")");
-                    res->write(std::string_view(static_cast<char*>(key.mv_data), key.mv_size)); /** Append key */
-                    res->write(R"(","value":")");
-                    res->write(std::string_view(static_cast<char*>(value.mv_data), value.mv_size)); /** Append value */
-                    res->write(R"("})");
-                });
-            }
+    //             res->cork([res, key, value]() {
+    //                 /** Construct and stream the JSON object for the key-value pair */
+    //                 res->write(R"({"key":")");
+    //                 res->write(std::string_view(static_cast<char*>(key.mv_data), key.mv_size)); /** Append key */
+    //                 res->write(R"(","value":")");
+    //                 res->write(std::string_view(static_cast<char*>(value.mv_data), value.mv_size)); /** Append value */
+    //                 res->write(R"("})");
+    //             });
+    //         }
 
-            res->cork([res]() {
-                /** End the JSON array */
-                res->write("]");
+    //         res->cork([res]() {
+    //             /** End the JSON array */
+    //             res->write("]");
 
-                /** End the response */
-                res->end();
-            });
+    //             /** End the response */
+    //             res->end();
+    //         });
 
-            /** Close the cursor */
-            mdb_cursor_close(cursor);
+    //         /** Close the cursor */
+    //         mdb_cursor_close(cursor);
 
-            /** Abort the transaction (read-only transactions are aborted, not committed) */
-            mdb_txn_abort(txn);
-        } catch (const std::exception& e) {
-            /** Handle any exceptions that occur during processing */
-            if (cursor) mdb_cursor_close(cursor); /** Ensure the cursor is closed */
-            if (txn) mdb_txn_abort(txn);          /** Ensure the transaction is aborted */
+    //         /** Abort the transaction (read-only transactions are aborted, not committed) */
+    //         mdb_txn_abort(txn);
+    //     } catch (const std::exception& e) {
+    //         /** Handle any exceptions that occur during processing */
+    //         if (cursor) mdb_cursor_close(cursor); /** Ensure the cursor is closed */
+    //         if (txn) mdb_txn_abort(txn);          /** Ensure the transaction is aborted */
 
-            /** Respond with an error message */
-            res->writeStatus("500 Internal Server Error");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
-        }
-	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
+    //         /** Respond with an error message */
+    //         res->writeStatus("500 Internal Server Error");
+    //         res->writeHeader("Content-Type", "application/json");
+    //         res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
+    //     }
+	// })
+    .get("/api/v1/ping", [](auto *res, auto */*req*/) {
         res->writeStatus("200 OK");
 	    res->end("pong!");
 	}).any("/*", [](auto *res, auto */*req*/) {
