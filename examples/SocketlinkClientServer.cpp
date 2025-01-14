@@ -1594,6 +1594,11 @@ void worker_t::work()
                             );
                         }
                     }
+                    else
+                    {
+                        droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                        ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
+                    }
                 } else {
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
                     ws->send("{\"event\":\"DAILY_MSG_LIMIT_EXHAUSTED\"}", uWS::OpCode::TEXT, true);
