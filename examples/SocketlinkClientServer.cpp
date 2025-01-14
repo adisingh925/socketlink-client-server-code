@@ -1498,93 +1498,106 @@ void worker_t::work()
                 if (totalPayloadSent.load(std::memory_order_relaxed) < UserData::getInstance().maxMonthlyPayloadInBytes) {
                     std::string rid = ws->getUserData()->rid;
                     unsigned int subscribers = app_->numSubscribers(rid);
-                    globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
-                    totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
 
-                    /** Writing data to the file */
-                    /**FileWriter& writer = GlobalFileWriter::getInstance();
-                    writer.writeMessage(std::string(message));*/
+                    /** Cooldown check */
+                    auto now = std::chrono::steady_clock::now();
+                    auto cooldownDuration = std::chrono::microseconds(static_cast<int>(subscribers * 500));
 
-                    write_worker(rid, ws->getUserData()->uid, std::string(message));
+                    if(now >= globalCooldownEnd.load(std::memory_order_relaxed)){
+                        globalCooldownEnd.store(now + cooldownDuration, std::memory_order_relaxed);
+                        globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
+                        totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
 
-                    /** publishing message */
-                    ws->publish(rid, message, opCode, true);
+                        /** Writing data to the file */
+                        /**FileWriter& writer = GlobalFileWriter::getInstance();
+                        writer.writeMessage(std::string(message));*/
 
-                    std::for_each(::workers.begin(), ::workers.end(), [message, opCode, rid](worker_t &w) {
-                        /** Check if the current thread ID matches the worker's thread ID */ 
-                        if (std::this_thread::get_id() != w.thread_->get_id()) {
-                            /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w, message, opCode, rid]() {
-                                w.app_->publish(rid, message, opCode, true);
-                            });
+                        write_worker(rid, ws->getUserData()->uid, std::string(message));
+
+                        /** publishing message */
+                        ws->publish(rid, message, opCode, true);
+
+                        std::for_each(::workers.begin(), ::workers.end(), [message, opCode, rid](worker_t &w) {
+                            /** Check if the current thread ID matches the worker's thread ID */ 
+                            if (std::this_thread::get_id() != w.thread_->get_id()) {
+                                /** Defer the message publishing to the worker's loop */ 
+                                w.loop_->defer([&w, message, opCode, rid]() {
+                                    w.app_->publish(rid, message, opCode, true);
+                                });
+                            }
+                        });
+
+                        /** this is a dangerous and can cause performance degrade */
+                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_ROOM){
+                            std::ostringstream payload;
+                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
+                                    << "\"code\":5009, "
+                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                    << "\"message\":\"" << message << "\"}";    
+
+                            std::string body = payload.str(); 
+                            
+                            sendHTTPSPOSTRequestFireAndForget(
+                                UserData::getInstance().webHookBaseUrl,
+                                UserData::getInstance().webhookPath,
+                                body,
+                                {}
+                            );
+                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_ROOM){
+                            std::ostringstream payload;
+                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
+                                    << "\"code\":5010, "
+                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                    << "\"message\":\"" << message << "\"}";  
+
+                            std::string body = payload.str(); 
+                            
+                            sendHTTPSPOSTRequestFireAndForget(
+                                UserData::getInstance().webHookBaseUrl,
+                                UserData::getInstance().webhookPath,
+                                body,
+                                {}
+                            );
+                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_ROOM){
+                            std::ostringstream payload;
+                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
+                                    << "\"code\":5011, "
+                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                    << "\"message\":\"" << message << "\"}";      
+
+                            std::string body = payload.str(); 
+                            
+                            sendHTTPSPOSTRequestFireAndForget(
+                                UserData::getInstance().webHookBaseUrl,
+                                UserData::getInstance().webhookPath,
+                                body,
+                                {}
+                            );
+                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_ROOM){
+                            std::ostringstream payload;
+                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
+                                    << "\"code\":5012, "
+                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                    << "\"message\":\"" << message << "\"}";
+
+                            std::string body = payload.str();
+
+                            sendHTTPSPOSTRequestFireAndForget(
+                                UserData::getInstance().webHookBaseUrl,
+                                UserData::getInstance().webhookPath,
+                                body,
+                                {}
+                            );
                         }
-                    });
-
-                    /** this is a dangerous and can cause performance degrade */
-                    if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_ROOM){
-                        std::ostringstream payload;
-                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
-                                << "\"code\":5009, "
-                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"message\":\"" << message << "\"}";    
-
-                        std::string body = payload.str(); 
-                        
-                        sendHTTPSPOSTRequestFireAndForget(
-                            UserData::getInstance().webHookBaseUrl,
-                            UserData::getInstance().webhookPath,
-                            body,
-                            {}
-                        );
-                    } else if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_ROOM){
-                        std::ostringstream payload;
-                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
-                                << "\"code\":5010, "
-                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"message\":\"" << message << "\"}";  
-
-                        std::string body = payload.str(); 
-                        
-                        sendHTTPSPOSTRequestFireAndForget(
-                            UserData::getInstance().webHookBaseUrl,
-                            UserData::getInstance().webhookPath,
-                            body,
-                            {}
-                        );
-                    } else if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_ROOM){
-                        std::ostringstream payload;
-                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
-                                << "\"code\":5011, "
-                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"message\":\"" << message << "\"}";      
-
-                        std::string body = payload.str(); 
-                        
-                        sendHTTPSPOSTRequestFireAndForget(
-                            UserData::getInstance().webHookBaseUrl,
-                            UserData::getInstance().webhookPath,
-                            body,
-                            {}
-                        );
-                    } else if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_ROOM){
-                        std::ostringstream payload;
-                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
-                                << "\"code\":5012, "
-                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"message\":\"" << message << "\"}";
-
-                        std::string body = payload.str();
-
-                        sendHTTPSPOSTRequestFireAndForget(
-                            UserData::getInstance().webHookBaseUrl,
-                            UserData::getInstance().webhookPath,
-                            body,
-                            {}
-                        );
+                    }
+                    else
+                    {
+                        droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                        ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
                     }
                 } else {
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
