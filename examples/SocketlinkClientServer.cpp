@@ -1459,6 +1459,9 @@ void worker_t::work()
         if(message.size() > UserData::getInstance().msgSizeAllowedInBytes){
             droppedMessages.fetch_add(1, std::memory_order_relaxed);
 
+            /** alert the client about the issue */
+            ws->send("{\"event\":\"MESSAGE_SIZE_EXCEEDED\"}", uWS::OpCode::TEXT, true);
+
             if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_MESSAGE_SIZE_EXCEEDED\", "
