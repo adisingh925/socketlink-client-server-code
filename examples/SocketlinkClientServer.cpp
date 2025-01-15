@@ -331,62 +331,59 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
 }
 
 std::string read_worker(const std::string& room_id, int n, int m) {
-    MDB_txn* txn;  /** Transaction handle */
-    MDB_dbi dbi;   /** Database handle */
-    MDB_cursor* cursor;  /** Cursor for iterating through the database */
+    MDB_txn* txn;  // Transaction handle
+    MDB_dbi dbi;   // Database handle
+    MDB_cursor* cursor;  // Cursor for iterating through the database
 
-    std::ostringstream result;  /** Output stream to accumulate messages in JSON format */
+    std::ostringstream result;  // Output stream to accumulate messages in JSON format
 
-    /** Start a read-only transaction */
+    // Start a read-only transaction
     if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
         std::cerr << "Failed to begin read transaction: " << mdb_strerror(errno) << "\n";
-        return "[]";  /** Return empty JSON array on failure */
+        return "[]";  // Return empty JSON array on failure
     }
 
-    /** Open the common database for all rooms */
+    // Open the common database for all rooms
     if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
         std::cerr << "Failed to open database: " << mdb_strerror(errno) << "\n";
-        mdb_txn_abort(txn);  /** Abort the transaction if opening the database fails */
-        return "[]";  /** Return empty JSON array on failure */
+        mdb_txn_abort(txn);  // Abort the transaction if opening the database fails
+        return "[]";  // Return empty JSON array on failure
     }
 
-    /** Open a cursor to iterate through the database */
+    // Open a cursor to iterate through the database
     if (mdb_cursor_open(txn, dbi, &cursor) != 0) {
         std::cerr << "Failed to open cursor: " << mdb_strerror(errno) << "\n";
-        mdb_txn_abort(txn);  /** Abort the transaction if opening the cursor fails */
-        mdb_dbi_close(env, dbi);  /** Close the database handle */
-        return "[]";  /** Return empty JSON array on failure */
+        mdb_txn_abort(txn);  // Abort the transaction if opening the cursor fails
+        mdb_dbi_close(env, dbi);  // Close the database handle
+        return "[]";  // Return empty JSON array on failure
     }
 
-    MDB_val key, value;  /** Key-value pair to store the retrieved data */
-    int messages_skipped = 0;  /** Counter for skipped messages */
-    int messages_read = 0;  /** Counter for read messages */
+    MDB_val key, value;  // Key-value pair to store the retrieved data
+    int messages_skipped = 0;  // Counter for skipped messages
+    int messages_read = 0;  // Counter for read messages
 
-    /** Construct the prefix for the given room_id */
+    // Construct the prefix for the given room_id
     std::string room_prefix = room_id + ":";
 
-    /** Start JSON array */
-    result << "[\n";
-
-    /** Position the cursor at the first key in the database */
-    if (mdb_cursor_get(cursor, &key, &value, MDB_FIRST) == 0) {
-        /** Skip the first `m` messages for the specified room_id */
+    // Position the cursor at the last key in the database
+    if (mdb_cursor_get(cursor, &key, &value, MDB_LAST) == 0) {
+        // Skip messages for the specified room_id until `m` messages are skipped
         while (messages_skipped < m) {
             std::string key_str((char*)key.mv_data, key.mv_size);
 
-            /** Only consider keys that match the `room_id` prefix */
+            // Only consider keys that match the `room_id` prefix
             if (key_str.find(room_prefix) == 0) {
                 messages_skipped++;
             }
 
-            /** Break if the desired number of messages have been skipped */
+            // Break if the desired number of messages have been skipped
             if (messages_skipped >= m) break;
 
-            /** Move to the next key */
-            if (mdb_cursor_get(cursor, &key, &value, MDB_NEXT) != 0) break;
+            // Move to the previous key
+            if (mdb_cursor_get(cursor, &key, &value, MDB_PREV) != 0) break;
         }
 
-        /** If offset `m` is larger than the number of messages, return an empty JSON array */
+        // If offset `m` is larger than the number of messages, return an empty JSON array
         if (messages_skipped < m) {
             mdb_cursor_close(cursor);
             mdb_dbi_close(env, dbi);
@@ -394,20 +391,22 @@ std::string read_worker(const std::string& room_id, int n, int m) {
             return "[]";
         }
 
-        /** Read the next `n` messages */
+        // Start JSON array
+        result << "[\n";
+
+        // Read the next `n` messages
         while (messages_read < n) {
             std::string key_str((char*)key.mv_data, key.mv_size);
 
-            /** Only consider keys that match the `room_id` prefix */
+            // Only consider keys that match the `room_id` prefix
             if (key_str.find(room_prefix) == 0) {
-                /** Extract metadata from the key */
+                // Extract metadata from the key
                 size_t first_colon = key_str.find(':');
                 size_t second_colon = key_str.find(':', first_colon + 1);
                 std::string timestamp_str = key_str.substr(first_colon + 1, second_colon - first_colon - 1);
                 std::string user_id = key_str.substr(second_colon + 1);
 
-                /** Append message JSON to result */
-                if (messages_read > 0) result << ",\n";  /** Add a comma before each message except the first */
+                // Append message JSON to result
                 result << "  {\n";
                 result << "    \"timestamp\": \"" << timestamp_str << "\",\n";
                 result << "    \"message\": \"" << std::string((char*)value.mv_data, value.mv_size) << "\",\n";
@@ -415,29 +414,30 @@ std::string read_worker(const std::string& room_id, int n, int m) {
                 result << "  }";
 
                 messages_read++;
+                if (messages_read < n) result << ",\n";  // Add a comma if not the last message
             }
 
-            /** Move to the next key */
-            if (mdb_cursor_get(cursor, &key, &value, MDB_NEXT) != 0) break;
+            // Move to the previous key
+            if (mdb_cursor_get(cursor, &key, &value, MDB_PREV) != 0) break;
         }
+
+        // End JSON array
+        result << "\n]";
     } else {
         std::cerr << "No messages found for the given room_id.\n";
-        result << "[]";  /** Return an empty JSON array if no messages were found */
+        result << "[]";  // Return an empty JSON array if no messages were found
     }
 
-    /** End JSON array */
-    result << "\n]";
-
-    /** Commit the transaction */
+    // Commit the transaction
     if (mdb_txn_commit(txn) != 0) {
         std::cerr << "Failed to commit transaction: " << mdb_strerror(errno) << "\n";
     }
 
-    /** Close the cursor and database handle */
+    // Close the cursor and database handle
     mdb_cursor_close(cursor);
     mdb_dbi_close(env, dbi);
 
-    /** Return the JSON string */
+    // Return the JSON string
     return result.str();
 }
 
