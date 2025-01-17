@@ -17,6 +17,10 @@
 #include <boost/system/error_code.hpp>
 #include <lmdb.h>
 #include <chrono>
+#include <condition_variable>
+#include <mysql_driver.h>
+#include <mysql_connection.h>
+#include <cppconn/prepared_statement.h>
 
 /** Global variables */ 
 MDB_env* env;
@@ -122,6 +126,102 @@ struct PerSocketData {
      * false - sending not allowed
      */
     bool sendingAllowed = true;
+};
+
+std::string getCurrentSQLTime() {
+    /** Get the current time as a time_point */
+    auto now = std::chrono::system_clock::now();
+    
+    /** Convert time_point to system_time, which represents seconds since epoch */
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    
+    /** Convert to a tm struct (UTC time) */
+    std::tm tm = *std::gmtime(&now_c);  /** Use UTC time instead of local time */
+    
+    /** Buffer to hold the formatted time string */
+    char buffer[20]; /** 'YYYY-MM-DD HH:MM:SS' format */
+
+    /** Use strftime to format the time string */
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm);
+    
+    return std::string(buffer);
+}
+
+class MySQLConnectionHandler {
+private:
+    const std::string db_url = "tcp://db-mysql-blr1-71199-do-user-14198143-0.i.db.ondigitalocean.com:25060";
+    const std::string username = "doadmin";
+    const std::string password = "AVNS_-2wnRtqQ95CGr_xcTP0";
+    const std::string database_name = "defaultdb";
+    const size_t batch_size = 1000;
+
+    std::unique_ptr<sql::Connection> con;
+    std::vector<std::tuple<std::string, std::string, std::string, std::string>> batch_data;
+
+    /** Create a new connection to the database */
+    void createConnection() {
+        auto *driver = sql::mysql::get_mysql_driver_instance();
+        con = std::unique_ptr<sql::Connection>(driver->connect(db_url, username, password));
+        con->setSchema(database_name);
+    }
+
+    /** Insert the batch of data into the database */
+    bool insertBatchData() {
+        try {
+            /** Construct the insert query for the batch */
+            std::ostringstream oss;
+            oss << "INSERT INTO messages (insert_time, message, identifier, room) VALUES ";
+            for (size_t i = 0; i < batch_data.size(); ++i) {
+                if (i > 0) oss << ", ";
+                oss << "(?, ?, ?, ?)";
+            }
+
+            /** Prepare the statement */
+            auto pstmt = std::unique_ptr<sql::PreparedStatement>(con->prepareStatement(oss.str()));
+
+            /** Bind parameters for the batch */
+            int paramIndex = 1;
+            for (const auto& [insert_time, message, identifier, room] : batch_data) {
+                pstmt->setString(paramIndex++, insert_time);
+                pstmt->setString(paramIndex++, message);
+                pstmt->setString(paramIndex++, identifier);
+                pstmt->setString(paramIndex++, room);
+            }
+
+            /** Execute the batch */
+            pstmt->execute();
+            /* std::cout << "Inserted " << batch_data.size() << " rows into the database.\n"; */
+
+            /** Clear the batch after executing */
+            batch_data.clear();
+            return true;
+        } catch (const sql::SQLException &e) {
+            std::cerr << "Batch insertion error: " << e.what() << std::endl;
+            return false;
+        }
+    }
+
+public:
+    MySQLConnectionHandler() {
+        createConnection();
+    }
+
+    /** Add a single entry to the batch and insert if batch size is reached */
+    void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier, const std::string& room) {
+        batch_data.push_back(std::make_tuple(insert_time, message, identifier, room));
+
+        if (batch_data.size() >= batch_size) {
+            /** Execute the batch and clear the batch data */
+            insertBatchData();
+        }
+    }
+
+    /** Flush any remaining data in the batch */
+    void flushRemainingData() {
+        if (!batch_data.empty()) {
+            insertBatchData();
+        }
+    }
 };
 
 class UserData {
@@ -943,6 +1043,8 @@ void worker_t::work()
     })
   );
 
+  MySQLConnectionHandler dbHandler;
+
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
@@ -1465,7 +1567,7 @@ void worker_t::work()
             }
         }
     },
-    .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
+    .message = [this, &dbHandler](auto *ws, std::string_view message, uWS::OpCode opCode) {
         if(message.size() > UserData::getInstance().msgSizeAllowedInBytes){
             droppedMessages.fetch_add(1, std::memory_order_relaxed);
 
@@ -1531,8 +1633,10 @@ void worker_t::work()
                         /**FileWriter& writer = GlobalFileWriter::getInstance();
                         writer.writeMessage(std::string(message));*/
 
-                        write_worker(rid, ws->getUserData()->uid, std::string(message));
+                        /* write_worker(rid, ws->getUserData()->uid, std::string(message)); */
 
+                        dbHandler.insertSingleData(getCurrentSQLTime(), rid, ws->getUserData()->uid, std::string(message));
+                        
                         /** publishing message */
                         ws->publish(rid, message, opCode, true);
 
