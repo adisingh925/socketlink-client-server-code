@@ -147,27 +147,115 @@ std::string getCurrentSQLTime() {
     return std::string(buffer);
 }
 
+class UserData {
+private:
+    /** Private constructor to prevent instantiation */ 
+    UserData() = default;
+
+public:
+    int msgSizeAllowedInBytes;
+    unsigned long long maxMonthlyPayloadInBytes;
+    int connections;
+    std::string clientApiKey;
+    std::string adminApiKey;
+    std::string webHookBaseUrl;
+    std::string webhookPath;
+    std::string webhookSecret;
+    uint32_t webhooks;
+    int batchSize = 1000;
+    std::string webhookIP;
+    std::string dbURL;
+    int dbPort;
+    std::string dbUser;
+    std::string dbPassword;
+    std::string dbName;
+
+    /** Public static method to get the single instance */ 
+    static UserData& getInstance() {
+        static UserData instance;
+        return instance;
+    }
+
+    /** Delete copy constructor and assignment operator */ 
+    UserData(const UserData&) = delete;
+    UserData& operator=(const UserData&) = delete;
+};
+
 class MySQLConnectionHandler {
 private:
-    const std::string db_url = "tcp://db-mysql-blr1-71199-do-user-14198143-0.i.db.ondigitalocean.com:25060";
-    const std::string username = "doadmin";
-    const std::string password = "AVNS_-2wnRtqQ95CGr_xcTP0";
-    const std::string database_name = "defaultdb";
-    const size_t batch_size = 1000;
-
     std::unique_ptr<sql::Connection> con;
     std::vector<std::tuple<std::string, std::string, std::string, std::string>> batch_data;
 
     /** Create a new connection to the database */
     void createConnection() {
-        auto *driver = sql::mysql::get_mysql_driver_instance();
-        con = std::unique_ptr<sql::Connection>(driver->connect(db_url, username, password));
-        con->setSchema(database_name);
+        try {
+            if (con && !con->isClosed()) {
+                con->close();
+            }
+
+            con.reset(); 
+
+            auto *driver = sql::mysql::get_mysql_driver_instance();
+
+            sql::ConnectOptionsMap connection_properties;
+            connection_properties["hostName"] = UserData::getInstance().dbURL;
+            connection_properties["userName"] = UserData::getInstance().dbUser;
+            connection_properties["password"] = UserData::getInstance().dbPassword;
+            connection_properties["schema"] = UserData::getInstance().dbName;
+            connection_properties["port"] = UserData::getInstance().dbPort;
+            connection_properties["OPT_CONNECT_TIMEOUT"] = 3;  
+
+            /** Create a new connection */ 
+            con = std::unique_ptr<sql::Connection>(driver->connect(connection_properties));
+
+            /** Set the schema */ 
+            con->setSchema(UserData::getInstance().dbName);
+
+            /** Ensure the table exists */ 
+            createTableIfNotExists();
+        } catch (const sql::SQLException &e) {
+            std::cerr << "Error creating connection: " << e.what() << std::endl;
+            con.reset();
+        }
+    }
+
+    void checkConnection() {
+        if (!con || con->isClosed()) {  
+            /** connection is lost reconnecting */
+            createConnection();
+        }
+    }
+
+    /** Create the table if it does not exist */
+    void createTableIfNotExists() {
+        try {
+            const std::string createTableQuery = R"(
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    insert_time DATETIME NOT NULL,
+                    message TEXT NOT NULL,
+                    identifier VARCHAR(255) NOT NULL,
+                    room VARCHAR(255) NOT NULL
+                );
+            )";
+
+            auto stmt = std::unique_ptr<sql::Statement>(con->createStatement());
+            stmt->execute(createTableQuery);
+        } catch (const sql::SQLException &e) {
+            std::cerr << "Error creating table: " << e.what() << std::endl;
+        }
     }
 
     /** Insert the batch of data into the database */
     bool insertBatchData() {
         try {
+            checkConnection();  
+
+            if (!con) {
+                /** no active connection, cannot insert batch */
+                return false;
+            }
+
             /** Construct the insert query for the batch */
             std::ostringstream oss;
             oss << "INSERT INTO messages (insert_time, message, identifier, room) VALUES ";
@@ -197,6 +285,13 @@ private:
             return true;
         } catch (const sql::SQLException &e) {
             std::cerr << "Batch insertion error: " << e.what() << std::endl;
+
+            /** If error is connection-related, try reconnecting */ 
+            if (e.getErrorCode() == 2006 || e.getErrorCode() == 2013) {  /** MySQL server has gone away */ 
+                std::cerr << "Attempting to reconnect..." << std::endl;
+                createConnection();
+            }
+
             return false;
         }
     }
@@ -210,7 +305,7 @@ public:
     void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier, const std::string& room) {
         batch_data.push_back(std::make_tuple(insert_time, message, identifier, room));
 
-        if (batch_data.size() >= batch_size) {
+        if (batch_data.size() >= 1000) {
             /** Execute the batch and clear the batch data */
             insertBatchData();
         }
@@ -222,35 +317,6 @@ public:
             insertBatchData();
         }
     }
-};
-
-class UserData {
-private:
-    /** Private constructor to prevent instantiation */ 
-    UserData() = default;
-
-public:
-    int msgSizeAllowedInBytes;
-    unsigned long long maxMonthlyPayloadInBytes;
-    int connections;
-    std::string clientApiKey;
-    std::string adminApiKey;
-    std::string webHookBaseUrl;
-    std::string webhookPath;
-    std::string webhookSecret;
-    uint32_t webhooks;
-    int batchSize = 1000;
-    std::string webhookIP;
-
-    /** Public static method to get the single instance */ 
-    static UserData& getInstance() {
-        static UserData instance;
-        return instance;
-    }
-
-    /** Delete copy constructor and assignment operator */ 
-    UserData(const UserData&) = delete;
-    UserData& operator=(const UserData&) = delete;
 };
 
 /**
@@ -937,6 +1003,11 @@ void populateUserData(std::string data) {
     UserData::getInstance().webHookBaseUrl = parsedJson["webhook_base_url"];
     UserData::getInstance().webhookPath = parsedJson["webhook_path"];
     UserData::getInstance().webhookSecret = parsedJson["webhook_secret"];
+    UserData::getInstance().dbURL = parsedJson["db_url"].get<std::string>();
+    UserData::getInstance().dbUser = parsedJson["db_user"].get<std::string>();
+    UserData::getInstance().dbPassword = parsedJson["db_password"].get<std::string>();
+    UserData::getInstance().dbName = parsedJson["db_name"].get<std::string>();
+    UserData::getInstance().dbPort = parsedJson["db_port"].get<int>();
 
     if (parsedJson.contains("total_payload_sent")) {
         totalPayloadSent = parsedJson["total_payload_sent"].get<unsigned long long>();
@@ -1635,8 +1706,16 @@ void worker_t::work()
 
                         /* write_worker(rid, ws->getUserData()->uid, std::string(message)); */
 
-                        dbHandler.insertSingleData(getCurrentSQLTime(), rid, ws->getUserData()->uid, std::string(message));
-                        
+                        if (
+                            UserData::getInstance().dbURL.length() > 0 
+                            && UserData::getInstance().dbUser.length() > 0 
+                            && UserData::getInstance().dbPassword.length() > 0 
+                            && UserData::getInstance().dbName.length() > 0 
+                            && UserData::getInstance().dbPort > 0
+                        ){
+                            dbHandler.insertSingleData(getCurrentSQLTime(), std::string(message), ws->getUserData()->uid, rid);
+                        }
+
                         /** publishing message */
                         ws->publish(rid, message, opCode, true);
 
@@ -2371,7 +2450,7 @@ void worker_t::work()
     if (listen_socket_) {
         std::cout << "Thread " << std::this_thread::get_id() << " listening on port " << PORT << std::endl;
     }
-    else{
+    else {
         std::cout << "Thread " << std::this_thread::get_id() << " failed to listen on port " << PORT << std::endl;
     }
   });
