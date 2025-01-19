@@ -69,7 +69,7 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 9001;
+constexpr const int PORT = 443;
 
 /** 
  * Sending Constants
@@ -164,7 +164,7 @@ public:
     uint32_t webhooks;
     int batchSize = 1000;
     std::string webhookIP;
-    std::string dbURL;
+    std::string dbHost;
     int dbPort;
     std::string dbUser;
     std::string dbPassword;
@@ -199,7 +199,7 @@ private:
             auto *driver = sql::mysql::get_mysql_driver_instance();
 
             sql::ConnectOptionsMap connection_properties;
-            connection_properties["hostName"] = UserData::getInstance().dbURL;
+            connection_properties["hostName"] = UserData::getInstance().dbHost;
             connection_properties["userName"] = UserData::getInstance().dbUser;
             connection_properties["password"] = UserData::getInstance().dbPassword;
             connection_properties["schema"] = UserData::getInstance().dbName;
@@ -342,7 +342,7 @@ struct worker_t
   std::shared_ptr<MySQLConnectionHandler> db_handler;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::App> app_;
+  std::shared_ptr<uWS::SSLApp> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -1019,8 +1019,9 @@ void resolveAndStoreIPAddress(const std::string& hostname) {
 }
 
 /** This function will parse and populate the userdata */
-void populateUserData(std::string data) {
+bool populateUserData(std::string data) {
     nlohmann::json parsedJson = nlohmann::json::parse(data);
+    bool needsDBUpdate = false;
 
     UserData::getInstance().clientApiKey = parsedJson["client_api_key"];
     UserData::getInstance().adminApiKey = parsedJson["admin_api_key"];
@@ -1032,11 +1033,17 @@ void populateUserData(std::string data) {
     UserData::getInstance().webHookBaseUrl = parsedJson["webhook_base_url"];
     UserData::getInstance().webhookPath = parsedJson["webhook_path"];
     UserData::getInstance().webhookSecret = parsedJson["webhook_secret"];
-    UserData::getInstance().dbURL = parsedJson["db_url"].get<std::string>();
-    UserData::getInstance().dbUser = parsedJson["db_user"].get<std::string>();
-    UserData::getInstance().dbPassword = parsedJson["db_password"].get<std::string>();
-    UserData::getInstance().dbName = parsedJson["db_name"].get<std::string>();
-    UserData::getInstance().dbPort = parsedJson["db_port"].get<int>();
+
+    if(parsedJson.contains("needs_db_cred_update") && parsedJson["needs_db_cred_update"].get<bool>()) {
+        /** update the db credentials */
+        UserData::getInstance().dbHost = parsedJson["db_host"].get<std::string>();
+        UserData::getInstance().dbUser = parsedJson["db_user"].get<std::string>();
+        UserData::getInstance().dbPassword = parsedJson["db_password"].get<std::string>();
+        UserData::getInstance().dbName = parsedJson["db_name"].get<std::string>();
+        UserData::getInstance().dbPort = parsedJson["db_port"].get<int>();
+
+        needsDBUpdate = true;
+    }
 
     if (parsedJson.contains("total_payload_sent")) {
         totalPayloadSent = parsedJson["total_payload_sent"].get<unsigned long long>();
@@ -1047,7 +1054,7 @@ void populateUserData(std::string data) {
 
     /** Enable SQL Integration feature */
     if (
-        UserData::getInstance().dbURL.length() > 0 
+        UserData::getInstance().dbHost.length() > 0 
         && UserData::getInstance().dbUser.length() > 0 
         && UserData::getInstance().dbPassword.length() > 0 
         && UserData::getInstance().dbName.length() > 0 
@@ -1059,6 +1066,8 @@ void populateUserData(std::string data) {
 
     /** resolve and store the IP address of the client's webhook URL */
     resolveAndStoreIPAddress(UserData::getInstance().webHookBaseUrl);
+
+    return needsDBUpdate;
 }
 
 /**
@@ -1066,8 +1075,7 @@ void populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        std::string dropletId = "470610442";
+        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
 
         /** Make the HTTP request */ 
         std::string userData = sendHTTPSRequest(MASTER_SERVER_URL, "/api/v1/init/" + dropletId, {
@@ -1152,8 +1160,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::App>(
-    uWS::App({
+  app_ = std::make_shared<uWS::SSLApp>(
+    uWS::SSLApp({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
@@ -2186,15 +2194,17 @@ void worker_t::work()
             if (last) { 
                 try {
                     /** Parse the JSON response */ 
-                    populateUserData(body);
-
-                    /** check if the connection parameters are changed */
-                    std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
-                        /** Defer the message publishing to the worker's loop */ 
-                        w.loop_->defer([&w]() {
-                            w.db_handler->manualCreateConnection();
+                    bool needsDBUpdate = populateUserData(body);
+                    
+                    if(needsDBUpdate){
+                        /** check if the connection parameters are changed */
+                        std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
+                            /** Defer the message publishing to the worker's loop */ 
+                            w.loop_->defer([&w]() {
+                                w.db_handler->manualCreateConnection();
+                            });
                         });
-                    });
+                    }
 
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
