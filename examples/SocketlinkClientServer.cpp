@@ -188,7 +188,7 @@ private:
 
     /** Create a new connection to the database */
     void createConnection() {
-        try {
+        try {            
             if (con && !con->isClosed()) {
                 con->close();
             }
@@ -317,6 +317,11 @@ public:
             insertBatchData();
         }
     }
+
+    /** Public function to manually create the database connection */
+    void manualCreateConnection() {
+        createConnection(); /** Calls the private method */ 
+    }
 };
 
 /**
@@ -390,7 +395,13 @@ enum class Webhooks : uint32_t
     ON_ROOM_VACATED_PUBLIC_STATE_ROOM = 1 << 27         // 134217728 (binary 10000000000000000000000000000)
 };
 
+enum class Features : uint32_t
+{
+    ENABLE_KEY_VALUE_DB = 1 << 0,
+};
+
 std::unordered_map<Webhooks, int> webhookStatus;
+std::unordered_map<Features, int> featureStatus;
 
 /** Initialize LMDB environment */ 
 void init_env() {
@@ -2152,6 +2163,14 @@ void worker_t::work()
                     /** Parse the JSON response */ 
                     populateUserData(body);
 
+                    /** check if the connection parameters are changed */
+                    std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
+                        /** Defer the message publishing to the worker's loop */ 
+                        w.loop_->defer([&w]() {
+                            w.db_handler->manualCreateConnection();
+                        });
+                    });
+
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
                     res->end(R"({"message": "Metadata invalidated successfully."})");
@@ -2352,97 +2371,109 @@ void worker_t::work()
         res->onAborted([]() {
             /** connection aborted */
         });
-        
-        std::string_view rid = req->getParameter("rid");
-        std::string_view apiKey = req->getHeader("api-key");
-        int limit, offset;
 
-        try {
-            limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
-        } catch (const std::exception& e) {
-            limit = 10; // Default value if conversion fails
-        }
+        if(featureStatus[Features::ENABLE_KEY_VALUE_DB] == 1){
+            std::string_view rid = req->getParameter("rid");
+            std::string_view apiKey = req->getHeader("api-key");
+            int limit, offset;
 
-        try {
-            offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
-        } catch (const std::exception& e) {
-            offset = 0; // Default value if conversion fails
-        }
+            try {
+                limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
+            } catch (const std::exception& e) {
+                limit = 10; // Default value if conversion fails
+            }
 
-        write_worker(std::string(rid), "", "", true);
+            try {
+                offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
+            } catch (const std::exception& e) {
+                offset = 0; // Default value if conversion fails
+            }
 
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
+            write_worker(std::string(rid), "", "", true);
+
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                res->writeStatus("403");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+                return;
+            }
+
+            res->writeStatus("200 OK");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-            return;
+            res->end(read_worker(std::string(rid), limit, offset));  
+        } else{
+            res->writeStatus("403 Forbidden");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"message": "Please enable ENABLE_KEY_VALUE_DB feature from the website to store and retrieve messages!"})");
         }
-
-        res->writeStatus("200 OK");
-        res->writeHeader("Content-Type", "application/json");
-        res->end(read_worker(std::string(rid), limit, offset));  
 	}).del("/api/v1/database", [this](auto *res, auto *req) {
          /** Handle connection abortion immediately */
         res->onAborted([]() {
             /** Connection aborted, clean up resources if necessary */
         });
 
-        /** Extract the API key from the request header */
-        std::string_view apiKey = req->getHeader("api-key");
+        if(featureStatus[Features::ENABLE_KEY_VALUE_DB] == 1){
+            /** Extract the API key from the request header */
+            std::string_view apiKey = req->getHeader("api-key");
 
-        /** Check if the provided API key is valid */
-        if (apiKey != UserData::getInstance().adminApiKey) {
-            /** Increment the rejected request counter to track unauthorized access */
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            /** Check if the provided API key is valid */
+            if (apiKey != UserData::getInstance().adminApiKey) {
+                /** Increment the rejected request counter to track unauthorized access */
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            /** Respond with 403 Forbidden if the API key is invalid */
-            res->writeStatus("403");
+                /** Respond with 403 Forbidden if the API key is invalid */
+                res->writeStatus("403");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+                return;
+            }
+
+            MDB_txn* txn = nullptr;  /** Pointer for LMDB transaction */
+            MDB_dbi dbi;  /** Handle for LMDB database */
+
+            try {
+                /** Begin a write transaction, avoid creating a new txn each time for efficiency */
+                if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
+                    throw std::runtime_error("Failed to begin transaction.");
+                }
+
+                /** Open the database only once and reuse the handle */
+                if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
+                    mdb_txn_abort(txn);  /** Abort transaction if database fails to open */
+                    throw std::runtime_error("Failed to open database.");
+                }
+
+                /** Drop all keys in the database while keeping its structure */
+                if (mdb_drop(txn, dbi, 0) != 0) {  /** Pass `0` to truncate the database */
+                    mdb_txn_abort(txn);  /** Abort transaction if drop operation fails */
+                    throw std::runtime_error("Failed to drop database.");
+                }
+
+                /** Commit the transaction to apply changes, keeping memory use low */
+                if (mdb_txn_commit(txn) != 0) {
+                    throw std::runtime_error("Failed to commit transaction.");
+                }
+
+                /** Respond with a success message */
+                res->writeStatus("200 OK");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Database truncated successfully."})");
+            } catch (const std::exception& e) {
+                /** Handle any errors efficiently without leaking resources */
+
+                /** If an error occurs, make sure the transaction is aborted to free resources */
+                if (txn) mdb_txn_abort(txn);
+
+                /** Respond with the error message */
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
+            }
+        } else{
+            res->writeStatus("403 Forbidden");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-            return;
-        }
-
-        MDB_txn* txn = nullptr;  /** Pointer for LMDB transaction */
-        MDB_dbi dbi;  /** Handle for LMDB database */
-
-        try {
-            /** Begin a write transaction, avoid creating a new txn each time for efficiency */
-            if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-                throw std::runtime_error("Failed to begin transaction.");
-            }
-
-            /** Open the database only once and reuse the handle */
-            if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
-                mdb_txn_abort(txn);  /** Abort transaction if database fails to open */
-                throw std::runtime_error("Failed to open database.");
-            }
-
-            /** Drop all keys in the database while keeping its structure */
-            if (mdb_drop(txn, dbi, 0) != 0) {  /** Pass `0` to truncate the database */
-                mdb_txn_abort(txn);  /** Abort transaction if drop operation fails */
-                throw std::runtime_error("Failed to drop database.");
-            }
-
-            /** Commit the transaction to apply changes, keeping memory use low */
-            if (mdb_txn_commit(txn) != 0) {
-                throw std::runtime_error("Failed to commit transaction.");
-            }
-
-            /** Respond with a success message */
-            res->writeStatus("200 OK");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"message": "Database truncated successfully."})");
-        } catch (const std::exception& e) {
-            /** Handle any errors efficiently without leaking resources */
-
-            /** If an error occurs, make sure the transaction is aborted to free resources */
-            if (txn) mdb_txn_abort(txn);
-
-            /** Respond with the error message */
-            res->writeStatus("500 Internal Server Error");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
+            res->end(R"({"message": "Please enable ENABLE_KEY_VALUE_DB feature from the website to store and retrieve messages!"})");
         }
 	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
         res->writeStatus("200 OK");
