@@ -69,7 +69,7 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 443;
+constexpr const int PORT = 9001;
 
 /** 
  * Sending Constants
@@ -332,8 +332,11 @@ struct worker_t
   /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/
   struct uWS::Loop *loop_;
 
+  /** Every thread has it's own db_handler */
+  std::shared_ptr<MySQLConnectionHandler> db_handler;
+
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::SSLApp> app_;
+  std::shared_ptr<uWS::App> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -1022,7 +1025,8 @@ void populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        std::string dropletId = "470610442";
 
         /** Make the HTTP request */ 
         std::string userData = sendHTTPSRequest(MASTER_SERVER_URL, "/api/v1/init/" + dropletId, {
@@ -1107,14 +1111,14 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::SSLApp>(
-    uWS::SSLApp({
+  app_ = std::make_shared<uWS::App>(
+    uWS::App({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
   );
 
-  MySQLConnectionHandler dbHandler;
+  db_handler = std::make_unique<MySQLConnectionHandler>();
 
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
@@ -1638,7 +1642,7 @@ void worker_t::work()
             }
         }
     },
-    .message = [this, &dbHandler](auto *ws, std::string_view message, uWS::OpCode opCode) {
+    .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
         if(message.size() > UserData::getInstance().msgSizeAllowedInBytes){
             droppedMessages.fetch_add(1, std::memory_order_relaxed);
 
@@ -1713,7 +1717,7 @@ void worker_t::work()
                             && UserData::getInstance().dbName.length() > 0 
                             && UserData::getInstance().dbPort > 0
                         ){
-                            dbHandler.insertSingleData(getCurrentSQLTime(), std::string(message), ws->getUserData()->uid, rid);
+                            db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), ws->getUserData()->uid, rid);
                         }
 
                         /** publishing message */
