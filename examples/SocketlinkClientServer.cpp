@@ -169,6 +169,7 @@ public:
     std::string dbUser;
     std::string dbPassword;
     std::string dbName;
+    uint32_t features;
 
     /** Public static method to get the single instance */ 
     static UserData& getInstance() {
@@ -398,6 +399,7 @@ enum class Webhooks : uint32_t
 enum class Features : uint32_t
 {
     ENABLE_KEY_VALUE_DB = 1 << 0,
+    ENABLE_MYSQL_INTEGRATION = 1 << 1,
 };
 
 std::unordered_map<Webhooks, int> webhookStatus;
@@ -805,6 +807,18 @@ void populateWebhookStatus(uint32_t bitmask)
     }
 }
 
+void populateFeatureStatus(uint32_t bitmask)
+{
+    /** Clear the existing statuses in case this is called multiple times */
+    featureStatus.clear();
+
+    for (uint32_t i = 0; i < 1; ++i)
+    {
+        Features feature = static_cast<Features>(1 << i);
+        featureStatus[feature] = (bitmask & (1 << i)) ? 1 : 0;
+    }
+}
+
 /**
  * @brief Send an HTTP request to the given URL and path
  */
@@ -1014,6 +1028,7 @@ void populateUserData(std::string data) {
     UserData::getInstance().msgSizeAllowedInBytes = parsedJson["msg_size_allowed_in_bytes"].get<int>();
     UserData::getInstance().maxMonthlyPayloadInBytes = parsedJson["max_monthly_payload_in_bytes"].get<unsigned long long>();
     UserData::getInstance().webhooks = parsedJson["webhooks"].get<uint32_t>();
+    UserData::getInstance().webhooks = parsedJson["features"].get<uint32_t>();
     UserData::getInstance().webHookBaseUrl = parsedJson["webhook_base_url"];
     UserData::getInstance().webhookPath = parsedJson["webhook_path"];
     UserData::getInstance().webhookSecret = parsedJson["webhook_secret"];
@@ -1028,6 +1043,21 @@ void populateUserData(std::string data) {
     }
 
     populateWebhookStatus(UserData::getInstance().webhooks);
+    populateFeatureStatus(UserData::getInstance().features);
+
+    /** Enable SQL Integration feature */
+    if (
+        UserData::getInstance().dbURL.length() > 0 
+        && UserData::getInstance().dbUser.length() > 0 
+        && UserData::getInstance().dbPassword.length() > 0 
+        && UserData::getInstance().dbName.length() > 0 
+        && UserData::getInstance().dbPort > 0
+    ){
+        Features feature = static_cast<Features>(1 << 1);
+        featureStatus[feature] = (UserData::getInstance().features & (1 << 1)) ? 1 : 0;
+    }
+
+    /** resolve and store the IP address of the client's webhook URL */
     resolveAndStoreIPAddress(UserData::getInstance().webHookBaseUrl);
 }
 
@@ -1718,16 +1748,11 @@ void worker_t::work()
                         /** Writing data to the file */
                         /**FileWriter& writer = GlobalFileWriter::getInstance();
                         writer.writeMessage(std::string(message));*/
+                        if (featureStatus[Features::ENABLE_KEY_VALUE_DB] == 1){
+                            write_worker(rid, ws->getUserData()->uid, std::string(message));
+                        }
 
-                        /* write_worker(rid, ws->getUserData()->uid, std::string(message)); */
-
-                        if (
-                            UserData::getInstance().dbURL.length() > 0 
-                            && UserData::getInstance().dbUser.length() > 0 
-                            && UserData::getInstance().dbPassword.length() > 0 
-                            && UserData::getInstance().dbName.length() > 0 
-                            && UserData::getInstance().dbPort > 0
-                        ){
+                        if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
                             db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), ws->getUserData()->uid, rid);
                         }
 
