@@ -1060,8 +1060,7 @@ bool populateUserData(std::string data) {
         && UserData::getInstance().dbName.length() > 0 
         && UserData::getInstance().dbPort > 0
     ){
-        Features feature = static_cast<Features>(1 << 1);
-        featureStatus[feature] = (UserData::getInstance().features & (1 << 1)) ? 1 : 0;
+        featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
     }
 
     /** resolve and store the IP address of the client's webhook URL */
