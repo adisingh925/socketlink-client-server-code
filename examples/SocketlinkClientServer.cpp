@@ -323,6 +323,14 @@ public:
     void manualCreateConnection() {
         createConnection(); /** Calls the private method */ 
     }
+
+    void disconnect() {
+        if (con && !con->isClosed()) {
+            con->close();
+        }
+
+        con.reset();
+    }
 };
 
 /**
@@ -1041,8 +1049,6 @@ bool populateUserData(std::string data) {
         UserData::getInstance().dbPassword = parsedJson["db_password"].get<std::string>();
         UserData::getInstance().dbName = parsedJson["db_name"].get<std::string>();
         UserData::getInstance().dbPort = parsedJson["db_port"].get<int>();
-
-        needsDBUpdate = true;
     }
 
     if (parsedJson.contains("total_payload_sent")) {
@@ -1061,6 +1067,10 @@ bool populateUserData(std::string data) {
         && UserData::getInstance().dbPort > 0
     ){
         featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
+        needsDBUpdate = true;
+    } else {
+        featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 0;
+        needsDBUpdate = false;
     }
 
     /** resolve and store the IP address of the client's webhook URL */
@@ -2201,6 +2211,14 @@ void worker_t::work()
                             /** Defer the message publishing to the worker's loop */ 
                             w.loop_->defer([&w]() {
                                 w.db_handler->manualCreateConnection();
+                            });
+                        });
+                    } else {
+                        std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
+                            /** Defer the message publishing to the worker's loop */ 
+                            w.loop_->defer([&w]() {
+                                w.db_handler->flushRemainingData();
+                                w.db_handler->disconnect();
                             });
                         });
                     }
