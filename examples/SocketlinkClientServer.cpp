@@ -69,7 +69,7 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 9001;
+constexpr const int PORT = 443;
 
 /** 
  * Sending Constants
@@ -342,7 +342,7 @@ struct worker_t
   std::shared_ptr<MySQLConnectionHandler> db_handler;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::App> app_;
+  std::shared_ptr<uWS::SSLApp> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -1075,9 +1075,8 @@ bool populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        std::string dropletId = "470848856";
-        
+        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+
         /** Make the HTTP request */ 
         std::string userData = sendHTTPSRequest(MASTER_SERVER_URL, "/api/v1/init/" + dropletId, {
             {"secret", SECRET}
@@ -1161,8 +1160,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::App>(
-    uWS::App({
+  app_ = std::make_shared<uWS::SSLApp>(
+    uWS::SSLApp({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
