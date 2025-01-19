@@ -231,7 +231,7 @@ private:
     void createTableIfNotExists() {
         try {
             const std::string createTableQuery = R"(
-                CREATE TABLE IF NOT EXISTS messages (
+                CREATE TABLE IF NOT EXISTS socketlink_messages (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     insert_time DATETIME NOT NULL,
                     message TEXT NOT NULL,
@@ -259,7 +259,7 @@ private:
 
             /** Construct the insert query for the batch */
             std::ostringstream oss;
-            oss << "INSERT INTO messages (insert_time, message, identifier, room) VALUES ";
+            oss << "INSERT INTO socketlink_messages (insert_time, message, identifier, room) VALUES ";
             for (size_t i = 0; i < batch_data.size(); ++i) {
                 if (i > 0) oss << ", ";
                 oss << "(?, ?, ?, ?)";
