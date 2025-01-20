@@ -1152,6 +1152,9 @@ int populateUserData(std::string data) {
 
                 featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
                 needsDBUpdate = 1;
+            } else {
+                featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
+                needsDBUpdate = 1;
             }
         }
     } else {
