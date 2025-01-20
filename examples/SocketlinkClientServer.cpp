@@ -96,7 +96,18 @@ constexpr uint8_t PRIVATE_ROOM = 1;
 constexpr uint8_t PUBLIC_STATE_ROOM = 2;
 constexpr uint8_t PRIVATE_STATE_ROOM = 3;
 
+/**
+ * is logs enabled
+ */
+constexpr bool LOGS_ENABLED = false;
+
 using json = nlohmann::json;  /** Create an alias for the json object */
+
+void log(const std::string& message) {
+    if (LOGS_ENABLED) {
+        std::cout << message << std::endl;
+    }
+}
 
 /**
  * HTTP Response
@@ -189,7 +200,9 @@ private:
 
     /** Create a new connection to the database */
     void createConnection() {
-        try {            
+        try {       
+            log("Creating connection to the database...");
+
             if (con && !con->isClosed()) {
                 con->close();
             }
@@ -314,6 +327,8 @@ public:
 
     /** Flush any remaining data in the batch */
     void flushRemainingData() {
+        log("Flushing remaining data to the database...");
+
         if (!batch_data.empty()) {
             insertBatchData();
         }
@@ -321,10 +336,13 @@ public:
 
     /** Public function to manually create the database connection */
     void manualCreateConnection() {
+        log("Manually creating connection to the database...");
         createConnection(); /** Calls the private method */ 
     }
 
     void disconnect() {
+        log("Disconnecting from the database...");
+
         if (con && !con->isClosed()) {
             con->close();
         }
@@ -1027,51 +1045,127 @@ void resolveAndStoreIPAddress(const std::string& hostname) {
 }
 
 /** This function will parse and populate the userdata */
-bool populateUserData(std::string data) {
+int populateUserData(std::string data) {
     nlohmann::json parsedJson = nlohmann::json::parse(data);
-    bool needsDBUpdate = false;
+    int needsDBUpdate = 0;
 
-    UserData::getInstance().clientApiKey = parsedJson["client_api_key"];
-    UserData::getInstance().adminApiKey = parsedJson["admin_api_key"];
-    UserData::getInstance().connections = parsedJson["connections"].get<int>();
-    UserData::getInstance().msgSizeAllowedInBytes = parsedJson["msg_size_allowed_in_bytes"].get<int>();
-    UserData::getInstance().maxMonthlyPayloadInBytes = parsedJson["max_monthly_payload_in_bytes"].get<unsigned long long>();
-    UserData::getInstance().webhooks = parsedJson["webhooks"].get<uint32_t>();
-    UserData::getInstance().webhooks = parsedJson["features"].get<uint32_t>();
-    UserData::getInstance().webHookBaseUrl = parsedJson["webhook_base_url"];
-    UserData::getInstance().webhookPath = parsedJson["webhook_path"];
-    UserData::getInstance().webhookSecret = parsedJson["webhook_secret"];
+    auto& userData = UserData::getInstance();
 
-    if(parsedJson.contains("needs_db_cred_update") && parsedJson["needs_db_cred_update"].get<bool>()) {
-        /** update the db credentials */
-        UserData::getInstance().dbHost = parsedJson["db_host"].get<std::string>();
-        UserData::getInstance().dbUser = parsedJson["db_user"].get<std::string>();
-        UserData::getInstance().dbPassword = parsedJson["db_password"].get<std::string>();
-        UserData::getInstance().dbName = parsedJson["db_name"].get<std::string>();
-        UserData::getInstance().dbPort = parsedJson["db_port"].get<int>();
+    if (parsedJson.contains("client_api_key") && !parsedJson["client_api_key"].is_null()) {
+        userData.clientApiKey = parsedJson["client_api_key"].get<std::string>();
     }
 
+    if (parsedJson.contains("admin_api_key") && !parsedJson["admin_api_key"].is_null()) {
+        userData.adminApiKey = parsedJson["admin_api_key"].get<std::string>();
+    }
+
+    if (parsedJson.contains("connections") && !parsedJson["connections"].is_null()) {
+        userData.connections = parsedJson["connections"].get<int>();
+    }
+
+    if (parsedJson.contains("msg_size_allowed_in_bytes") && !parsedJson["msg_size_allowed_in_bytes"].is_null()) {
+        userData.msgSizeAllowedInBytes = parsedJson["msg_size_allowed_in_bytes"].get<int>();
+    }
+
+    if (parsedJson.contains("max_monthly_payload_in_bytes") && !parsedJson["max_monthly_payload_in_bytes"].is_null()) {
+        userData.maxMonthlyPayloadInBytes = parsedJson["max_monthly_payload_in_bytes"].get<unsigned long long>();
+    }
+
+    if (parsedJson.contains("webhooks") && !parsedJson["webhooks"].is_null()) {
+        userData.webhooks = parsedJson["webhooks"].get<uint32_t>();
+    }
+
+    if (parsedJson.contains("features") && !parsedJson["features"].is_null()) {
+        userData.features = parsedJson["features"].get<uint32_t>();
+    }
+
+    if (parsedJson.contains("webhook_base_url") && !parsedJson["webhook_base_url"].is_null()) {
+        userData.webHookBaseUrl = parsedJson["webhook_base_url"].get<std::string>();
+    }
+
+    if (parsedJson.contains("webhook_path") && !parsedJson["webhook_path"].is_null()) {
+        userData.webhookPath = parsedJson["webhook_path"].get<std::string>();
+    }
+
+    if (parsedJson.contains("webhook_secret") && !parsedJson["webhook_secret"].is_null()) {
+        userData.webhookSecret = parsedJson["webhook_secret"].get<std::string>();
+    }
+
+    /** populate features */
+    populateFeatureStatus(UserData::getInstance().features);
+
+    bool is_sql_integration_enabled = false;
+
+    /** check if sql integration is enabled */
+    if (parsedJson.contains("is_sql_integration_enabled") && !parsedJson["is_sql_integration_enabled"].is_null()) {
+        is_sql_integration_enabled = parsedJson["is_sql_integration_enabled"].get<bool>();
+    }
+
+    if(is_sql_integration_enabled){
+        std::string dbHost = "";
+        std::string dbUser = "";
+        std::string dbPassword = "";
+        std::string dbName = "";
+        int dbPort = 0;
+
+        /** Store db data */
+        if (parsedJson.contains("db_host") && !parsedJson["db_host"].is_null()) {
+            dbHost = parsedJson["db_host"].get<std::string>();
+        }
+        if (parsedJson.contains("db_user") && !parsedJson["db_user"].is_null()) {
+            dbUser = parsedJson["db_user"].get<std::string>();
+        }
+        if (parsedJson.contains("db_password") && !parsedJson["db_password"].is_null()) {
+            dbPassword = parsedJson["db_password"].get<std::string>();
+        }
+        if (parsedJson.contains("db_name") && !parsedJson["db_name"].is_null()) {
+            dbName = parsedJson["db_name"].get<std::string>();
+        }
+        if (parsedJson.contains("db_port") && !parsedJson["db_port"].is_null()) {
+            dbPort = parsedJson["db_port"].get<int>();
+        }
+
+        /** Enable SQL Integration feature */
+        if(
+            dbHost.length() > 0
+            && dbUser.length() > 0
+            && dbPassword.length() > 0
+            && dbName.length() > 0
+            && dbPort != 0
+        ){
+            log("SQL Integration Enabled");
+
+            if (
+                UserData::getInstance().dbHost != dbHost 
+                || UserData::getInstance().dbUser != dbUser
+                || UserData::getInstance().dbPassword != dbPassword
+                || UserData::getInstance().dbName != dbName
+                || UserData::getInstance().dbPort != dbPort
+            ){
+                log("SQL Integration Data Updated");
+
+                userData.dbHost = dbHost;
+                userData.dbUser = dbUser;
+                userData.dbPassword = dbPassword;
+                userData.dbName = dbName;
+                userData.dbPort = dbPort;
+
+                featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
+                needsDBUpdate = 1;
+            }
+        }
+    } else {
+        featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 0;
+        needsDBUpdate = -1;
+    }
+    
+    /** store payload sent */
     if (parsedJson.contains("total_payload_sent")) {
         totalPayloadSent = parsedJson["total_payload_sent"].get<unsigned long long>();
     }
 
+    /** populate enabled webhooks and features */
     populateWebhookStatus(UserData::getInstance().webhooks);
-    populateFeatureStatus(UserData::getInstance().features);
-
-    /** Enable SQL Integration feature */
-    if (
-        UserData::getInstance().dbHost.length() > 0 
-        && UserData::getInstance().dbUser.length() > 0 
-        && UserData::getInstance().dbPassword.length() > 0 
-        && UserData::getInstance().dbName.length() > 0 
-        && UserData::getInstance().dbPort > 0
-    ){
-        featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
-        needsDBUpdate = true;
-    } else {
-        featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 0;
-        needsDBUpdate = false;
-    }
 
     /** resolve and store the IP address of the client's webhook URL */
     resolveAndStoreIPAddress(UserData::getInstance().webHookBaseUrl);
@@ -2138,7 +2232,7 @@ void worker_t::work()
             }
         }
     }
-  }).get("/api/v1/metrics", [](auto *res, auto *req) {
+    }).get("/api/v1/metrics", [](auto *res, auto *req) {
         if(UserData::getInstance().clientApiKey.empty()){
             fetchAndPopulateUserData();
         }
@@ -2203,9 +2297,9 @@ void worker_t::work()
             if (last) { 
                 try {
                     /** Parse the JSON response */ 
-                    bool needsDBUpdate = populateUserData(body);
+                    int needsDBUpdate = populateUserData(body);
                     
-                    if(needsDBUpdate){
+                    if(needsDBUpdate == 1){
                         /** check if the connection parameters are changed */
                         std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
                             /** Defer the message publishing to the worker's loop */ 
@@ -2213,7 +2307,7 @@ void worker_t::work()
                                 w.db_handler->manualCreateConnection();
                             });
                         });
-                    } else {
+                    } else if(needsDBUpdate == -1) {
                         std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
                             /** Defer the message publishing to the worker's loop */ 
                             w.loop_->defer([&w]() {
@@ -2233,6 +2327,37 @@ void worker_t::work()
                 }
             }
         });
+	}).post("/api/v1/mysql/sync", [](auto *res, auto *req) {
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 0){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "MySQL integration is disabled!"})");
+            return;
+        }
+
+        if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            return;
+        }
+
+        std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
+            /** Defer the message publishing to the worker's loop */ 
+            w.loop_->defer([&w]() {
+                w.db_handler->flushRemainingData();
+            });
+        });
+
+        res->writeStatus("200 OK");
+        res->writeHeader("Content-Type", "application/json");
+        res->end(R"({"message": "MySQL data synced successfully."})");
 	}).get("/api/v1/rooms", [this](auto *res, auto *req) {
         res->onAborted([]() {
             /** connection aborted */
