@@ -2347,7 +2347,7 @@ void worker_t::work()
     
         body.reserve(1024);
 
-        res->onData([res, req, body = std::move(body), &secret](std::string_view data, bool last) mutable {
+        res->onData([res, req, body = std::move(body), secret](std::string_view data, bool last) mutable {
             body.append(data.data(), data.length());
 
             if (last) { 
@@ -2356,6 +2356,10 @@ void worker_t::work()
                     unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
                     hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
                     
+                   /*  std::cout << secret << std::endl;
+                    std::cout << to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH) << std::endl;
+                    std::cout << body << std::endl; */
+
                     /** compare HMAC and respond accordingly */
                     if(secret != to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)){
                         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
