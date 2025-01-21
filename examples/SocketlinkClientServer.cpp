@@ -1238,7 +1238,6 @@ int populateUserData(std::string data) {
 void fetchAndPopulateUserData() {
     try {
         std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        // std::string dropletId = "470868764";
 
         unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
         hmac_sha256(SECRET, strlen(SECRET), dropletId.c_str(), dropletId.length(), hmac_result);  /**< Compute HMAC */
@@ -1585,12 +1584,20 @@ void worker_t::work()
                 }
 
                 std::string body = payload.str(); 
-                
+                httplib::Headers headers = {};
+
+                /** if the webhook secret is present add the hmac */
+                if(UserData::getInstance().webhookSecret.length() > 0){
+                    unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
+                    hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
+                    headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
+                }
+ 
                 int status = sendHTTPSPOSTRequest(
                     UserData::getInstance().webHookBaseUrl,
                     UserData::getInstance().webhookPath,
                     body,
-                    {}
+                    headers
                 ).status;
 
                 if(status != 200){
