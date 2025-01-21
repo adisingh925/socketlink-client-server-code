@@ -21,6 +21,8 @@
 #include <mysql_driver.h>
 #include <mysql_connection.h>
 #include <cppconn/prepared_statement.h>
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
 
 /** Global variables */ 
 MDB_env* env;
@@ -100,6 +102,48 @@ constexpr uint8_t PRIVATE_STATE_ROOM = 3;
  * is logs enabled
  */
 constexpr bool LOGS_ENABLED = false;
+
+#define HMAC_SHA256_DIGEST_LENGTH 32  /**< SHA-256 produces a 32-byte (256-bit) output */
+
+/**
+ * Computes the HMAC-SHA256 hash of the given data using the provided key.
+ *
+ * @param key      The secret key for HMAC.
+ * @param key_len  The length of the key in bytes.
+ * @param data     The input message to hash.
+ * @param data_len The length of the input message in bytes.
+ * @param output   A 32-byte buffer to store the computed HMAC.
+ */
+void hmac_sha256(const char* key, size_t key_len, const char* data, size_t data_len, unsigned char output[HMAC_SHA256_DIGEST_LENGTH]) {
+    HMAC_CTX* ctx = HMAC_CTX_new();  /**< Allocate a new HMAC context */
+    
+    HMAC_Init_ex(ctx, key, key_len, EVP_sha256(), nullptr);  /**< Initialize HMAC with key and SHA-256 */
+    HMAC_Update(ctx, (unsigned char*)data, data_len);        /**< Process input data */
+    
+    unsigned int out_len = 0;  /**< Variable to hold the output length */
+    HMAC_Final(ctx, output, &out_len);  /**< Finalize and store result */
+    
+    HMAC_CTX_free(ctx);  /**< Free the HMAC context */
+}
+
+/**
+ * Converts binary data to a hexadecimal string representation.
+ *
+ * @param data Pointer to the binary data.
+ * @param len  Length of the binary data in bytes.
+ * @return     A string containing the hexadecimal representation.
+ */
+std::string to_hex(const unsigned char* data, size_t len) {
+    static const char hex_digits[] = "0123456789abcdef";  /**< Lookup table for hex conversion */
+    
+    std::string hex(len * 2, ' ');  /**< Preallocate string for performance */
+    for (size_t i = 0; i < len; ++i) {
+        hex[2 * i] = hex_digits[(data[i] >> 4) & 0xF];   /**< Extract upper 4 bits */
+        hex[2 * i + 1] = hex_digits[data[i] & 0xF];      /**< Extract lower 4 bits */
+    }
+    
+    return hex;  /**< Return hex string */
+}
 
 using json = nlohmann::json;  /** Create an alias for the json object */
 
@@ -940,12 +984,24 @@ void sendHTTPSPOSTRequestFireAndForget(
         boost::asio::streambuf request_buffer;
         std::ostream request_stream(&request_buffer);
 
-        /** Construct the HTTP request headers. */
-        request_stream << "POST " << path << " HTTP/1.1\r\n"
-                       << "Host: " << baseURL << "\r\n"
-                       << "Connection: keep-alive\r\n"
-                       << "Content-Type: application/json\r\n";
-
+        if(UserData::getInstance().webhookSecret.length() > 0){
+            unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
+            hmac_sha256(UserData::getInstance().webhookSecret.c_str(), strlen(UserData::getInstance().webhookSecret.c_str()), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
+                        
+            /** Construct the HTTP request headers with hmac */
+            request_stream << "POST " << path << " HTTP/1.1\r\n"
+            << "Host: " << baseURL << "\r\n"
+            << "Connection: keep-alive\r\n"
+            << "Content-Type: application/json\r\n"
+            << "X-HMAC-Signature: " << to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH) << "\r\n";  /**< Include HMAC in headers */
+        } else {
+            /** Construct the HTTP request headers without hmac */
+            request_stream << "POST " << path << " HTTP/1.1\r\n"
+            << "Host: " << baseURL << "\r\n"
+            << "Connection: keep-alive\r\n"
+            << "Content-Type: application/json\r\n";
+        }
+        
         /** Add any custom headers provided as a map. */
         for (const auto& header : headers) {
             request_stream << header.first << ": " << header.second << "\r\n";
@@ -1182,6 +1238,7 @@ int populateUserData(std::string data) {
 void fetchAndPopulateUserData() {
     try {
         std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        // std::string dropletId = "470868764";
 
         /** Make the HTTP request */ 
         std::string userData = sendHTTPSRequest(MASTER_SERVER_URL, "/api/v1/init/" + dropletId, {
@@ -2274,7 +2331,11 @@ void worker_t::work()
             fetchAndPopulateUserData();
         }
 
-        if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
+        std::string_view apiKey = req->getHeader("api-key");
+        std::string_view secret = req->getHeader("secret");
+
+        /** check if the API key is valid or not */
+        if(apiKey != UserData::getInstance().adminApiKey){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403");
             res->writeHeader("Content-Type", "application/json");
@@ -2282,23 +2343,28 @@ void worker_t::work()
             return;
         }
 
-        if(req->getHeader("secret") != SECRET){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid secret key."})");
-            return;
-        }
-
         std::string body;
     
         body.reserve(1024);
 
-        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
+        res->onData([res, req, body = std::move(body), &secret](std::string_view data, bool last) mutable {
             body.append(data.data(), data.length());
 
             if (last) { 
                 try {
+                    /** generate the secret and compare */
+                    unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
+                    hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
+                    
+                    /** compare HMAC and respond accordingly */
+                    if(secret != to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)){
+                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"error": "Unauthorized access. Invalid signature."})");
+                        return;
+                    }
+
                     /** Parse the JSON response */ 
                     int needsDBUpdate = populateUserData(body);
                     
