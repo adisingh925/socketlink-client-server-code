@@ -2355,10 +2355,6 @@ void worker_t::work()
                     /** generate the secret and compare */
                     unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
                     hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
-                    
-                   /*  std::cout << secret << std::endl;
-                    std::cout << to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH) << std::endl;
-                    std::cout << body << std::endl; */
 
                     /** compare HMAC and respond accordingly */
                     if(secret != to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)){
