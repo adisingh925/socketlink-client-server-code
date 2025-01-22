@@ -445,8 +445,7 @@ std::mutex rateLimitMutex;
 std::mutex write_worker_mutex;
 
 /** webhooks */
-enum class Webhooks : uint64_t
-{
+enum class Webhooks : uint64_t {
     /** Connection-related events */
     /** Triggered when a connection upgrade is rejected */
     ON_CONNECTION_UPGRADE_REJECTED = 1ULL << 0,            
@@ -559,10 +558,20 @@ enum class Webhooks : uint64_t
 };
 
 /** Features */
-enum class Features : uint32_t
-{
-    ENABLE_KEY_VALUE_DB = 1 << 0,
-    ENABLE_MYSQL_INTEGRATION = 1 << 1,
+enum class Features : uint32_t {
+    ENABLE_MYSQL_INTEGRATION = 1 << 0,
+};
+
+/** Rooms */
+enum class Rooms : uint8_t {
+    PUBLIC = 0,
+    PRIVATE = 1,
+    PUBLIC_STATE = 2,
+    PRIVATE_STATE = 3,
+    PUBLIC_CACHE = 4,
+    PRIVATE_CACHE = 5,
+    PUBLIC_STATE_CACHE = 6,
+    PRIVATE_STATE_CACHE = 7
 };
 
 /** Global atomic variables and data structures */
@@ -615,18 +624,8 @@ constexpr const char* SOMEONE_LEFT_THE_ROOM = "SOMEONE_LEFT_THE_ROOM";
 constexpr const char* MESSAGE_SIZE_EXCEEDED = "MESSAGE_SIZE_EXCEEDED";
 constexpr const char* YOU_ARE_RATE_LIMITED = "YOU_ARE_RATE_LIMITED";
 constexpr const char* RATE_LIMIT_LIFTED = "RATE_LIMIT_LIFTED";    
-constexpr const char* BROADCAST = "BROADCAST";
+constexpr const char* BROADCAST = "SOCKETLINK_BROADCAST";
 constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
-
-/** Room Types */
-constexpr uint8_t PUBLIC_ROOM = 0;
-constexpr uint8_t PRIVATE_ROOM = 1;
-constexpr uint8_t PUBLIC_STATE_ROOM = 2;
-constexpr uint8_t PRIVATE_STATE_ROOM = 3;
-constexpr uint8_t PUBLIC_CACHE_ROOM = 4;
-constexpr uint8_t PRIVATE_CACHE_ROOM = 5;
-constexpr uint8_t PUBLIC_STATE_CACHE_ROOM = 6;
-constexpr uint8_t PRIVATE_STATE_CACHE_ROOM = 7;
 
 /** is logs enabled */
 constexpr bool LOGS_ENABLED = false;
@@ -929,7 +928,7 @@ void populateWebhookStatus(uint64_t bitmask)
     /** Clear the existing statuses in case this is called multiple times */
     webhookStatus.clear();
 
-    for (uint64_t i = 0; i < 64; ++i)  // Use uint64_t to match bitmask size
+    for (uint64_t i = 0; i < 48; ++i)  // Use uint64_t to match bitmask size
     {
         /** Compute the webhook flag for this index */
         Webhooks webhook = static_cast<Webhooks>(static_cast<uint64_t>(1) << i);
@@ -1340,15 +1339,15 @@ void fetchAndPopulateUserData() {
  * HTTP Webhook Error Codes
  * 
  * CONNECTION_BANNED - 3001
- * UID_ALREADY_EXIST - 3002
- * CONNECTION_LIMIT_REACHED - 3003
- * INVALID_API_KEY - 3004
- * INVALID_ROOM_ID_LENGTH - 3005
- * INVALID_ROOM_TYPE - 3006
- * ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED - 3007
- * ON_RATE_LIMIT_EXCEEDED - 3008
- * ON_DAILY_MESSAGE_LIMIT_EXHAUSTED - 3009
- * ON_MESSAGE_SIZE_EXCEEDED - 3010
+ * CONNECTION_LIMIT_REACHED - 3002
+ * INVALID_API_KEY - 3003
+ * INVALID_ROOM_ID_LENGTH - 3004
+ * INVALID_ROOM_TYPE - 3005
+ * ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED - 3006
+ * ON_RATE_LIMIT_EXCEEDED - 3007
+ * ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED - 3008
+ * ON_MESSAGE_SIZE_EXCEEDED - 3009
+ * UID_ALREADY_EXIST - 3010
  * 
  * Verification Codes
  * 
@@ -1496,6 +1495,35 @@ void worker_t::work()
         }
 
         /**
+         * check if a connection is already there with the same uid
+         */
+        if(uid.find(upgradeData->uid) != uid.end()){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403 Forbidden")->end("UID_ALREADY_EXIST");
+
+            if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
+                std::ostringstream payload;
+                payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                        << "\"trigger\":\"UID_ALREADY_EXIST\", "  
+                        << "\"code\":3010, "
+                        << "\"uid\":\"" << upgradeData->uid << "\", "
+                        << "\"rid\":\"" << upgradeData->rid << "\", "
+                        << "\"message\":\"There is already a connection using this UID.\"}";
+
+                std::string body = payload.str(); 
+                
+                sendHTTPSPOSTRequestFireAndForget(
+                    UserData::getInstance().webHookBaseUrl,
+                    UserData::getInstance().webhookPath,
+                    body,
+                    {}
+                );
+            }
+
+            return;
+        }
+
+        /**
          * Check if the connection limit has been exceeded
          */
         if (globalConnectionCounter.load(std::memory_order_relaxed) >= UserData::getInstance().connections) {
@@ -1506,7 +1534,7 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"CONNECTION_LIMIT_REACHED\", "  
-                        << "\"code\":3003, "
+                        << "\"code\":3002, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
                         << "\"message\":\"You have reached the max limit of allowed connections.\"}";
@@ -1535,7 +1563,7 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"INVALID_API_KEY\", "  
-                        << "\"code\":3004, "
+                        << "\"code\":3003, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
                         << "\"message\":\"The API key is invalid.\"}";
@@ -1564,7 +1592,7 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"INVALID_ROOM_ID_LENGTH\", "  
-                        << "\"code\":3005, "
+                        << "\"code\":3004, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
                         << "\"message\":\"The room id length should be between 1 to 160 characters.\"}";
@@ -1585,37 +1613,37 @@ void worker_t::work()
         uint8_t roomType = -1;
 
         /** checking if the correct room type is received */
-        if (upgradeData->rid.rfind("pub-", 0) == 0)
+        if (upgradeData->rid.rfind("pub-state-cache-", 0) == 0)
         {
-            roomType = PUBLIC_ROOM;
-        }
-        else if (upgradeData->rid.rfind("pri-", 0) == 0)
-        {
-            roomType = PRIVATE_ROOM;
-        }
-        else if (upgradeData->rid.rfind("pub-state-", 0) == 0)
-        {
-            roomType = PUBLIC_STATE_ROOM;
-        }
-        else if (upgradeData->rid.rfind("pri-state-", 0) == 0)
-        {
-            roomType = PRIVATE_STATE_ROOM;
-        }
-        else if (upgradeData->rid.rfind("pub-cache-", 0) == 0)
-        {
-            roomType = PUBLIC_CACHE_ROOM;
-        }
-        else if (upgradeData->rid.rfind("pri-cache-", 0) == 0)
-        {
-            roomType = PRIVATE_CACHE_ROOM;
-        }
-        else if (upgradeData->rid.rfind("pub-state-cache-", 0) == 0)
-        {
-            roomType = PUBLIC_STATE_CACHE_ROOM;
+            roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
         }
         else if (upgradeData->rid.rfind("pri-state-cache-", 0) == 0)
         {
-            roomType = PRIVATE_STATE_CACHE_ROOM;
+            roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
+        }
+        else if (upgradeData->rid.rfind("pub-cache-", 0) == 0)
+        {
+            roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
+        }
+        else if (upgradeData->rid.rfind("pri-cache-", 0) == 0)
+        {
+            roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
+        }
+        else if (upgradeData->rid.rfind("pub-state-", 0) == 0)
+        {
+            roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
+        }
+        else if (upgradeData->rid.rfind("pri-state-", 0) == 0)
+        {
+            roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
+        }
+        else if (upgradeData->rid.rfind("pub-", 0) == 0)
+        {
+            roomType = static_cast<uint8_t>(Rooms::PUBLIC);
+        }
+        else if (upgradeData->rid.rfind("pri-", 0) == 0)
+        {
+            roomType = static_cast<uint8_t>(Rooms::PRIVATE);
         }
         else
         {
@@ -1626,7 +1654,7 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"INVALID_ROOM_TYPE\", "  
-                        << "\"code\":3006, "
+                        << "\"code\":3005, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
                         << "\"message\":\"The provided room type is invalid.\"}";
@@ -1644,38 +1672,51 @@ void worker_t::work()
             return;
         }
 
-        if(roomType == PRIVATE_ROOM 
-        || roomType == PRIVATE_STATE_ROOM 
-        || roomType == PRIVATE_CACHE_ROOM 
-        || roomType == PRIVATE_STATE_CACHE_ROOM
+        if(roomType == static_cast<uint8_t>(Rooms::PRIVATE) 
+        || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) 
+        || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
+        || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
         ){
             if(webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1){
                 std::ostringstream payload;
 
-                if(roomType == PRIVATE_ROOM){
-                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                    << "\"trigger\":\"INIT_PRIVATE_ROOM_VERIFICATION\", "
-                    << "\"code\":4001, "
-                    << "\"uid\":\"" << upgradeData->uid << "\", "
-                    << "\"rid\":\"" << upgradeData->rid << "\"}";
-                } else if(roomType == PRIVATE_STATE_ROOM){
-                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                    << "\"trigger\":\"INIT_PRIVATE_STATE_ROOM_VERIFICATION\", "
-                    << "\"code\":4002, "
-                    << "\"uid\":\"" << upgradeData->uid << "\", "
-                    << "\"rid\":\"" << upgradeData->rid << "\"}";
-                } else if(roomType == PRIVATE_CACHE_ROOM){
-                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                    << "\"trigger\":\"INIT_PRIVATE_CACHE_ROOM_VERIFICATION\", "
-                    << "\"code\":4003, "
-                    << "\"uid\":\"" << upgradeData->uid << "\", "
-                    << "\"rid\":\"" << upgradeData->rid << "\"}";
-                } else if(roomType == PRIVATE_STATE_CACHE_ROOM){
-                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                    << "\"trigger\":\"INIT_PRIVATE_STATE_CACHE_ROOM_VERIFICATION\", "
-                    << "\"code\":4004, "
-                    << "\"uid\":\"" << upgradeData->uid << "\", "
-                    << "\"rid\":\"" << upgradeData->rid << "\"}";
+                switch (roomType)
+                {
+                    case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                        payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                        << "\"trigger\":\"INIT_PRIVATE_ROOM_VERIFICATION\", "
+                        << "\"code\":4001, "
+                        << "\"uid\":\"" << upgradeData->uid << "\", "
+                        << "\"rid\":\"" << upgradeData->rid << "\"}";
+                        break;
+                    }
+
+                    case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                        payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                        << "\"trigger\":\"INIT_PRIVATE_STATE_ROOM_VERIFICATION\", "
+                        << "\"code\":4002, "
+                        << "\"uid\":\"" << upgradeData->uid << "\", "
+                        << "\"rid\":\"" << upgradeData->rid << "\"}";
+                        break;
+                    }
+
+                    case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                        payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                        << "\"trigger\":\"INIT_PRIVATE_CACHE_ROOM_VERIFICATION\", "
+                        << "\"code\":4003, "
+                        << "\"uid\":\"" << upgradeData->uid << "\", "
+                        << "\"rid\":\"" << upgradeData->rid << "\"}";
+                        break;
+                    }
+
+                    case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                        payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                        << "\"trigger\":\"INIT_PRIVATE_STATE_CACHE_ROOM_VERIFICATION\", "
+                        << "\"code\":4004, "
+                        << "\"uid\":\"" << upgradeData->uid << "\", "
+                        << "\"rid\":\"" << upgradeData->rid << "\"}";
+                        break;
+                    }
                 }
 
                 std::string body = payload.str(); 
@@ -1708,7 +1749,7 @@ void worker_t::work()
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                             << "\"trigger\":\"ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED\", "  
-                            << "\"code\":3007, "
+                            << "\"code\":3006, "
                             << "\"uid\":\"" << upgradeData->uid << "\", "
                             << "\"rid\":\"" << upgradeData->rid << "\", "
                             << "\"message\":\"Please enable ON_VERIFICATION_REQUEST webhook to use private rooms.\"}";
@@ -1751,19 +1792,19 @@ void worker_t::work()
         ws->subscribe(BROADCAST);
         topics[ws->getUserData()->rid].insert(ws->getUserData()->uid);
 
-        /**
-         * Send a message to self
-         */
+        /** Send a message to self */
         std::ostringstream payload;
         payload << "{\"event\":\"CONNECTED_TO_ROOM\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
         std::string result = payload.str(); 
 
         ws->send(result, uWS::OpCode::TEXT, true);
 
-        /**
-         * Broadcast the message to rest of the members of the group informing about the new connection
-         */
-        if(ws->getUserData()->roomType == PUBLIC_STATE_ROOM || ws->getUserData()->roomType == PRIVATE_STATE_ROOM || ws->getUserData()->roomType == PUBLIC_STATE_CACHE_ROOM || ws->getUserData()->roomType == PRIVATE_STATE_CACHE_ROOM){
+        /** Broadcast the message to rest of the members of the group informing about the new connection */
+        if(ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE)  
+        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE)  
+        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE)   
+        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)  
+        ){
             std::ostringstream payload;
             payload << "{\"event\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
             std::string result = payload.str();
@@ -1782,306 +1823,362 @@ void worker_t::work()
         }
 
         /** fire connection open webhook */
-        if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_ROOM){
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_ROOM\", "
-                    << "\"code\":5001, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+        switch(ws->getUserData()->roomType) {
+            case static_cast<uint8_t>(Rooms::PUBLIC) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_ROOM\", "
+                            << "\"code\":5001, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_ROOM){
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_ROOM\", "
-                    << "\"code\":5002, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }  
 
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_ROOM){
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM\", "
-                    << "\"code\":5003, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_ROOM\", "
+                            << "\"code\":5002, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_ROOM){
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM\", "
-                    << "\"code\":5004, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
 
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_CACHE_ROOM){
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM\", "
-                    << "\"code\":5005, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM\", "
+                            << "\"code\":5003, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_CACHE_ROOM){
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_CACHE_ROOM\", "
-                    << "\"code\":5006, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                    std::string body = payload.str();
 
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_CACHE_ROOM){
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_STATE_CACHE_ROOM\", "
-                    << "\"code\":5007, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
 
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        }else if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_CACHE_ROOM){
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_STATE_CACHE_ROOM\", "
-                    << "\"code\":5008, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM\", "
+                            << "\"code\":5004, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        }
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
 
-        /** Room ocuupied webhooks */
-        if(topics[ws->getUserData()->rid].size() == 1){
-            if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_ROOM\", "
-                        << "\"code\":5009, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM\", "
+                            << "\"code\":5005, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_ROOM\", "
-                        << "\"code\":5010, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM\", "
-                        << "\"code\":5011, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_CACHE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_CACHE_ROOM\", "
+                            << "\"code\":5006, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM\", "
-                        << "\"code\":5012, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_CACHE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_CACHE_ROOM\", "
-                        << "\"code\":5013, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_STATE_CACHE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_STATE_CACHE_ROOM\", "
+                            << "\"code\":5007, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_CACHE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_CACHE_ROOM\", "
-                        << "\"code\":5014, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_CACHE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_STATE_CACHE_ROOM\", "
-                        << "\"code\":5015, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_STATE_CACHE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_STATE_CACHE_ROOM\", "
+                            << "\"code\":5008, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_CACHE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_STATE_CACHE_ROOM\", "
-                        << "\"code\":5016, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
-
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
             }
         }
 
-        /** Check if we have reached the connection limit and fire webhook */
-        if (webhookStatus[Webhooks::ON_MAX_CONNECTION_LIMIT_REACHED] == 1)
-        {
-            if (globalConnectionCounter.load(std::memory_order_relaxed) == UserData::getInstance().connections)
-            {
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_MAX_CONNECTION_LIMIT_REACHED\", "
-                        << "\"trigger\":\"CONNECTION_LIMIT_REACHED\", "  
-                        << "\"code\":3003, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"message\":\"You have reached the max limit of allowed connections.\"}";
+        /** Room ocuupied webhooks */
+        if(topics[ws->getUserData()->rid].size() == 1){            
+            switch(ws->getUserData()->roomType) {
+                case static_cast<uint8_t>(Rooms::PUBLIC) : {                    
+                    if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_ROOM\", "
+                                << "\"code\":5009, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-                std::string body = payload.str();
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }  
 
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
+                case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_ROOM\", "
+                                << "\"code\":5010, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
+
+                case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM\", "
+                                << "\"code\":5011, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str();
+
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
+
+                case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM\", "
+                                << "\"code\":5012, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
+
+                case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_CACHE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_CACHE_ROOM\", "
+                                << "\"code\":5013, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
+
+                case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_CACHE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_CACHE_ROOM\", "
+                                << "\"code\":5014, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
+
+                case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_STATE_CACHE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_STATE_CACHE_ROOM\", "
+                                << "\"code\":5015, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
+
+                case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_STATE_CACHE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_STATE_CACHE_ROOM\", "
+                                << "\"code\":5016, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
             }
         }
     },
@@ -2095,7 +2192,7 @@ void worker_t::work()
             if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_MESSAGE_SIZE_EXCEEDED\", "
-                        << "\"code\":3010, "
+                        << "\"code\":3009, "
                         << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                         << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msgSizeAllowedInBytes << "\"}";            
                 
@@ -2119,7 +2216,7 @@ void worker_t::work()
                 if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
-                            << "\"code\":3008, "
+                            << "\"code\":3007, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\"}";
 
                     std::string body = payload.str(); 
@@ -2148,7 +2245,11 @@ void worker_t::work()
                         totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
 
                         /** Writing data to the LMDB */
-                        if (ws->getUserData()->roomType == 4 || ws->getUserData()->roomType == 5 || ws->getUserData()->roomType == 6 || ws->getUserData()->roomType == 7){
+                        if (ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
+                        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
+                        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
+                        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+                        ){
                             write_worker(rid, ws->getUserData()->uid, std::string(message));
                         }
 
@@ -2170,134 +2271,174 @@ void worker_t::work()
                         });
 
                         /** this is a dangerous and can cause performance degrade */
-                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_ROOM){
-                            std::ostringstream payload;
-                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
-                                    << "\"code\":5017, "
-                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                    << "\"message\":\"" << message << "\"}";    
+                        switch(ws->getUserData()->roomType) {
+                            case static_cast<uint8_t>(Rooms::PUBLIC) : {
+                                if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1){
+                                    std::ostringstream payload;
+                                    payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
+                                            << "\"code\":5017, "
+                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                            << "\"message\":\"" << message << "\"}"; 
 
-                            std::string body = payload.str(); 
-                            
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {}
-                            );
-                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_ROOM){
-                            std::ostringstream payload;
-                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
-                                    << "\"code\":5018, "
-                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                    << "\"message\":\"" << message << "\"}";  
+                                    std::string body = payload.str(); 
+                                    
+                                    sendHTTPSPOSTRequestFireAndForget(
+                                        UserData::getInstance().webHookBaseUrl,
+                                        UserData::getInstance().webhookPath,
+                                        body,
+                                        {}
+                                    );
+                                }
+                                break;
+                            }  
 
-                            std::string body = payload.str(); 
-                            
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {}
-                            );
-                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_ROOM){
-                            std::ostringstream payload;
-                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
-                                    << "\"code\":5019, "
-                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                    << "\"message\":\"" << message << "\"}";      
+                            case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                                if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1){
+                                    std::ostringstream payload;
+                                    payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
+                                            << "\"code\":5018, "
+                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                            << "\"message\":\"" << message << "\"}";  
 
-                            std::string body = payload.str(); 
-                            
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {}
-                            );
-                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_ROOM){
-                            std::ostringstream payload;
-                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
-                                    << "\"code\":5020, "
-                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                    << "\"message\":\"" << message << "\"}";
+                                    std::string body = payload.str(); 
+                                    
+                                    sendHTTPSPOSTRequestFireAndForget(
+                                        UserData::getInstance().webHookBaseUrl,
+                                        UserData::getInstance().webhookPath,
+                                        body,
+                                        {}
+                                    );
+                                }
+                                break;
+                            }
 
-                            std::string body = payload.str();
+                            case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
+                                if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1){
+                                    std::ostringstream payload;
+                                    payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
+                                            << "\"code\":5019, "
+                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                            << "\"message\":\"" << message << "\"}"; 
 
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {}
-                            );
-                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_CACHE_ROOM){
-                            std::ostringstream payload;
-                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
-                                    << "\"code\":5021, "
-                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                    << "\"message\":\"" << message << "\"}";
+                                    std::string body = payload.str();
 
-                            std::string body = payload.str();
+                                    sendHTTPSPOSTRequestFireAndForget(
+                                        UserData::getInstance().webHookBaseUrl,
+                                        UserData::getInstance().webhookPath,
+                                        body,
+                                        {}
+                                    );
+                                }
+                                break;
+                            }
 
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {}
-                            );
-                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_CACHE_ROOM){
-                            std::ostringstream payload;
-                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
-                                    << "\"code\":5022, "
-                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                    << "\"message\":\"" << message << "\"}";
+                            case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                                if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1){
+                                    std::ostringstream payload;
+                                    payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
+                                            << "\"code\":5020, "
+                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                            << "\"message\":\"" << message << "\"}";
 
-                            std::string body = payload.str();
+                                    std::string body = payload.str(); 
+                                    
+                                    sendHTTPSPOSTRequestFireAndForget(
+                                        UserData::getInstance().webHookBaseUrl,
+                                        UserData::getInstance().webhookPath,
+                                        body,
+                                        {}
+                                    );
+                                }
+                                break;
+                            }
 
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {}
-                            );
-                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_CACHE_ROOM){
-                            std::ostringstream payload;
-                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
-                                    << "\"code\":5023, "
-                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                    << "\"message\":\"" << message << "\"}";
+                            case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
+                                if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_CACHE_ROOM] == 1){
+                                    std::ostringstream payload;
+                                    payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
+                                            << "\"code\":5021, "
+                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                            << "\"message\":\"" << message << "\"}";
 
-                            std::string body = payload.str();
+                                    std::string body = payload.str(); 
+                                    
+                                    sendHTTPSPOSTRequestFireAndForget(
+                                        UserData::getInstance().webHookBaseUrl,
+                                        UserData::getInstance().webhookPath,
+                                        body,
+                                        {}
+                                    );
+                                }
+                                break;
+                            }
 
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {}
-                            );
-                        } else if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_CACHE_ROOM){
-                            std::ostringstream payload;
-                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
-                                    << "\"code\":5024, "
-                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                    << "\"message\":\"" << message << "\"}";
+                            case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                                if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_CACHE_ROOM] == 1){
+                                    std::ostringstream payload;
+                                    payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
+                                            << "\"code\":5022, "
+                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                            << "\"message\":\"" << message << "\"}";
 
-                            std::string body = payload.str();
+                                    std::string body = payload.str(); 
+                                    
+                                    sendHTTPSPOSTRequestFireAndForget(
+                                        UserData::getInstance().webHookBaseUrl,
+                                        UserData::getInstance().webhookPath,
+                                        body,
+                                        {}
+                                    );
+                                }
+                                break;
+                            }
 
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {}
-                            );
+                            case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
+                                if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM] == 1){
+                                    std::ostringstream payload;
+                                    payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
+                                            << "\"code\":5023, "
+                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                            << "\"message\":\"" << message << "\"}";
+
+                                    std::string body = payload.str(); 
+                                    
+                                    sendHTTPSPOSTRequestFireAndForget(
+                                        UserData::getInstance().webHookBaseUrl,
+                                        UserData::getInstance().webhookPath,
+                                        body,
+                                        {}
+                                    );
+                                }
+                                break;
+                            }
+
+                            case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                                if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM] == 1){
+                                    std::ostringstream payload;
+                                    payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
+                                            << "\"code\":5024, "
+                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                            << "\"message\":\"" << message << "\"}";
+
+                                    std::string body = payload.str(); 
+                                    
+                                    sendHTTPSPOSTRequestFireAndForget(
+                                        UserData::getInstance().webHookBaseUrl,
+                                        UserData::getInstance().webhookPath,
+                                        body,
+                                        {}
+                                    );
+                                }
+                                break;
+                            }
                         }
                     }
                     else
@@ -2307,12 +2448,12 @@ void worker_t::work()
                     }
                 } else {
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
-                    ws->send("{\"event\":\"DAILY_MSG_LIMIT_EXHAUSTED\"}", uWS::OpCode::TEXT, true);
+                    ws->send("{\"event\":\"MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\"}", uWS::OpCode::TEXT, true);
 
                     if(webhookStatus[Webhooks::ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\", "
-                                << "\"code\":3009, "
+                                << "\"code\":3008, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"max_monthly_payload_in_bytes\":\"" << UserData::getInstance().maxMonthlyPayloadInBytes << "\"}";              
@@ -2334,7 +2475,7 @@ void worker_t::work()
             if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
-                        << "\"code\":3008, "
+                        << "\"code\":3007, "
                         << "\"uid\":\"" << ws->getUserData()->uid << "\"}";
 
                 std::string body = payload.str(); 
@@ -2424,10 +2565,10 @@ void worker_t::work()
         /**
          * Broadcast the message to rest of the members of the group informing about the disconnection
          */
-        if(ws->getUserData()->roomType == PUBLIC_STATE_ROOM 
-        || ws->getUserData()->roomType == PRIVATE_STATE_ROOM 
-        || ws->getUserData()->roomType == PUBLIC_STATE_CACHE_ROOM 
-        || ws->getUserData()->roomType == PRIVATE_STATE_CACHE_ROOM
+        if(ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) 
+        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE)  
+        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE)  
+        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
         ){
             std::ostringstream payload;
             payload << "{\"event\":\"SOMEONE_LEFT_THE_ROOM\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
@@ -2442,290 +2583,362 @@ void worker_t::work()
         }
 
         /** connection close webhooks */
-        if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_ROOM){
-            std::ostringstream payload; 
+        switch(ws->getUserData()->roomType) {
+            case static_cast<uint8_t>(Rooms::PUBLIC) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_ROOM\", "
+                            << "\"code\":5025, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-            payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_ROOM\", "
-                    << "\"code\":5025, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
-     
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_ROOM){
-            std::ostringstream payload; 
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }  
 
-            payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_ROOM\", "
-                    << "\"code\":5026, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
-     
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_ROOM){
-            std::ostringstream payload; 
+            case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_ROOM\", "
+                            << "\"code\":5026, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-            payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM\", "
-                    << "\"code\":5027, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
-     
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_ROOM){
-            std::ostringstream payload; 
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
 
-            payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM\", "
-                    << "\"code\":5028, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
-     
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_CACHE_ROOM){
-            std::ostringstream payload; 
+            case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM\", "
+                            << "\"code\":5027, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-            payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_CACHE_ROOM\", "
-                    << "\"code\":5029, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
-     
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_CACHE_ROOM){
-            std::ostringstream payload; 
+                    std::string body = payload.str();
 
-            payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_CACHE_ROOM\", "
-                    << "\"code\":5030, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
-     
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_CACHE_ROOM){
-            std::ostringstream payload; 
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
 
-            payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_STATE_CACHE_ROOM\", "
-                    << "\"code\":5031, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
-     
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
-        } else if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_CACHE_ROOM){
-            std::ostringstream payload; 
+            case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM\", "
+                            << "\"code\":5028, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-            payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_STATE_CACHE_ROOM\", "
-                    << "\"code\":5032, "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                    << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
-     
-            std::string body = payload.str(); 
-            
-            sendHTTPSPOSTRequestFireAndForget(
-                UserData::getInstance().webHookBaseUrl,
-                UserData::getInstance().webhookPath,
-                body,
-                {}
-            );
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
+
+            case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_CACHE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_CACHE_ROOM\", "
+                            << "\"code\":5029, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
+
+            case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_CACHE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_CACHE_ROOM\", "
+                            << "\"code\":5030, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
+
+            case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_STATE_CACHE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_STATE_CACHE_ROOM\", "
+                            << "\"code\":5031, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
+
+            case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_STATE_CACHE_ROOM] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_STATE_CACHE_ROOM\", "
+                            << "\"code\":5032, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+                break;
+            }
         }
 
         /** room vacate webhooks */
         if(topics[rid].size() == 0){
-            if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_ROOM\", "
-                        << "\"code\":5033, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            switch(ws->getUserData()->roomType) {
+                case static_cast<uint8_t>(Rooms::PUBLIC) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_ROOM\", "
+                                << "\"code\":5033, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_ROOM\", "
-                        << "\"code\":5034, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }  
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_STATE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_STATE_ROOM\", "
-                        << "\"code\":5035, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_ROOM\", "
+                                << "\"code\":5034, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-                std::string body = payload.str();
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
 
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_STATE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_STATE_ROOM\", "
-                        << "\"code\":5036, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_STATE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_STATE_ROOM\", "
+                                << "\"code\":5035, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_CACHE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_CACHE_ROOM\", "
-                        << "\"code\":5037, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                        std::string body = payload.str();
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_CACHE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_CACHE_ROOM\", "
-                        << "\"code\":5038, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PUBLIC_STATE_CACHE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_STATE_CACHE_ROOM\", "
-                        << "\"code\":5039, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_STATE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_STATE_ROOM\", "
+                                << "\"code\":5036, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            } else if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_STATE_CACHE_ROOM] == 1 && ws->getUserData()->roomType == PRIVATE_STATE_CACHE_ROOM){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_STATE_CACHE_ROOM\", "
-                        << "\"code\":5040, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                        << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
+                case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_CACHE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_CACHE_ROOM\", "
+                                << "\"code\":5037, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
+
+                case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_CACHE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_CACHE_ROOM\", "
+                                << "\"code\":5038, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
+
+                case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_STATE_CACHE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_STATE_CACHE_ROOM\", "
+                                << "\"code\":5039, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
+
+                case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                    if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_STATE_CACHE_ROOM] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_STATE_CACHE_ROOM\", "
+                                << "\"code\":5040, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                    break;
+                }
             }
         }
     }
@@ -3055,115 +3268,103 @@ void worker_t::work()
             /** connection aborted */
         });
 
-        if(featureStatus[Features::ENABLE_KEY_VALUE_DB] == 1){
-            std::string_view rid = req->getParameter("rid");
-            std::string_view apiKey = req->getHeader("api-key");
-            int limit, offset;
+        std::string_view rid = req->getParameter("rid");
+        std::string_view apiKey = req->getHeader("api-key");
+        int limit, offset;
 
-            try {
-                limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
-            } catch (const std::exception& e) {
-                limit = 10; // Default value if conversion fails
-            }
-
-            if(limit > 10){
-                res->writeStatus("400 Bad Request");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"error": "Limit cannot be greater than 10."})");
-                return;
-            }
-
-            try {
-                offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
-            } catch (const std::exception& e) {
-                offset = 0; // Default value if conversion fails
-            }
-
-            write_worker(std::string(rid), "", "", true);
-
-            if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                res->writeStatus("403");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-                return;
-            }
-
-            res->writeStatus("200 OK");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(read_worker(std::string(rid), limit, offset));  
-        } else{
-            res->writeStatus("403 Forbidden");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"message": "Please enable ENABLE_KEY_VALUE_DB feature from the website to store and retrieve messages!"})");
+        try {
+            limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
+        } catch (const std::exception& e) {
+            limit = 10; // Default value if conversion fails
         }
+
+        if(limit > 10){
+            res->writeStatus("400 Bad Request");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Limit cannot be greater than 10."})");
+            return;
+        }
+
+        try {
+            offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
+        } catch (const std::exception& e) {
+            offset = 0; // Default value if conversion fails
+        }
+
+        write_worker(std::string(rid), "", "", true);
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            return;
+        }
+
+        res->writeStatus("200 OK");
+        res->writeHeader("Content-Type", "application/json");
+        res->end(read_worker(std::string(rid), limit, offset));  
 	}).del("/api/v1/database", [this](auto *res, auto *req) {
          /** Handle connection abortion immediately */
         res->onAborted([]() {
             /** Connection aborted, clean up resources if necessary */
         });
 
-        if(featureStatus[Features::ENABLE_KEY_VALUE_DB] == 1){
-            /** Extract the API key from the request header */
-            std::string_view apiKey = req->getHeader("api-key");
+        /** Extract the API key from the request header */
+        std::string_view apiKey = req->getHeader("api-key");
 
-            /** Check if the provided API key is valid */
-            if (apiKey != UserData::getInstance().adminApiKey) {
-                /** Increment the rejected request counter to track unauthorized access */
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+        /** Check if the provided API key is valid */
+        if (apiKey != UserData::getInstance().adminApiKey) {
+            /** Increment the rejected request counter to track unauthorized access */
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-                /** Respond with 403 Forbidden if the API key is invalid */
-                res->writeStatus("403");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-                return;
-            }
-
-            MDB_txn* txn = nullptr;  /** Pointer for LMDB transaction */
-            MDB_dbi dbi;  /** Handle for LMDB database */
-
-            try {
-                /** Begin a write transaction, avoid creating a new txn each time for efficiency */
-                if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-                    throw std::runtime_error("Failed to begin transaction.");
-                }
-
-                /** Open the database only once and reuse the handle */
-                if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
-                    mdb_txn_abort(txn);  /** Abort transaction if database fails to open */
-                    throw std::runtime_error("Failed to open database.");
-                }
-
-                /** Drop all keys in the database while keeping its structure */
-                if (mdb_drop(txn, dbi, 0) != 0) {  /** Pass `0` to truncate the database */
-                    mdb_txn_abort(txn);  /** Abort transaction if drop operation fails */
-                    throw std::runtime_error("Failed to drop database.");
-                }
-
-                /** Commit the transaction to apply changes, keeping memory use low */
-                if (mdb_txn_commit(txn) != 0) {
-                    throw std::runtime_error("Failed to commit transaction.");
-                }
-
-                /** Respond with a success message */
-                res->writeStatus("200 OK");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Database truncated successfully."})");
-            } catch (const std::exception& e) {
-                /** Handle any errors efficiently without leaking resources */
-
-                /** If an error occurs, make sure the transaction is aborted to free resources */
-                if (txn) mdb_txn_abort(txn);
-
-                /** Respond with the error message */
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
-            }
-        } else{
-            res->writeStatus("403 Forbidden");
+            /** Respond with 403 Forbidden if the API key is invalid */
+            res->writeStatus("403");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"message": "Please enable ENABLE_KEY_VALUE_DB feature from the website to store and retrieve messages!"})");
+            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            return;
+        }
+
+        MDB_txn* txn = nullptr;  /** Pointer for LMDB transaction */
+        MDB_dbi dbi;  /** Handle for LMDB database */
+
+        try {
+            /** Begin a write transaction, avoid creating a new txn each time for efficiency */
+            if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
+                throw std::runtime_error("Failed to begin transaction.");
+            }
+
+            /** Open the database only once and reuse the handle */
+            if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
+                mdb_txn_abort(txn);  /** Abort transaction if database fails to open */
+                throw std::runtime_error("Failed to open database.");
+            }
+
+            /** Drop all keys in the database while keeping its structure */
+            if (mdb_drop(txn, dbi, 0) != 0) {  /** Pass `0` to truncate the database */
+                mdb_txn_abort(txn);  /** Abort transaction if drop operation fails */
+                throw std::runtime_error("Failed to drop database.");
+            }
+
+            /** Commit the transaction to apply changes, keeping memory use low */
+            if (mdb_txn_commit(txn) != 0) {
+                throw std::runtime_error("Failed to commit transaction.");
+            }
+
+            /** Respond with a success message */
+            res->writeStatus("200 OK");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"message": "Database truncated successfully."})");
+        } catch (const std::exception& e) {
+            /** Handle any errors efficiently without leaking resources */
+
+            /** If an error occurs, make sure the transaction is aborted to free resources */
+            if (txn) mdb_txn_abort(txn);
+
+            /** Respond with the error message */
+            res->writeStatus("500 Internal Server Error");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
         }
 	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
         res->writeStatus("200 OK");
