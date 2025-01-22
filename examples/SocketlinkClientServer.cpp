@@ -1407,7 +1407,7 @@ void fetchAndPopulateUserData() {
  * 
  * INFO
  * 
- * RATE_LIMIT_LIFTED - 6001
+ * ON_RATE_LIMIT_LIFTED - 6001
  * ON_MESSAGE_DROPPED - 6002
  */
 
