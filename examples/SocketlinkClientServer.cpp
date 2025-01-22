@@ -3270,9 +3270,10 @@ void worker_t::work()
 
         std::string_view rid = req->getParameter("rid");
         std::string_view apiKey = req->getHeader("api-key");
-        std::string_view uid = req->getQuery("uid");
+        std::string_view uid = req->getHeader("uid");
 
         auto it = topics.find(std::string(rid));
+
         if (it != topics.end()) {
             /** Check if value exists in the set */ 
             if (it->second.find(std::string(uid)) != it->second.end()) {
