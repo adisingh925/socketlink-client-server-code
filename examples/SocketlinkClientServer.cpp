@@ -3270,40 +3270,56 @@ void worker_t::work()
 
         std::string_view rid = req->getParameter("rid");
         std::string_view apiKey = req->getHeader("api-key");
-        int limit, offset;
+        std::string_view uid = req->getQuery("uid");
 
-        try {
-            limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
-        } catch (const std::exception& e) {
-            limit = 10; // Default value if conversion fails
-        }
+        auto it = topics.find(std::string(rid));
+        if (it != topics.end()) {
+            /** Check if value exists in the set */ 
+            if (it->second.find(std::string(uid)) != it->second.end()) {
+                int limit, offset;
 
-        if(limit > 10){
-            res->writeStatus("400 Bad Request");
+                try {
+                    limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
+                } catch (const std::exception& e) {
+                    limit = 10; /** Default value if conversion fails */ 
+                }
+
+                if(limit > 10){
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Limit cannot be greater than 10."})");
+                    return;
+                }
+
+                try {
+                    offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
+                } catch (const std::exception& e) {
+                    offset = 0; /** Default value if conversion fails */ 
+                }
+
+                write_worker(std::string(rid), "", "", true);
+
+                if(apiKey != UserData::getInstance().clientApiKey){
+                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                    res->writeStatus("403");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+                    return;
+                }
+
+                res->writeStatus("200 OK");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(read_worker(std::string(rid), limit, offset));  
+            } else {
+                res->writeStatus("403 Forbidden");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"error": "Access denied!"})");
+            }
+        } else {
+            res->writeStatus("403 Forbidden");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Limit cannot be greater than 10."})");
-            return;
+            res->end(R"({"error": "Access denied!"})");
         }
-
-        try {
-            offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
-        } catch (const std::exception& e) {
-            offset = 0; // Default value if conversion fails
-        }
-
-        write_worker(std::string(rid), "", "", true);
-
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-            return;
-        }
-
-        res->writeStatus("200 OK");
-        res->writeHeader("Content-Type", "application/json");
-        res->end(read_worker(std::string(rid), limit, offset));  
 	}).del("/api/v1/database", [this](auto *res, auto *req) {
          /** Handle connection abortion immediately */
         res->onAborted([]() {
