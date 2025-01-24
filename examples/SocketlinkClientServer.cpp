@@ -428,7 +428,7 @@ struct worker_t
   std::shared_ptr<MySQLConnectionHandler> db_handler;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::SSLApp> app_;
+  std::shared_ptr<uWS::App> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -584,8 +584,9 @@ std::atomic<double> averageLatency{0.0};
 std::atomic<unsigned long long> droppedMessages{0};
 std::atomic<unsigned int> messageCount(0);
 std::unordered_map<std::string, std::set<std::string>> topics;
-std::unordered_set<std::string> bannedConnections;
+std::unordered_map<std::string, std::unordered_set<std::string>> bannedConnections;
 std::unordered_set<std::string> uid;
+std::unordered_map<std::string, std::unordered_set<std::string>> disabledConnections;
 
 /** map to store enabled webhooks and features */
 std::unordered_map<Webhooks, int> webhookStatus;
@@ -610,7 +611,7 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 443;
+constexpr const int PORT = 9002;
 
 /** Sending Constants */
 constexpr const char* ACCESS_DENIED = "Access Denied";
@@ -808,6 +809,65 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
         /** Close the database handle */
         mdb_dbi_close(env, dbi);
     }
+}
+
+/** this function will delete all the entries for a room */
+void delete_worker(const std::string& room_id) {
+    MDB_txn* txn;
+    MDB_dbi dbi;
+    MDB_cursor* cursor;
+
+    /** Lock the mutex to ensure thread-safety for shared resources */
+    std::lock_guard<std::mutex> lock(write_worker_mutex);
+
+    /** Begin a write transaction */
+    if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
+        std::cerr << "Failed to begin delete transaction.\n";
+        return;
+    }
+
+    /** Open the database */
+    if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
+        std::cerr << "Failed to open database.\n";
+        mdb_txn_abort(txn);
+        return;
+    }
+
+    /** Open a cursor to iterate over keys */
+    if (mdb_cursor_open(txn, dbi, &cursor) != 0) {
+        std::cerr << "Failed to open cursor.\n";
+        mdb_txn_abort(txn);
+        return;
+    }
+
+    MDB_val key, value;
+    int rc = mdb_cursor_get(cursor, &key, &value, MDB_FIRST);
+
+    /** Iterate through the database and delete all keys that match the room_id prefix */
+    while (rc == 0) {
+        std::string key_str(static_cast<char*>(key.mv_data), key.mv_size);
+        
+        /** Check if the key starts with room_id */
+        if (key_str.find(room_id + ":") == 0) {
+            if (mdb_del(txn, dbi, &key, nullptr) != 0) {
+                std::cerr << "Failed to delete key: " << key_str << "\n";
+                mdb_cursor_close(cursor);
+                mdb_txn_abort(txn);
+                return;
+            }
+        }
+        
+        rc = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+    }
+
+    /** Commit the transaction after deletion */
+    if (mdb_txn_commit(txn) != 0) {
+        std::cerr << "Failed to commit delete transaction.\n";
+    }
+
+    /** Close cursor and database handle */
+    mdb_cursor_close(cursor);
+    mdb_dbi_close(env, dbi);
 }
 
 /** read the data from the LMDB */
@@ -1308,7 +1368,8 @@ int populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        std::string dropletId = "471509842";
 
         unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
         hmac_sha256(SECRET, strlen(SECRET), dropletId.c_str(), dropletId.length(), hmac_result);  /**< Compute HMAC */
@@ -1418,8 +1479,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::SSLApp>(
-    uWS::SSLApp({
+  app_ = std::make_shared<uWS::App>(
+    uWS::App({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
@@ -1466,7 +1527,9 @@ void worker_t::work()
         /**
          * Check if the user is banned and reject the connection
          */
-        if(bannedConnections.find(upgradeData->uid) != bannedConnections.end()){
+        auto globalBannedConnections = bannedConnections.find("GLOBAL");
+
+        if (globalBannedConnections != bannedConnections.end() && globalBannedConnections->second.find(upgradeData->uid) != globalBannedConnections->second.end()) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403 Forbidden");
             res->writeHeader("Content-Type", "application/json");
@@ -1475,11 +1538,11 @@ void worker_t::work()
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                        << "\"trigger\":\"CONNECTION_BANNED\", "  
+                        << "\"trigger\":\"CONNECTION_BANNED_GLOBALLY\", "  
                         << "\"code\":3001, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"This connection is banned by the admin.\"}";
+                        << "\"message\":\"This connection is globally banned by the admin.\"}";
 
                 std::string body = payload.str(); 
                 
@@ -1610,7 +1673,7 @@ void worker_t::work()
             return;
         }
 
-        uint8_t roomType = -1;
+        uint8_t roomType = 255;
 
         /** checking if the correct room type is received */
         if (upgradeData->rid.rfind("pub-state-cache-", 0) == 0)
@@ -1658,6 +1721,36 @@ void worker_t::work()
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
                         << "\"message\":\"The provided room type is invalid.\"}";
+
+                std::string body = payload.str(); 
+                
+                sendHTTPSPOSTRequestFireAndForget(
+                    UserData::getInstance().webHookBaseUrl,
+                    UserData::getInstance().webhookPath,
+                    body,
+                    {}
+                );
+            }
+
+            return;
+        }
+
+        auto roomBannedConnections = bannedConnections.find(upgradeData->rid);
+
+        if (roomBannedConnections != bannedConnections.end() && roomBannedConnections->second.find(upgradeData->uid) != roomBannedConnections->second.end()) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403 Forbidden");
+            res->writeHeader("Content-Type", "application/json");
+            res->end("CONNECTION_BANNED");
+
+            if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
+                std::ostringstream payload;
+                payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                        << "\"trigger\":\"CONNECTION_BANNED_ON_ROOM\", "  
+                        << "\"code\":3001, "
+                        << "\"uid\":\"" << upgradeData->uid << "\", "
+                        << "\"rid\":\"" << upgradeData->rid << "\", "
+                        << "\"message\":\"This connection is globally banned by the admin.\"}";
 
                 std::string body = payload.str(); 
                 
@@ -2183,35 +2276,301 @@ void worker_t::work()
         }
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-        if(message.size() > UserData::getInstance().msgSizeAllowedInBytes){
-            droppedMessages.fetch_add(1, std::memory_order_relaxed);
+        if(disabledConnections["GLOBAL"].find(ws->getUserData()->uid) != disabledConnections["GLOBAL"].end()
+        || disabledConnections[ws->getUserData()->rid].find(ws->getUserData()->uid) != disabledConnections[ws->getUserData()->rid].end()
+        ){
+            ws->send("{\"event\":\"MESSAGING_DISABLED\"}", uWS::OpCode::TEXT, true);
+        } else {
+            if(static_cast<int>(message.size()) > UserData::getInstance().msgSizeAllowedInBytes){
+                droppedMessages.fetch_add(1, std::memory_order_relaxed);
 
-            /** alert the client about the issue */
-            ws->send("{\"event\":\"MESSAGE_SIZE_EXCEEDED\"}", uWS::OpCode::TEXT, true);
+                /** alert the client about the issue */
+                ws->send("{\"event\":\"MESSAGE_SIZE_EXCEEDED\"}", uWS::OpCode::TEXT, true);
 
-            if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_MESSAGE_SIZE_EXCEEDED\", "
-                        << "\"code\":3009, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msgSizeAllowedInBytes << "\"}";            
-                
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
+                if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_MESSAGE_SIZE_EXCEEDED\", "
+                            << "\"code\":3009, "
+                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msgSizeAllowedInBytes << "\"}";            
+                    
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
             }
-        }
-        else if (ws->getUserData()->sendingAllowed)
-        {
-            if(ws->getBufferedAmount() > 4 * 1024 * 1024){
+            else if (ws->getUserData()->sendingAllowed)
+            {
+                if(ws->getBufferedAmount() > 4 * 1024 * 1024){
+                    ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
+                    droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                    ws->getUserData()->sendingAllowed = false;
+
+                    if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
+                                << "\"code\":3007, "
+                                << "\"uid\":\"" << ws->getUserData()->uid << "\"}";
+
+                        std::string body = payload.str(); 
+                        
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+                } else {
+                    if (totalPayloadSent.load(std::memory_order_relaxed) < UserData::getInstance().maxMonthlyPayloadInBytes) {
+                        std::string rid = ws->getUserData()->rid;
+                        unsigned int subscribers = app_->numSubscribers(rid);
+
+                        /** Calculate cooldown duration */
+                        double cooldownMillis = k * subscribers * (static_cast<double>(message.size()) / M);
+                        auto cooldownDuration = std::chrono::milliseconds(static_cast<int>(cooldownMillis));
+
+                        /** Cooldown check */
+                        auto now = std::chrono::steady_clock::now();
+                        if(now >= globalCooldownEnd.load(std::memory_order_relaxed)){
+                            globalCooldownEnd.store(now + cooldownDuration, std::memory_order_relaxed);
+                            globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
+                            totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
+
+                            /** Writing data to the LMDB */
+                            if (ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
+                            || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
+                            || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
+                            || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+                            ){
+                                /** write the data in the local storage */
+                                write_worker(rid, ws->getUserData()->uid, std::string(message));
+
+                                /** SQL integration works in cache channels only */
+                                if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
+                                    db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), ws->getUserData()->uid, rid);
+                                }
+                            }
+
+                            /** publishing message */
+                            ws->publish(rid, message, opCode, true);
+
+                            std::for_each(::workers.begin(), ::workers.end(), [message, opCode, rid](worker_t &w) {
+                                /** Check if the current thread ID matches the worker's thread ID */ 
+                                if (std::this_thread::get_id() != w.thread_->get_id()) {
+                                    /** Defer the message publishing to the worker's loop */ 
+                                    w.loop_->defer([&w, message, opCode, rid]() {
+                                        w.app_->publish(rid, message, opCode, true);
+                                    });
+                                }
+                            });
+
+                            /** this is a dangerous and can cause performance degrade */
+                            switch(ws->getUserData()->roomType) {
+                                case static_cast<uint8_t>(Rooms::PUBLIC) : {
+                                    if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1){
+                                        std::ostringstream payload;
+                                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
+                                                << "\"code\":5017, "
+                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"message\":\"" << message << "\"}"; 
+
+                                        std::string body = payload.str(); 
+                                        
+                                        sendHTTPSPOSTRequestFireAndForget(
+                                            UserData::getInstance().webHookBaseUrl,
+                                            UserData::getInstance().webhookPath,
+                                            body,
+                                            {}
+                                        );
+                                    }
+                                    break;
+                                }  
+
+                                case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                                    if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1){
+                                        std::ostringstream payload;
+                                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
+                                                << "\"code\":5018, "
+                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"message\":\"" << message << "\"}";  
+
+                                        std::string body = payload.str(); 
+                                        
+                                        sendHTTPSPOSTRequestFireAndForget(
+                                            UserData::getInstance().webHookBaseUrl,
+                                            UserData::getInstance().webhookPath,
+                                            body,
+                                            {}
+                                        );
+                                    }
+                                    break;
+                                }
+
+                                case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
+                                    if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1){
+                                        std::ostringstream payload;
+                                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
+                                                << "\"code\":5019, "
+                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"message\":\"" << message << "\"}"; 
+
+                                        std::string body = payload.str();
+
+                                        sendHTTPSPOSTRequestFireAndForget(
+                                            UserData::getInstance().webHookBaseUrl,
+                                            UserData::getInstance().webhookPath,
+                                            body,
+                                            {}
+                                        );
+                                    }
+                                    break;
+                                }
+
+                                case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                                    if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1){
+                                        std::ostringstream payload;
+                                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
+                                                << "\"code\":5020, "
+                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"message\":\"" << message << "\"}";
+
+                                        std::string body = payload.str(); 
+                                        
+                                        sendHTTPSPOSTRequestFireAndForget(
+                                            UserData::getInstance().webHookBaseUrl,
+                                            UserData::getInstance().webhookPath,
+                                            body,
+                                            {}
+                                        );
+                                    }
+                                    break;
+                                }
+
+                                case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
+                                    if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_CACHE_ROOM] == 1){
+                                        std::ostringstream payload;
+                                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
+                                                << "\"code\":5021, "
+                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"message\":\"" << message << "\"}";
+
+                                        std::string body = payload.str(); 
+                                        
+                                        sendHTTPSPOSTRequestFireAndForget(
+                                            UserData::getInstance().webHookBaseUrl,
+                                            UserData::getInstance().webhookPath,
+                                            body,
+                                            {}
+                                        );
+                                    }
+                                    break;
+                                }
+
+                                case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                                    if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_CACHE_ROOM] == 1){
+                                        std::ostringstream payload;
+                                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
+                                                << "\"code\":5022, "
+                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"message\":\"" << message << "\"}";
+
+                                        std::string body = payload.str(); 
+                                        
+                                        sendHTTPSPOSTRequestFireAndForget(
+                                            UserData::getInstance().webHookBaseUrl,
+                                            UserData::getInstance().webhookPath,
+                                            body,
+                                            {}
+                                        );
+                                    }
+                                    break;
+                                }
+
+                                case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
+                                    if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM] == 1){
+                                        std::ostringstream payload;
+                                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
+                                                << "\"code\":5023, "
+                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"message\":\"" << message << "\"}";
+
+                                        std::string body = payload.str(); 
+                                        
+                                        sendHTTPSPOSTRequestFireAndForget(
+                                            UserData::getInstance().webHookBaseUrl,
+                                            UserData::getInstance().webhookPath,
+                                            body,
+                                            {}
+                                        );
+                                    }
+                                    break;
+                                }
+
+                                case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                                    if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM] == 1){
+                                        std::ostringstream payload;
+                                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
+                                                << "\"code\":5024, "
+                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"message\":\"" << message << "\"}";
+
+                                        std::string body = payload.str(); 
+                                        
+                                        sendHTTPSPOSTRequestFireAndForget(
+                                            UserData::getInstance().webHookBaseUrl,
+                                            UserData::getInstance().webhookPath,
+                                            body,
+                                            {}
+                                        );
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                            ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
+                        }
+                    } else {
+                        droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                        ws->send("{\"event\":\"MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\"}", uWS::OpCode::TEXT, true);
+
+                        if(webhookStatus[Webhooks::ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED] == 1){
+                            std::ostringstream payload;
+                            payload << "{\"event\":\"ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\", "
+                                    << "\"code\":3008, "
+                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                    << "\"max_monthly_payload_in_bytes\":\"" << UserData::getInstance().maxMonthlyPayloadInBytes << "\"}";              
+                            std::string body = payload.str(); 
+                            
+                            sendHTTPSPOSTRequestFireAndForget(
+                                UserData::getInstance().webHookBaseUrl,
+                                UserData::getInstance().webhookPath,
+                                body,
+                                {}
+                            );
+                        }
+                    }
+                }
+            } else {
                 ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
                 droppedMessages.fetch_add(1, std::memory_order_relaxed);
-                ws->getUserData()->sendingAllowed = false;
 
                 if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
                     std::ostringstream payload;
@@ -2228,264 +2587,6 @@ void worker_t::work()
                         {}
                     );
                 }
-            } else {
-                if (totalPayloadSent.load(std::memory_order_relaxed) < UserData::getInstance().maxMonthlyPayloadInBytes) {
-                    std::string rid = ws->getUserData()->rid;
-                    unsigned int subscribers = app_->numSubscribers(rid);
-
-                    /** Calculate cooldown duration */
-                    double cooldownMillis = k * subscribers * (static_cast<double>(message.size()) / M);
-                    auto cooldownDuration = std::chrono::milliseconds(static_cast<int>(cooldownMillis));
-
-                    /** Cooldown check */
-                    auto now = std::chrono::steady_clock::now();
-                    if(now >= globalCooldownEnd.load(std::memory_order_relaxed)){
-                        globalCooldownEnd.store(now + cooldownDuration, std::memory_order_relaxed);
-                        globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
-                        totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
-
-                        /** Writing data to the LMDB */
-                        if (ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
-                        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
-                        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
-                        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-                        ){
-                            write_worker(rid, ws->getUserData()->uid, std::string(message));
-                        }
-
-                        if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
-                            db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), ws->getUserData()->uid, rid);
-                        }
-
-                        /** publishing message */
-                        ws->publish(rid, message, opCode, true);
-
-                        std::for_each(::workers.begin(), ::workers.end(), [message, opCode, rid](worker_t &w) {
-                            /** Check if the current thread ID matches the worker's thread ID */ 
-                            if (std::this_thread::get_id() != w.thread_->get_id()) {
-                                /** Defer the message publishing to the worker's loop */ 
-                                w.loop_->defer([&w, message, opCode, rid]() {
-                                    w.app_->publish(rid, message, opCode, true);
-                                });
-                            }
-                        });
-
-                        /** this is a dangerous and can cause performance degrade */
-                        switch(ws->getUserData()->roomType) {
-                            case static_cast<uint8_t>(Rooms::PUBLIC) : {
-                                if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1){
-                                    std::ostringstream payload;
-                                    payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
-                                            << "\"code\":5017, "
-                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                            << "\"message\":\"" << message << "\"}"; 
-
-                                    std::string body = payload.str(); 
-                                    
-                                    sendHTTPSPOSTRequestFireAndForget(
-                                        UserData::getInstance().webHookBaseUrl,
-                                        UserData::getInstance().webhookPath,
-                                        body,
-                                        {}
-                                    );
-                                }
-                                break;
-                            }  
-
-                            case static_cast<uint8_t>(Rooms::PRIVATE) : {
-                                if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1){
-                                    std::ostringstream payload;
-                                    payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
-                                            << "\"code\":5018, "
-                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                            << "\"message\":\"" << message << "\"}";  
-
-                                    std::string body = payload.str(); 
-                                    
-                                    sendHTTPSPOSTRequestFireAndForget(
-                                        UserData::getInstance().webHookBaseUrl,
-                                        UserData::getInstance().webhookPath,
-                                        body,
-                                        {}
-                                    );
-                                }
-                                break;
-                            }
-
-                            case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
-                                if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1){
-                                    std::ostringstream payload;
-                                    payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
-                                            << "\"code\":5019, "
-                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                            << "\"message\":\"" << message << "\"}"; 
-
-                                    std::string body = payload.str();
-
-                                    sendHTTPSPOSTRequestFireAndForget(
-                                        UserData::getInstance().webHookBaseUrl,
-                                        UserData::getInstance().webhookPath,
-                                        body,
-                                        {}
-                                    );
-                                }
-                                break;
-                            }
-
-                            case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
-                                if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1){
-                                    std::ostringstream payload;
-                                    payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
-                                            << "\"code\":5020, "
-                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                            << "\"message\":\"" << message << "\"}";
-
-                                    std::string body = payload.str(); 
-                                    
-                                    sendHTTPSPOSTRequestFireAndForget(
-                                        UserData::getInstance().webHookBaseUrl,
-                                        UserData::getInstance().webhookPath,
-                                        body,
-                                        {}
-                                    );
-                                }
-                                break;
-                            }
-
-                            case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
-                                if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_CACHE_ROOM] == 1){
-                                    std::ostringstream payload;
-                                    payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
-                                            << "\"code\":5021, "
-                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                            << "\"message\":\"" << message << "\"}";
-
-                                    std::string body = payload.str(); 
-                                    
-                                    sendHTTPSPOSTRequestFireAndForget(
-                                        UserData::getInstance().webHookBaseUrl,
-                                        UserData::getInstance().webhookPath,
-                                        body,
-                                        {}
-                                    );
-                                }
-                                break;
-                            }
-
-                            case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
-                                if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_CACHE_ROOM] == 1){
-                                    std::ostringstream payload;
-                                    payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
-                                            << "\"code\":5022, "
-                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                            << "\"message\":\"" << message << "\"}";
-
-                                    std::string body = payload.str(); 
-                                    
-                                    sendHTTPSPOSTRequestFireAndForget(
-                                        UserData::getInstance().webHookBaseUrl,
-                                        UserData::getInstance().webhookPath,
-                                        body,
-                                        {}
-                                    );
-                                }
-                                break;
-                            }
-
-                            case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
-                                if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM] == 1){
-                                    std::ostringstream payload;
-                                    payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
-                                            << "\"code\":5023, "
-                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                            << "\"message\":\"" << message << "\"}";
-
-                                    std::string body = payload.str(); 
-                                    
-                                    sendHTTPSPOSTRequestFireAndForget(
-                                        UserData::getInstance().webHookBaseUrl,
-                                        UserData::getInstance().webhookPath,
-                                        body,
-                                        {}
-                                    );
-                                }
-                                break;
-                            }
-
-                            case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
-                                if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM] == 1){
-                                    std::ostringstream payload;
-                                    payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
-                                            << "\"code\":5024, "
-                                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                            << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                            << "\"message\":\"" << message << "\"}";
-
-                                    std::string body = payload.str(); 
-                                    
-                                    sendHTTPSPOSTRequestFireAndForget(
-                                        UserData::getInstance().webHookBaseUrl,
-                                        UserData::getInstance().webhookPath,
-                                        body,
-                                        {}
-                                    );
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        droppedMessages.fetch_add(1, std::memory_order_relaxed);
-                        ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
-                    }
-                } else {
-                    droppedMessages.fetch_add(1, std::memory_order_relaxed);
-                    ws->send("{\"event\":\"MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\"}", uWS::OpCode::TEXT, true);
-
-                    if(webhookStatus[Webhooks::ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED] == 1){
-                        std::ostringstream payload;
-                        payload << "{\"event\":\"ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\", "
-                                << "\"code\":3008, "
-                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"max_monthly_payload_in_bytes\":\"" << UserData::getInstance().maxMonthlyPayloadInBytes << "\"}";              
-                        std::string body = payload.str(); 
-                        
-                        sendHTTPSPOSTRequestFireAndForget(
-                            UserData::getInstance().webHookBaseUrl,
-                            UserData::getInstance().webhookPath,
-                            body,
-                            {}
-                        );
-                    }
-                }
-            }
-        } else {
-            ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
-            droppedMessages.fetch_add(1, std::memory_order_relaxed);
-
-            if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
-                        << "\"code\":3007, "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\"}";
-
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
             }
         }       
     },
@@ -2548,13 +2649,17 @@ void worker_t::work()
             ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
         }
     },
-    .close = [](auto *ws, int code, std::string_view message) {
+    .close = [](auto *ws, int /* code */, std::string_view /* message */) {
         std::string rid = ws->getUserData()->rid;
         globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
         topics[rid].erase(ws->getUserData()->uid);
 
         if(topics[rid].size() == 0){
+            /** delete all the messages stored for a room from LMDB */
+            delete_worker(rid);
             topics.erase(rid);
+            disabledConnections[rid].clear();
+            bannedConnections[rid].clear();
         }
 
         /**
@@ -2943,6 +3048,8 @@ void worker_t::work()
         }
     }
     }).get("/api/v1/metrics", [](auto *res, auto *req) {
+        /** fetch all the server metrics */
+         
         if(UserData::getInstance().clientApiKey.empty()){
             fetchAndPopulateUserData();
         }
@@ -2951,7 +3058,7 @@ void worker_t::work()
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("401 Unauthorized");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
             return;
         }
 
@@ -2973,6 +3080,8 @@ void worker_t::work()
          + std::to_string(droppedMessages.load(std::memory_order_relaxed)) 
          + R"(})");
 	}).post("/api/v1/invalidate", [](auto *res, auto *req) {
+        /** update the metadata used by the server */
+
         res->onAborted([]() {
             /** connection aborted */
         });
@@ -2989,7 +3098,7 @@ void worker_t::work()
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
             return;
         }
 
@@ -3011,7 +3120,7 @@ void worker_t::work()
                         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"error": "Unauthorized access. Invalid signature."})");
+                        res->end(R"({"error": "Unauthorized access. Invalid signature!"})");
                         return;
                     }
 
@@ -3047,6 +3156,8 @@ void worker_t::work()
             }
         });
 	}).post("/api/v1/mysql/sync", [](auto *res, auto *req) {
+        /** sync all the data in the buffers to integrated mysql server */
+
         res->onAborted([]() {
             /** connection aborted */
         });
@@ -3063,7 +3174,7 @@ void worker_t::work()
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
             return;
         }
 
@@ -3078,6 +3189,8 @@ void worker_t::work()
         res->writeHeader("Content-Type", "application/json");
         res->end(R"({"message": "MySQL data synced successfully."})");
 	}).get("/api/v1/rooms", [this](auto *res, auto *req) {
+        /** fetch all the rooms present on the server */
+
         res->onAborted([]() {
             /** connection aborted */
         });
@@ -3086,7 +3199,7 @@ void worker_t::work()
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
             return;
         }
 
@@ -3099,7 +3212,68 @@ void worker_t::work()
         res->writeStatus("200 OK");
         res->writeHeader("Content-Type", "application/json");
         res->end(response_json.dump());  
-	}).put("/api/v1/broadcast", [this](auto *res, auto *req) {
+	}).post("/api/v1/rooms/connections", [this](auto *res, auto *req) {
+        /** get all the connectiond for a room */
+
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        std::string_view apiKey = req->getHeader("api-key");
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+            return;
+        }
+
+        std::string body;
+    
+        body.reserve(1024);
+
+        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    /** get rid from the request body */
+                    std::vector<std::string> rids = parsedJson["rid"].get<std::vector<std::string>>();
+
+                    /** Prepare the response JSON array */
+                    nlohmann::json data = nlohmann::json::array();
+
+                    /** Iterate over each `rid` and collect responses */
+                    for (const auto& rid : rids) {
+                        nlohmann::json roomData;
+                        roomData["rid"] = rid;
+
+                        if (topics.find(rid) != topics.end()) {
+                            /** Convert unordered_set to a JSON array*/ 
+                            roomData["uid"] = nlohmann::json(topics[rid]);  
+                        } else {
+                            roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */ 
+                        }
+
+                        data.push_back(roomData);
+                    }
+
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(data.dump()); 
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
+        }); 
+	}).post("/api/v1/broadcast", [this](auto *res, auto *req) {
+        /** broadcast a message to everyone connected to the server */
+
         res->onAborted([]() {
             /** connection aborted */
         });
@@ -3112,118 +3286,91 @@ void worker_t::work()
             return;
         }
 
-        std::string_view message = req->getQuery("message");
+        std::string body;
+    
+        body.reserve(1024);
 
-        /** broadcast a message to all the rooms */
-        std::for_each(::workers.begin(), ::workers.end(), [message](worker_t &w) {
-            /** Defer the message publishing to the worker's loop */ 
-            w.loop_->defer([&w, message]() {
-                w.app_->publish(BROADCAST, message, uWS::OpCode::TEXT, true);
-            });
+        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    std::string message = parsedJson["message"].get<std::string>();
+
+                    /** broadcast a message to all the rooms */
+                    std::for_each(::workers.begin(), ::workers.end(), [message](worker_t &w) {
+                        /** Defer the message publishing to the worker's loop */ 
+                        w.loop_->defer([&w, message]() {
+                            w.app_->publish(BROADCAST, message, uWS::OpCode::TEXT, true);
+                        });
+                    });
+
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Successfully broadcasted the message to everyone on the server!"})");
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
         });
+	}).post("/api/v1/rooms/broadcast", [this](auto *res, auto *req) {
+        /** broadcast a message to a particular room */
 
-        res->writeStatus("200 OK");
-        res->writeHeader("Content-Type", "application/json");
-        res->end(R"({"message": "Broadcasted successfully."})");
-	}).put("/api/v1/rooms/:rid/broadcast", [this](auto *res, auto *req) {
         res->onAborted([]() {
             /** connection aborted */
         });
 
-        std::string_view message = req->getQuery("message");
-        std::string_view rid = req->getParameter("rid");
         std::string_view apiKey = req->getHeader("api-key");
 
         if(apiKey != UserData::getInstance().adminApiKey){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
             return;
         }
 
-        /** broadcast a message to a specific room */
-        std::for_each(::workers.begin(), ::workers.end(), [message, rid](worker_t &w) {
-            /** Defer the message publishing to the worker's loop */ 
-            w.loop_->defer([&w, message, rid]() {
-                w.app_->publish(rid, message, uWS::OpCode::TEXT, true);
-            });
+        std::string body;
+    
+        body.reserve(1024);
+
+        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    std::string message = parsedJson["message"].get<std::string>();
+                    std::vector<std::string> rids = parsedJson["rid"].get<std::vector<std::string>>();
+
+                    for (const auto& rid : rids) {
+                        /** broadcast a message to a specific room */
+                        std::for_each(::workers.begin(), ::workers.end(), [message, rid](worker_t &w) {
+                            /** Defer the message publishing to the worker's loop */ 
+                            w.loop_->defer([&w, message, rid]() {
+                                w.app_->publish(rid, message, uWS::OpCode::TEXT, true);
+                            });
+                        });
+                    }
+
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Successfully broadcasted the message to everyone in the given room!"})");
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
         });
+	}).post("/api/v1/connections/broadcast", [this](auto *res, auto *req) {
+        /** broadcast a message to a particular connection */
 
-        res->writeStatus("200 OK");
-        res->writeHeader("Content-Type", "application/json");
-        res->end(R"({"message": "Broadcasted successfully."})");
-	}).put("/api/v1/connections/:uid/broadcast", [this](auto *res, auto *req) {
-        res->onAborted([]() {
-            /** connection aborted */
-        });
-
-        std::string_view message = req->getQuery("message");
-        std::string_view uid = req->getParameter("uid");
-        std::string_view apiKey = req->getHeader("api-key");
-
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-            return;
-        }
-
-        /** broadcast a message to a specific member of a room */
-        std::for_each(::workers.begin(), ::workers.end(), [message, uid](worker_t &w) {
-            /** Defer the message publishing to the worker's loop */ 
-            w.loop_->defer([&w, message, uid]() {
-                w.app_->publish(uid, message, uWS::OpCode::TEXT, true);
-            });
-        });
-
-        res->writeStatus("200 OK");
-        res->writeHeader("Content-Type", "application/json");
-        res->end(R"({"message": "Broadcasted successfully."})");
-	}).put("/api/v1/connections/:uid/ban", [this](auto *res, auto *req) {
-        res->onAborted([]() {
-            /** connection aborted */
-        });
-
-        std::string_view uid = req->getParameter("uid");
-        std::string_view apiKey = req->getHeader("api-key");
-
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-            return;
-        }
-
-        bannedConnections.insert(std::string(uid));
-
-        res->writeStatus("200 OK");
-        res->writeHeader("Content-Type", "application/json");
-        res->end(R"({"message": "Banned Successfully!"})");
-	}).put("/api/v1/connections/:uid/unban", [this](auto *res, auto *req) {
-        res->onAborted([]() {
-            /** connection aborted */
-        });
-
-        std::string_view uid = req->getParameter("uid");
-        std::string_view apiKey = req->getHeader("api-key");
-
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-            return;
-        }
-
-        bannedConnections.erase(std::string(uid));
-
-        res->writeStatus("200 OK");
-        res->writeHeader("Content-Type", "application/json");
-        res->end(R"({"message": "Unbanned Successfully!"})");
-	}).get("/api/v1/rooms/:rid/connections", [this](auto *res, auto *req) {
         res->onAborted([]() {
             /** connection aborted */
         });
@@ -3238,32 +3385,522 @@ void worker_t::work()
             return;
         }
 
-        nlohmann::json json_response = topics[std::string(req->getParameter("rid"))];
+        std::string body;
+    
+        body.reserve(1024);
+
+        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    std::string message = parsedJson["message"].get<std::string>();
+                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
+
+                    for (const auto& uid : uids) {
+                        /** broadcast a message to a specific member of a room */
+                        std::for_each(::workers.begin(), ::workers.end(), [message, uid](worker_t &w) {
+                            /** Defer the message publishing to the worker's loop */ 
+                            w.loop_->defer([&w, message, uid]() {
+                                w.app_->publish(uid, message, uWS::OpCode::TEXT, true);
+                            });
+                        });
+                    }
+
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Successfully broadcasted the message to the given connection!"})");
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
+        });
+	}).post("/api/v1/connections/ban", [this](auto *res, auto *req) {
+        /** ban a user and prevent him from connecting again (it will disconnect the user from the server) */
+
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        std::string_view apiKey = req->getHeader("api-key");
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            return;
+        }
+
+        std::string body;
+    
+        body.reserve(1024);
+
+        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
+
+                    for (const auto& uid : uids) {
+                        bannedConnections["GLOBAL"].insert(uid); 
+                    }
+
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Connections successfully banned!"})");
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
+        });
+	}).post("/api/v1/rooms/ban", [this](auto *res, auto *req) {
+        /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
+
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        std::string_view apiKey = req->getHeader("api-key");
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            return;
+        }
+
+        std::string body;
+    
+        body.reserve(1024);
+
+        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    for (const auto& item : parsedJson) {
+                        /** Extract `rid` and `uid` from each item in the request */ 
+                        std::string rid = item["rid"];
+                        std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
+
+                        /** Insert each `uid` into the `bannedConnections` for the corresponding `rid` */ 
+                        for (const auto& uid : uids) {
+                            bannedConnections[rid].insert(uid);
+                        }
+                    }
+
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Given members are successfully banned from the given rooms!"})");
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
+        });
+	}).post("/api/v1/connections/unban", [this](auto *res, auto *req) {
+        /** unban the user and allow him to connect again */
+
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        std::string_view apiKey = req->getHeader("api-key");
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+            return;
+        }
+
+        std::string body;
+    
+        body.reserve(1024);
+
+        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
+
+                    for (const auto& uid : uids) {
+                        bannedConnections["GLOBAL"].erase(std::string(uid));
+                    }
+
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Connection successfully unabnned!"})");
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
+        });
+	}).post("/api/v1/rooms/unban", [this](auto *res, auto *req) {
+        /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
+
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        std::string_view apiKey = req->getHeader("api-key");
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            return;
+        }
+
+        std::string body;
+    
+        body.reserve(1024);
+
+        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    for (const auto& item : parsedJson) {
+                        /** Extract `rid` and `uid` from each item in the request */ 
+                        std::string rid = item["rid"];
+                        std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
+
+                        /** Insert each `uid` into the `bannedConnections` for the corresponding `rid` */ 
+                        for (const auto& uid : uids) {
+                            bannedConnections[rid].erase(uid);
+                        }
+                    }
+
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Members are successfully unbanned from the given rooms!"})");
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
+        });
+	}).put("/api/v1/messaging/:action", [this](auto *res, auto *req) {
+        /** enable or disable message sending at the server level (for everyone) */
+
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        std::string_view apiKey = req->getHeader("api-key");
+        std::string_view action = req->getParameter("action");
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+            return;
+        }
+
+        if (action == "enable")
+        {
+            disabledConnections["GLOBAL"].clear();
+        }
+        else if (action == "disable")
+        {
+            disabledConnections["GLOBAL"].insert(uid.begin(), uid.end());
+        }
+        else
+        {
+            res->writeStatus("400 Bad Request");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Invalid action!"})");
+            return;
+        }
 
         res->writeStatus("200 OK");
         res->writeHeader("Content-Type", "application/json");
-        res->end(json_response.dump());  
+
+        if(action == "enable")
+            res->end(R"({"message": "Messaging successfully enabled for everyone!"})");
+        else
+            res->end(R"({"message": "Messaging successfully disabled for everyone!"})");
+	}).post("/api/v1/rooms/messaging/:action", [this](auto *res, auto *req) {
+        /** enable or disable messaging at room level */
+
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        std::string_view apiKey = req->getHeader("api-key");
+        std::string_view action = req->getParameter("action");
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+            return;
+        }
+
+        std::string body;
+    
+        body.reserve(1024);
+
+        res->onData([res, req, body = std::move(body), action](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    /** get rid from the request body */
+                    std::string rid = parsedJson["rid"].get<std::string>();
+
+                    /** Extract user IDs from request body */
+                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
+
+                    for (const auto& item : parsedJson) {
+                        /** Extract `rid` and `uid` from each item in the request */ 
+                        std::string rid = item["rid"];
+                        std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
+
+                        if (action == "enable")
+                        {
+                            for (const auto& uid : uids) {
+                                disabledConnections[rid].erase(uid);  /** Remove each UID from the disabled list */
+                            }
+                        }
+                        else if (action == "disable")
+                        {
+                            disabledConnections[rid].insert(uids.begin(), uids.end());
+                        }
+                        else
+                        {
+                            res->writeStatus("400 Bad Request");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"error": "Invalid action!"})");
+                            return;
+                        }
+
+                        res->writeStatus("200 OK");
+                        res->writeHeader("Content-Type", "application/json");
+
+                        if(action == "enable")
+                            res->end(R"({"message": "Messaging successfully enabled for room!"})");
+                        else
+                            res->end(R"({"message": "Messaging successfully disabled for room!"})");
+                        }
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
+        });
+	}).post("/api/v1/connections/messaging/:action", [this](auto *res, auto *req) {
+        /** enable or disable messaging for a particular connection */
+
+        res->onAborted([]() {
+            /** connection aborted */
+        });
+
+        std::string_view action = req->getParameter("action");
+        std::string_view apiKey = req->getHeader("api-key");
+
+        if(apiKey != UserData::getInstance().adminApiKey){
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            res->writeStatus("403");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+            return;
+        }
+
+        std::string body;
+    
+        body.reserve(1024);
+
+        res->onData([res, req, body = std::move(body), action](std::string_view data, bool last) mutable {
+            body.append(data.data(), data.length());
+
+            if (last) { 
+                try {
+                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+
+                    /** Extract user IDs from request body */
+                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
+
+                    if (req->getParameter("action") == "enable")
+                    {
+                        for (const auto& uid : uids) {
+                            disabledConnections["GLOBAL"].erase(uid);  /** Remove each UID from the disabled list */
+                        }
+                    }
+                    else if (req->getParameter("action") == "disable")
+                    {
+                        disabledConnections["GLOBAL"].insert(uids.begin(), uids.end());
+                    }
+                    else
+                    {
+                        res->writeStatus("400 Bad Request");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"error": "Invalid action!"})");
+                        return;
+                    }
+
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+
+                    if(req->getParameter("action") == "enable")
+                        res->end(R"({"message": "Messagin successfully enabled for connection!"})");
+                    else
+                        res->end(R"({"message": "Messaging successfully disabled for connection!"})");
+                } catch (std::exception &e) {
+                    res->writeStatus("400 Bad Request");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"error": "Invalid JSON format."})");
+                }
+            }
+        });
 	}).get("/api/v1/connections/banned", [this](auto *res, auto *req) {
+        /** Handle the request to fetch all banned connections */
+
         res->onAborted([]() {
-            /** connection aborted */
+            /** Handle the case where the connection is aborted */
         });
 
         std::string_view apiKey = req->getHeader("api-key");
+        std::string_view scope = req->getQuery("scope");
+        std::string_view rid = req->getQuery("rid");
 
-        if(apiKey != UserData::getInstance().adminApiKey){
+        /** Check if the API key is valid */
+        if (apiKey != UserData::getInstance().adminApiKey) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+
+            /** Respond with 403 Unauthorized if the API key is invalid */
+            res->writeStatus("403")
+            ->writeHeader("Content-Type", "application/json")
+            ->end(R"({"error": "Unauthorized access. Invalid API key!"})");
             return;
         }
 
-        nlohmann::json json_response = bannedConnections;
+        /** Create and reserve space for the JSON response */
+        nlohmann::json json_response;
 
-        res->writeStatus("200 OK");
-        res->writeHeader("Content-Type", "application/json");
-        res->end(json_response.dump());  
+        /** Iterate over all banned connections */
+        if(scope == "all"){
+            /** Iterate over all disabled connections */
+            for (const auto &[room, users] : bannedConnections) {
+                /** Directly construct vector from set iterator */
+                json_response[room] = std::vector<std::string>(users.begin(), users.end());
+            }
+        } else if (scope == "global"){
+            /** Fetch globally disabled connections */
+            auto it = bannedConnections.find("GLOBAL");
+
+            if (it != bannedConnections.end()) {
+                /** Directly construct vector from set iterator */
+                json_response["GLOBAL"] = std::vector<std::string>(it->second.begin(), it->second.end());
+            } else {
+                json_response["GLOBAL"] = nlohmann::json::array();  /** Empty array */
+            }
+        } else {
+            if (bannedConnections.find(std::string(rid)) != bannedConnections.end()) {
+                /** Convert the set of users into a vector and add it to JSON response */
+                json_response[rid] = std::vector<std::string>(
+                    bannedConnections[std::string(rid)].begin(),
+                    bannedConnections[std::string(rid)].end()
+                );
+            } else {
+                json_response[rid] = nlohmann::json::array();  /** Return empty list if no users are disabled in the room */
+            }
+        }
+
+        /** Send the successful response with all banned connections */
+        res->writeStatus("200 OK")
+        ->writeHeader("Content-Type", "application/json")
+        ->end(std::move(json_response).dump());  /** Serialize the JSON response and send it */ 
+	}).get("/api/v1/connections/messaging/disabled", [this](auto *res, auto *req) {
+        /** Handle the request to fetch all disabled connections */
+
+        res->onAborted([]() {
+            /** Handle the case where the connection is aborted */
+        });
+
+        std::string_view apiKey = req->getHeader("api-key");
+        std::string_view scope = req->getQuery("scope");
+        std::string_view rid = req->getQuery("rid");
+
+        /** Check if the API key is valid */
+        if (apiKey != UserData::getInstance().adminApiKey) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            /** Respond with 403 Unauthorized if the API key is invalid */
+            res->writeStatus("403")
+            ->writeHeader("Content-Type", "application/json")
+            ->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+            return;
+        }
+
+        /** Create and reserve space for the JSON response */
+        nlohmann::json json_response;
+
+        if(scope == "all"){
+            /** Iterate over all disabled connections */
+            for (const auto &[room, users] : disabledConnections) {
+                /** Directly construct vector from set iterator */
+                json_response[room] = std::vector<std::string>(users.begin(), users.end());
+            }
+        } else if (scope == "global"){
+            /** Fetch globally disabled connections */
+            auto it = disabledConnections.find("GLOBAL");
+
+            if (it != disabledConnections.end()) {
+                /** Directly construct vector from set iterator */
+                json_response["GLOBAL"] = std::vector<std::string>(it->second.begin(), it->second.end());
+            } else {
+                // json_response["GLOBAL"] = nlohmann::json::array();  /** Empty array */
+            }
+        } else {
+            if (disabledConnections.find(std::string(rid)) != disabledConnections.end()) {
+                /** Convert the set of users into a vector and add it to JSON response */
+                json_response[rid] = std::vector<std::string>(
+                    disabledConnections[std::string(rid)].begin(),
+                    disabledConnections[std::string(rid)].end()
+                );
+            } else {
+                // json_response[rid] = nlohmann::json::array();  /** Return empty list if no users are disabled in the room */
+            }
+        } 
+        
+        /** Send the successful response with all banned connections */
+        res->writeStatus("200 OK")
+        ->writeHeader("Content-Type", "application/json")
+        ->end(std::move(json_response).dump());  /** Serialize the JSON response and send it */ 
 	}).get("/api/v1/messages/room/:rid", [this](auto *res, auto *req) {
+        /** retrieve the messages for cache rooms (for other rooms no data will be returned) */
+
         res->onAborted([]() {
             /** connection aborted */
         });
@@ -3288,7 +3925,7 @@ void worker_t::work()
                 if(limit > 10){
                     res->writeStatus("400 Bad Request");
                     res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Limit cannot be greater than 10."})");
+                    res->end(R"({"error": "Limit cannot be greater than 10!"})");
                     return;
                 }
 
@@ -3304,7 +3941,7 @@ void worker_t::work()
                     totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                     res->writeStatus("403");
                     res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
                     return;
                 }
 
@@ -3322,6 +3959,8 @@ void worker_t::work()
             res->end(R"({"error": "Access denied!"})");
         }
 	}).del("/api/v1/database", [this](auto *res, auto *req) {
+        /** delete all the data present in the LMDB database */
+
          /** Handle connection abortion immediately */
         res->onAborted([]() {
             /** Connection aborted, clean up resources if necessary */
@@ -3338,7 +3977,7 @@ void worker_t::work()
             /** Respond with 403 Forbidden if the API key is invalid */
             res->writeStatus("403");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
+            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
             return;
         }
 
@@ -3371,7 +4010,7 @@ void worker_t::work()
             /** Respond with a success message */
             res->writeStatus("200 OK");
             res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"message": "Database truncated successfully."})");
+            res->end(R"({"message": "Database truncated successfully!"})");
         } catch (const std::exception& e) {
             /** Handle any errors efficiently without leaking resources */
 
@@ -3384,9 +4023,13 @@ void worker_t::work()
             res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
         }
 	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
+        /** send pong as a response for ping */
+
         res->writeStatus("200 OK");
 	    res->end("pong!");
 	}).any("/*", [](auto *res, auto */*req*/) {
+        /** wildcard url to handle any random request */
+
         res->end("Invalid request.");
 	}).listen(PORT, [this](auto *token) {
     listen_socket_ = token;
