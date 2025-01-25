@@ -587,6 +587,7 @@ std::unordered_map<std::string, std::set<std::string>> topics;
 std::unordered_map<std::string, std::unordered_set<std::string>> bannedConnections;
 std::unordered_set<std::string> uid;
 std::unordered_map<std::string, std::unordered_set<std::string>> disabledConnections;
+std::atomic<bool> isMessagingDisabled(false);
 
 /** map to store enabled webhooks and features */
 std::unordered_map<Webhooks, int> webhookStatus;
@@ -1527,9 +1528,7 @@ void worker_t::work()
         /**
          * Check if the user is banned and reject the connection
          */
-        auto globalBannedConnections = bannedConnections.find("GLOBAL");
-
-        if (globalBannedConnections != bannedConnections.end() && globalBannedConnections->second.find(upgradeData->uid) != globalBannedConnections->second.end()) {
+        if (bannedConnections["global"].find(upgradeData->uid) != bannedConnections["global"].end()) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403 Forbidden");
             res->writeHeader("Content-Type", "application/json");
@@ -1735,9 +1734,7 @@ void worker_t::work()
             return;
         }
 
-        auto roomBannedConnections = bannedConnections.find(upgradeData->rid);
-
-        if (roomBannedConnections != bannedConnections.end() && roomBannedConnections->second.find(upgradeData->uid) != roomBannedConnections->second.end()) {
+        if (bannedConnections[upgradeData->rid].find(upgradeData->uid) != bannedConnections[upgradeData->rid].end()) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403 Forbidden");
             res->writeHeader("Content-Type", "application/json");
@@ -2276,7 +2273,8 @@ void worker_t::work()
         }
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-        if(disabledConnections["GLOBAL"].find(ws->getUserData()->uid) != disabledConnections["GLOBAL"].end()
+        if(isMessagingDisabled.load(std::memory_order_relaxed)
+        || disabledConnections["global"].find(ws->getUserData()->uid) != disabledConnections["global"].end()
         || disabledConnections[ws->getUserData()->rid].find(ws->getUserData()->uid) != disabledConnections[ws->getUserData()->rid].end()
         ){
             ws->send("{\"event\":\"MESSAGING_DISABLED\"}", uWS::OpCode::TEXT, true);
@@ -2637,7 +2635,9 @@ void worker_t::work()
         /* You don't need to handle this one, we automatically respond to pings as per standard */
         if (ws->getUserData()->key != UserData::getInstance().clientApiKey) {
             ws->end(1008, "{\"event\":\"API_KEY_INVALID\"}");
-        } else if (bannedConnections.find(ws->getUserData()->uid) != bannedConnections.end()) {
+        } else if (bannedConnections["global"].find(ws->getUserData()->uid) != bannedConnections["global"].end()
+        || bannedConnections[ws->getUserData()->rid].find(ws->getUserData()->uid) != bannedConnections[ws->getUserData()->rid].end()
+        ) {
             ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
         }
     },
@@ -2645,7 +2645,9 @@ void worker_t::work()
         /* You don't need to handle this one either */
         if (ws->getUserData()->key != UserData::getInstance().clientApiKey) {
             ws->end(1008, "{\"event\":\"API_KEY_INVALID\"}");
-        } else if (bannedConnections.find(ws->getUserData()->uid) != bannedConnections.end()) {
+        } else if (bannedConnections["global"].find(ws->getUserData()->uid) != bannedConnections["global"].end()
+        || bannedConnections[ws->getUserData()->rid].find(ws->getUserData()->uid) != bannedConnections[ws->getUserData()->rid].end()
+        ) {
             ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
         }
     },
@@ -3203,15 +3205,19 @@ void worker_t::work()
             return;
         }
 
-        nlohmann::json response_json;
+        nlohmann::json data = nlohmann::json::array(); 
 
-        for (const auto& topic : topics) {
-            response_json.push_back(topic.first);  
+        for (const auto& [rid, users] : topics) {  
+            nlohmann::json roomData;
+            roomData["rid"] = rid;
+            roomData["uid"] = nlohmann::json(users);  
+
+            data.push_back(roomData);
         }
 
         res->writeStatus("200 OK");
         res->writeHeader("Content-Type", "application/json");
-        res->end(response_json.dump());  
+        res->end(data.dump());  
 	}).post("/api/v1/rooms/connections", [this](auto *res, auto *req) {
         /** get all the connectiond for a room */
 
@@ -3419,50 +3425,6 @@ void worker_t::work()
                 }
             }
         });
-	}).post("/api/v1/connections/ban", [this](auto *res, auto *req) {
-        /** ban a user and prevent him from connecting again (it will disconnect the user from the server) */
-
-        res->onAborted([]() {
-            /** connection aborted */
-        });
-
-        std::string_view apiKey = req->getHeader("api-key");
-
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-            return;
-        }
-
-        std::string body;
-    
-        body.reserve(1024);
-
-        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
-
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
-
-                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
-
-                    for (const auto& uid : uids) {
-                        bannedConnections["GLOBAL"].insert(uid); 
-                    }
-
-                    res->writeStatus("200 OK");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"message": "Connections successfully banned!"})");
-                } catch (std::exception &e) {
-                    res->writeStatus("400 Bad Request");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Invalid JSON format."})");
-                }
-            }
-        });
 	}).post("/api/v1/rooms/ban", [this](auto *res, auto *req) {
         /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
 
@@ -3494,61 +3456,23 @@ void worker_t::work()
                     for (const auto& item : parsedJson) {
                         /** Extract `rid` and `uid` from each item in the request */ 
                         std::string rid = item["rid"];
+
                         std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                        /** Insert each `uid` into the `bannedConnections` for the corresponding `rid` */ 
-                        for (const auto& uid : uids) {
-                            bannedConnections[rid].insert(uid);
+                        if(rid == "global"){
+                            for (const auto& uid : uids) {
+                                bannedConnections["global"].insert(uid);
+                            }
+                        } else {
+                            for (const auto& uid : uids) {
+                                bannedConnections[rid].insert(uid);
+                            }
                         }
                     }
 
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
                     res->end(R"({"message": "Given members are successfully banned from the given rooms!"})");
-                } catch (std::exception &e) {
-                    res->writeStatus("400 Bad Request");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Invalid JSON format."})");
-                }
-            }
-        });
-	}).post("/api/v1/connections/unban", [this](auto *res, auto *req) {
-        /** unban the user and allow him to connect again */
-
-        res->onAborted([]() {
-            /** connection aborted */
-        });
-
-        std::string_view apiKey = req->getHeader("api-key");
-
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-            return;
-        }
-
-        std::string body;
-    
-        body.reserve(1024);
-
-        res->onData([res, req, body = std::move(body)](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
-
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
-
-                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
-
-                    for (const auto& uid : uids) {
-                        bannedConnections["GLOBAL"].erase(std::string(uid));
-                    }
-
-                    res->writeStatus("200 OK");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"message": "Connection successfully unabnned!"})");
                 } catch (std::exception &e) {
                     res->writeStatus("400 Bad Request");
                     res->writeHeader("Content-Type", "application/json");
@@ -3587,11 +3511,17 @@ void worker_t::work()
                     for (const auto& item : parsedJson) {
                         /** Extract `rid` and `uid` from each item in the request */ 
                         std::string rid = item["rid"];
+
                         std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                        /** Insert each `uid` into the `bannedConnections` for the corresponding `rid` */ 
-                        for (const auto& uid : uids) {
-                            bannedConnections[rid].erase(uid);
+                        if(rid == "global"){
+                            for (const auto& uid : uids) {
+                                bannedConnections["global"].erase(uid);
+                            }
+                        } else {
+                            for (const auto& uid : uids) {
+                                bannedConnections[rid].erase(uid);
+                            }
                         }
                     }
 
@@ -3605,7 +3535,7 @@ void worker_t::work()
                 }
             }
         });
-	}).put("/api/v1/messaging/:action", [this](auto *res, auto *req) {
+	}).put("/api/v1/server/messaging/:action", [this](auto *res, auto *req) {
         /** enable or disable message sending at the server level (for everyone) */
 
         res->onAborted([]() {
@@ -3625,11 +3555,11 @@ void worker_t::work()
 
         if (action == "enable")
         {
-            disabledConnections["GLOBAL"].clear();
+            isMessagingDisabled.store(false, std::memory_order_relaxed);
         }
         else if (action == "disable")
         {
-            disabledConnections["GLOBAL"].insert(uid.begin(), uid.end());
+            isMessagingDisabled.store(true, std::memory_order_relaxed);
         }
         else
         {
@@ -3675,12 +3605,6 @@ void worker_t::work()
                 try {
                     nlohmann::json parsedJson = nlohmann::json::parse(body);
 
-                    /** get rid from the request body */
-                    std::string rid = parsedJson["rid"].get<std::string>();
-
-                    /** Extract user IDs from request body */
-                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
-
                     for (const auto& item : parsedJson) {
                         /** Extract `rid` and `uid` from each item in the request */ 
                         std::string rid = item["rid"];
@@ -3688,13 +3612,23 @@ void worker_t::work()
 
                         if (action == "enable")
                         {
-                            for (const auto& uid : uids) {
-                                disabledConnections[rid].erase(uid);  /** Remove each UID from the disabled list */
+                            if(rid == "global"){
+                                for (const auto& uid : uids) {
+                                    disabledConnections["global"].erase(uid);  /** Remove each UID from the disabled list */
+                                }
+                            } else {
+                                for (const auto& uid : uids) {
+                                    disabledConnections[rid].erase(uid);  /** Remove each UID from the disabled list */
+                                }
                             }
                         }
                         else if (action == "disable")
                         {
-                            disabledConnections[rid].insert(uids.begin(), uids.end());
+                            if(rid == "global"){
+                                disabledConnections["global"].insert(uids.begin(), uids.end());
+                            } else {
+                                disabledConnections[rid].insert(uids.begin(), uids.end());
+                            }
                         }
                         else
                         {
@@ -3703,79 +3637,15 @@ void worker_t::work()
                             res->end(R"({"error": "Invalid action!"})");
                             return;
                         }
-
-                        res->writeStatus("200 OK");
-                        res->writeHeader("Content-Type", "application/json");
-
-                        if(action == "enable")
-                            res->end(R"({"message": "Messaging successfully enabled for room!"})");
-                        else
-                            res->end(R"({"message": "Messaging successfully disabled for room!"})");
-                        }
-                } catch (std::exception &e) {
-                    res->writeStatus("400 Bad Request");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Invalid JSON format."})");
-                }
-            }
-        });
-	}).post("/api/v1/connections/messaging/:action", [this](auto *res, auto *req) {
-        /** enable or disable messaging for a particular connection */
-
-        res->onAborted([]() {
-            /** connection aborted */
-        });
-
-        std::string_view action = req->getParameter("action");
-        std::string_view apiKey = req->getHeader("api-key");
-
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-            return;
-        }
-
-        std::string body;
-    
-        body.reserve(1024);
-
-        res->onData([res, req, body = std::move(body), action](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
-
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
-
-                    /** Extract user IDs from request body */
-                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
-
-                    if (req->getParameter("action") == "enable")
-                    {
-                        for (const auto& uid : uids) {
-                            disabledConnections["GLOBAL"].erase(uid);  /** Remove each UID from the disabled list */
-                        }
-                    }
-                    else if (req->getParameter("action") == "disable")
-                    {
-                        disabledConnections["GLOBAL"].insert(uids.begin(), uids.end());
-                    }
-                    else
-                    {
-                        res->writeStatus("400 Bad Request");
-                        res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"error": "Invalid action!"})");
-                        return;
                     }
 
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
 
-                    if(req->getParameter("action") == "enable")
-                        res->end(R"({"message": "Messagin successfully enabled for connection!"})");
+                    if(action == "enable")
+                        res->end(R"({"message": "Messaging successfully enabled for the members of the given rooms!"})");
                     else
-                        res->end(R"({"message": "Messaging successfully disabled for connection!"})");
+                        res->end(R"({"message": "Messaging successfully disabled for the members of the given rooms!"})");
                 } catch (std::exception &e) {
                     res->writeStatus("400 Bad Request");
                     res->writeHeader("Content-Type", "application/json");
@@ -3806,35 +3676,14 @@ void worker_t::work()
         }
 
         /** Create and reserve space for the JSON response */
-        nlohmann::json json_response;
+        nlohmann::json json_response = nlohmann::json::array();  
 
-        /** Iterate over all banned connections */
-        if(scope == "all"){
-            /** Iterate over all disabled connections */
-            for (const auto &[room, users] : bannedConnections) {
-                /** Directly construct vector from set iterator */
-                json_response[room] = std::vector<std::string>(users.begin(), users.end());
-            }
-        } else if (scope == "global"){
-            /** Fetch globally disabled connections */
-            auto it = bannedConnections.find("GLOBAL");
+        for (const auto& [room, users] : bannedConnections) {
+            nlohmann::json roomData;
+            roomData["rid"] = room;
+            roomData["uid"] = std::vector<std::string>(users.begin(), users.end());  
 
-            if (it != bannedConnections.end()) {
-                /** Directly construct vector from set iterator */
-                json_response["GLOBAL"] = std::vector<std::string>(it->second.begin(), it->second.end());
-            } else {
-                json_response["GLOBAL"] = nlohmann::json::array();  /** Empty array */
-            }
-        } else {
-            if (bannedConnections.find(std::string(rid)) != bannedConnections.end()) {
-                /** Convert the set of users into a vector and add it to JSON response */
-                json_response[rid] = std::vector<std::string>(
-                    bannedConnections[std::string(rid)].begin(),
-                    bannedConnections[std::string(rid)].end()
-                );
-            } else {
-                json_response[rid] = nlohmann::json::array();  /** Return empty list if no users are disabled in the room */
-            }
+            json_response.push_back(roomData);
         }
 
         /** Send the successful response with all banned connections */
@@ -3864,35 +3713,15 @@ void worker_t::work()
         }
 
         /** Create and reserve space for the JSON response */
-        nlohmann::json json_response;
+        nlohmann::json json_response = nlohmann::json::array();  
 
-        if(scope == "all"){
-            /** Iterate over all disabled connections */
-            for (const auto &[room, users] : disabledConnections) {
-                /** Directly construct vector from set iterator */
-                json_response[room] = std::vector<std::string>(users.begin(), users.end());
-            }
-        } else if (scope == "global"){
-            /** Fetch globally disabled connections */
-            auto it = disabledConnections.find("GLOBAL");
+        for (const auto& [room, users] : disabledConnections) {
+            nlohmann::json roomData;
+            roomData["rid"] = room;
+            roomData["uid"] = std::vector<std::string>(users.begin(), users.end());  
 
-            if (it != disabledConnections.end()) {
-                /** Directly construct vector from set iterator */
-                json_response["GLOBAL"] = std::vector<std::string>(it->second.begin(), it->second.end());
-            } else {
-                // json_response["GLOBAL"] = nlohmann::json::array();  /** Empty array */
-            }
-        } else {
-            if (disabledConnections.find(std::string(rid)) != disabledConnections.end()) {
-                /** Convert the set of users into a vector and add it to JSON response */
-                json_response[rid] = std::vector<std::string>(
-                    disabledConnections[std::string(rid)].begin(),
-                    disabledConnections[std::string(rid)].end()
-                );
-            } else {
-                // json_response[rid] = nlohmann::json::array();  /** Return empty list if no users are disabled in the room */
-            }
-        } 
+            json_response.push_back(roomData);
+        }
         
         /** Send the successful response with all banned connections */
         res->writeStatus("200 OK")
