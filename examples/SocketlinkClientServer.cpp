@@ -574,12 +574,15 @@ enum class Rooms : uint8_t {
     PRIVATE_STATE_CACHE = 7
 };
 
+/** stores data for websocket and its worker for later use */
 struct WebSocketData {
     uWS::WebSocket<false, true, PerSocketData>* ws;
     worker_t* worker; 
 };
 
 /** Global atomic variables and data structures */
+
+/** these variables mainly stores the metrics */
 std::atomic<int> globalConnectionCounter(0);
 std::atomic<unsigned long long> globalMessagesSent{0}; 
 std::atomic<unsigned long long> totalPayloadSent{0};
@@ -588,14 +591,16 @@ std::atomic<double> averagePayloadSize{0.0};
 std::atomic<double> averageLatency{0.0};
 std::atomic<unsigned long long> droppedMessages{0};
 std::atomic<unsigned int> messageCount(0);
-std::unordered_map<std::string, std::set<std::string>> topics;
+
+/** these variables stores some userdata */
+std::unordered_map<std::string, std::unordered_set<std::string>> topics;
 std::unordered_map<std::string, std::unordered_set<std::string>> bannedConnections;
-std::unordered_set<std::string> uid;
 std::unordered_map<std::string, std::unordered_set<std::string>> disabledConnections;
+std::unordered_set<std::string> uid;
 std::atomic<bool> isMessagingDisabled(false);
 std::unordered_map<std::string, WebSocketData> connections;
 
-/** map to store enabled webhooks and features */
+/** map to store enabled webhooks and features (no need to make it thread safe) */
 std::unordered_map<Webhooks, int> webhookStatus;
 std::unordered_map<Features, int> featureStatus;
 
@@ -2339,9 +2344,7 @@ void worker_t::work()
             upgradeData->aborted = true;
         });
 
-        /**
-         * Check if the user is banned and reject the connection
-         */
+        /** Check if the user is banned and reject the connection */
         if (bannedConnections["global"].find(upgradeData->uid) != bannedConnections["global"].end()) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403 Forbidden");
@@ -2371,7 +2374,7 @@ void worker_t::work()
             return;
         }
 
-        /** check if a connection is already there with the same uid */
+        /** check if a connection is already there with the same uid (thread safe) */
         if(uid.find(upgradeData->uid) != uid.end()){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403 Forbidden")->end("UID_ALREADY_EXIST");
@@ -2410,7 +2413,7 @@ void worker_t::work()
                         << "\"code\":3002, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"You have reached the max limit of allowed connections.\"}";
+                        << "\"message\":\"You have reached the max limit of allowed connections!\"}";
 
                 std::string body = payload.str(); 
                 
@@ -2473,9 +2476,15 @@ void worker_t::work()
         data.ws = ws;
         data.worker = this; 
 
+        /** not thread safe */
         connections[ws->getUserData()->uid] = data;
+
+        /** thread safe */
         globalConnectionCounter.fetch_add(1, std::memory_order_relaxed);
+
+        /** inserting the data for uid (thread safe) */
         uid.insert(ws->getUserData()->uid);
+
         ws->subscribe(ws->getUserData()->uid);
         ws->subscribe(BROADCAST);
     },
@@ -2859,9 +2868,14 @@ void worker_t::work()
         }
     },
     .close = [](auto *ws, int /* code */, std::string_view /* message */) {
+
+        /** thread safe */
         connections.erase(ws->getUserData()->uid);
+
+        /** thread safe */
         globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
-        /** Remove the uid from the set */
+        
+        /** Remove the uid from the set (not thread safe) */
         uid.erase(ws->getUserData()->uid);
 
         /** manually unsubscribing */
