@@ -1403,11 +1403,20 @@ void fetchAndPopulateUserData() {
     }
 }
 
-void closeConnection(uWS::WebSocket<false, true, PerSocketData>* ws){
+void closeConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* worker = nullptr) {
     std::string rid = ws->getUserData()->rid;
 
+    /** unsubscribe the user from the room */
     if(rid.length() > 0){
         topics[rid].erase(ws->getUserData()->uid);
+
+        if(worker != nullptr){
+            worker->loop_->defer([ws, rid]() {
+                ws->unsubscribe(rid);
+            });
+        } else {
+            ws->unsubscribe(rid);  
+        }      
 
         if(topics[rid].size() == 0){
             /** delete all the messages stored for a room from LMDB */
@@ -2855,6 +2864,10 @@ void worker_t::work()
         /** Remove the uid from the set */
         uid.erase(ws->getUserData()->uid);
 
+        /** manually unsubscribing */
+        ws->unsubscribe(ws->getUserData()->uid);
+        ws->unsubscribe(BROADCAST);
+
         closeConnection(ws);
     }
     }).get("/api/v1/metrics", [](auto *res, auto *req) {
@@ -3284,11 +3297,14 @@ void worker_t::work()
                                 } 
                             }
 
-                            closeConnection(ws);
+                            /** closing the intial connection */
+                            closeConnection(ws, worker);
 
+                            /** updating the new room data */
                             ws->getUserData()->rid = rid;
                             ws->getUserData()->roomType = roomType;
 
+                            /** connecting to the new room */
                             openConnection(ws, worker);
 
                             res->writeStatus("200 OK");
@@ -3699,8 +3715,6 @@ void worker_t::work()
         });
 
         std::string_view apiKey = req->getHeader("api-key");
-        std::string_view scope = req->getQuery("scope");
-        std::string_view rid = req->getQuery("rid");
 
         /** Check if the API key is valid */
         if (apiKey != UserData::getInstance().adminApiKey) {
@@ -3738,8 +3752,6 @@ void worker_t::work()
         });
 
         std::string_view apiKey = req->getHeader("api-key");
-        std::string_view scope = req->getQuery("scope");
-        std::string_view rid = req->getQuery("rid");
 
         /** Check if the API key is valid */
         if (apiKey != UserData::getInstance().adminApiKey) {
