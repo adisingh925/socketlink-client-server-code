@@ -1381,8 +1381,7 @@ int populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        std::string dropletId = "471509842";
+        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
 
         unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
         hmac_sha256(SECRET, strlen(SECRET), dropletId.c_str(), dropletId.length(), hmac_result);  /**< Compute HMAC */
