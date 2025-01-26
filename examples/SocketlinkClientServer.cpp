@@ -23,6 +23,7 @@
 #include <cppconn/prepared_statement.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
+#include <tbb/concurrent_hash_map.h>
 
 /******************************************************************************************************************************************************************************/
 
@@ -428,7 +429,7 @@ struct worker_t
   std::shared_ptr<MySQLConnectionHandler> db_handler;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::App> app_;
+  std::shared_ptr<uWS::SSLApp> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -576,7 +577,7 @@ enum class Rooms : uint8_t {
 
 /** stores data for websocket and its worker for later use */
 struct WebSocketData {
-    uWS::WebSocket<false, true, PerSocketData>* ws;
+    uWS::WebSocket<true, true, PerSocketData>* ws;
     worker_t* worker; 
 };
 
@@ -596,9 +597,9 @@ std::atomic<unsigned int> messageCount(0);
 std::unordered_map<std::string, std::unordered_set<std::string>> topics;
 std::unordered_map<std::string, std::unordered_set<std::string>> bannedConnections;
 std::unordered_map<std::string, std::unordered_set<std::string>> disabledConnections;
-std::unordered_set<std::string> uid;
+tbb::concurrent_hash_map<std::string, bool> uid;
 std::atomic<bool> isMessagingDisabled(false);
-std::unordered_map<std::string, WebSocketData> connections;
+tbb::concurrent_hash_map<std::string, WebSocketData> connections;
 
 /** map to store enabled webhooks and features (no need to make it thread safe) */
 std::unordered_map<Webhooks, int> webhookStatus;
@@ -623,7 +624,7 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 constexpr const char* INTERNAL_IP = "169.254.169.254";
 constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
 constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
-constexpr const int PORT = 9002;
+constexpr const int PORT = 443;
 
 /** Sending Constants */
 constexpr const char* ACCESS_DENIED = "Access Denied";
@@ -1408,7 +1409,7 @@ void fetchAndPopulateUserData() {
     }
 }
 
-void closeConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* worker = nullptr) {
+void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker = nullptr) {
     std::string rid = ws->getUserData()->rid;
 
     /** unsubscribe the user from the room */
@@ -1423,7 +1424,7 @@ void closeConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* w
             ws->unsubscribe(rid);  
         }      
 
-        if(topics[rid].size() == 0){
+        if(topics[rid].size() == 0) {
             /** delete all the messages stored for a room from LMDB */
             delete_worker(rid);
             topics.erase(rid);
@@ -1813,7 +1814,7 @@ void closeConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* w
     }
 }
 
-void openConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* worker) {
+void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker) {
     if(ws->getUserData()->rid.length() > 0){
 
         /** subscribing to the room in the same thread where the ws instance was created */
@@ -2299,8 +2300,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::App>(
-    uWS::App({
+  app_ = std::make_shared<uWS::SSLApp>(
+    uWS::SSLApp({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem"
     })
@@ -2375,7 +2376,8 @@ void worker_t::work()
         }
 
         /** check if a connection is already there with the same uid (thread safe) */
-        if(uid.find(upgradeData->uid) != uid.end()){
+        tbb::concurrent_hash_map<std::string, bool>::const_accessor accessor;
+        if(uid.find(accessor, upgradeData->uid)){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
             res->writeStatus("403 Forbidden")->end("UID_ALREADY_EXIST");
 
@@ -2477,13 +2479,13 @@ void worker_t::work()
         data.worker = this; 
 
         /** not thread safe */
-        connections[ws->getUserData()->uid] = data;
+        connections.insert({ws->getUserData()->uid, data});
 
         /** thread safe */
         globalConnectionCounter.fetch_add(1, std::memory_order_relaxed);
 
         /** inserting the data for uid (thread safe) */
-        uid.insert(ws->getUserData()->uid);
+        uid.insert({ws->getUserData()->uid, true});
 
         ws->subscribe(ws->getUserData()->uid);
         ws->subscribe(BROADCAST);
@@ -2861,7 +2863,8 @@ void worker_t::work()
         /* You don't need to handle this one either */
         if (ws->getUserData()->key != UserData::getInstance().clientApiKey) {
             ws->end(1008, "{\"event\":\"API_KEY_INVALID\"}");
-        } else if (bannedConnections["global"].find(ws->getUserData()->uid) != bannedConnections["global"].end()
+        } else if (
+        bannedConnections["global"].find(ws->getUserData()->uid) != bannedConnections["global"].end()
         || bannedConnections[ws->getUserData()->rid].find(ws->getUserData()->uid) != bannedConnections[ws->getUserData()->rid].end()
         ) {
             ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
@@ -2875,7 +2878,7 @@ void worker_t::work()
         /** thread safe */
         globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
         
-        /** Remove the uid from the set (not thread safe) */
+        /** Remove the uid from the set (thread safe) */
         uid.erase(ws->getUserData()->uid);
 
         /** manually unsubscribing */
@@ -3144,9 +3147,11 @@ void worker_t::work()
                     std::string rid = parsedJson["rid"].get<std::string>();
                     std::string uid = parsedJson["uid"].get<std::string>();
 
-                    if(connections.find(uid) != connections.end()){
-                        uWS::WebSocket<false, true, PerSocketData>* ws = connections[uid].ws;
-                        worker_t* worker = connections[uid].worker;
+                    tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
+
+                    if (connections.find(accessor, uid)) {  
+                        uWS::WebSocket<true, true, PerSocketData>* ws = accessor->second.ws; 
+                        worker_t* worker = accessor->second.worker;  
 
                         if(ws->getUserData()->rid != rid){
                             /** Check if the user is banned and reject the connection */
