@@ -581,7 +581,7 @@ struct WebSocketData {
     worker_t* worker; 
 };
 
-/** Global atomic variables and data structures */
+/** Global atomic variables and data structures (all thread safe) */
 
 /** these variables mainly stores the metrics */
 std::atomic<int> globalConnectionCounter(0);
@@ -594,9 +594,9 @@ std::atomic<unsigned long long> droppedMessages{0};
 std::atomic<unsigned int> messageCount(0);
 
 /** these variables stores some userdata */
-std::unordered_map<std::string, std::unordered_set<std::string>> topics;
-std::unordered_map<std::string, std::unordered_set<std::string>> bannedConnections;
-std::unordered_map<std::string, std::unordered_set<std::string>> disabledConnections;
+tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> topics;
+tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> bannedConnections;
+tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> disabledConnections;
 tbb::concurrent_hash_map<std::string, bool> uid;
 std::atomic<bool> isMessagingDisabled(false);
 tbb::concurrent_hash_map<std::string, WebSocketData> connections;
@@ -1413,23 +1413,60 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 
     /** unsubscribe the user from the room */
     if(rid.length() > 0){
-        topics[rid].erase(ws->getUserData()->uid);
+        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
+        int size = 0;
+
+        /** Check if the room exists in the topics map */
+        if (topics.find(outer_accessor, rid)) {
+            /** Access the inner map corresponding to 'rid' */
+            tbb::concurrent_hash_map<std::string, bool>& inner_map = outer_accessor->second;
+
+            /** Create accessor for the inner map */
+            tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+
+            /** Erase the key (uid) from the inner map */
+            if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
+                inner_map.erase(inner_accessor);
+            }
+
+            size = inner_map.size();
+
+            /** Check if the inner map is now empty */
+            if (size == 0) {
+                /** Perform operations when the inner map is empty */
+                
+                /** Delete the messages from LMDB */
+                delete_worker(rid);
+
+                /** Erase the room from the topics map */
+                topics.erase(outer_accessor);
+
+                /** Clear the disabled connections for the room */
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor disabledConnectionAccessor;
+                if (disabledConnections.find(disabledConnectionAccessor, rid)) {
+                    /** Erase the key (rid) from the outer map, which also removes the inner map */
+                    disabledConnections.erase(disabledConnectionAccessor);
+                }
+
+
+                /** Clear the banned connections for the room */
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedConnectionAccessor;
+                if (bannedConnections.find(bannedConnectionAccessor, rid)) {
+                    /** Erase the key (rid) from the outer map, which also removes the inner map */
+                    bannedConnections.erase(bannedConnectionAccessor);
+                }
+            }
+        }
+
 
         if(worker != nullptr){
+            /** if the parent thread for this websocket is different, defer it to that thread */
             worker->loop_->defer([ws, rid]() {
                 ws->unsubscribe(rid);
             });
         } else {
             ws->unsubscribe(rid);  
         }      
-
-        if(topics[rid].size() == 0) {
-            /** delete all the messages stored for a room from LMDB */
-            delete_worker(rid);
-            topics.erase(rid);
-            disabledConnections[rid].clear();
-            bannedConnections[rid].clear();
-        }
 
         /**
          * Broadcast the message to rest of the members of the group informing about the disconnection
@@ -1460,7 +1497,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                             << "\"code\":5025, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1482,7 +1519,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                             << "\"code\":5026, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1504,7 +1541,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                             << "\"code\":5027, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str();
@@ -1526,7 +1563,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                             << "\"code\":5028, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1548,7 +1585,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                             << "\"code\":5029, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1570,7 +1607,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                             << "\"code\":5030, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1592,7 +1629,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                             << "\"code\":5031, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1614,7 +1651,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                             << "\"code\":5032, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1630,8 +1667,9 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
             }
         }
 
+
         /** room vacate webhooks */
-        if(topics[rid].size() == 0){
+        if (size == 0) {
             switch(ws->getUserData()->roomType) {
                 case static_cast<uint8_t>(Rooms::PUBLIC) : {
                     if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_ROOM] == 1){
@@ -1640,7 +1678,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                                 << "\"code\":5033, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -1662,7 +1700,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                                 << "\"code\":5034, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -1684,7 +1722,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                                 << "\"code\":5035, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str();
@@ -1706,7 +1744,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                                 << "\"code\":5036, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -1728,7 +1766,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                                 << "\"code\":5037, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -1750,7 +1788,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                                 << "\"code\":5038, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -1772,7 +1810,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                                 << "\"code\":5039, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -1794,7 +1832,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                                 << "\"code\":5040, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -1821,7 +1859,34 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             ws->subscribe(ws->getUserData()->rid);
         });
 
-        topics[ws->getUserData()->rid].insert(ws->getUserData()->uid);
+        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessorForWebhooks;
+        int size = 0;
+
+        /** Check if the room exists in the topics map */
+        if (topics.find(topicsAccessorForWebhooks, ws->getUserData()->rid)) {
+            /** If the room exists, insert the uid into the inner map */
+            tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
+            if (topicsAccessorForWebhooks->second.find(innerAccessor, ws->getUserData()->uid)) {
+                /** UID already exists, no need to insert */ 
+                innerAccessor.release();
+            } else {
+                /** Insert the new UID */ 
+                topicsAccessorForWebhooks->second.insert(innerAccessor, ws->getUserData()->uid);
+                innerAccessor->second = true;
+            }
+
+            /** Calculate the size of the inner map after insertion */
+            size = topicsAccessorForWebhooks->second.size();
+        } else {
+            /** Insert the new inner map into the main map under the given rid */
+            tbb::concurrent_hash_map<std::string, bool> newInnerMap;
+            newInnerMap.insert({ws->getUserData()->uid, true});
+            topics.insert(topicsAccessorForWebhooks, ws->getUserData()->rid);
+            topicsAccessorForWebhooks->second = std::move(newInnerMap);
+
+            /** Since only 1 element is there, size is 1 */
+            size = 1;
+        }
 
         /** Send a message to self */
         std::ostringstream payload;
@@ -1862,7 +1927,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                             << "\"code\":5001, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1884,7 +1949,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                             << "\"code\":5002, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1906,7 +1971,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                             << "\"code\":5003, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str();
@@ -1928,7 +1993,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                             << "\"code\":5004, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1950,7 +2015,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                             << "\"code\":5005, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1972,7 +2037,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                             << "\"code\":5006, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -1994,7 +2059,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                             << "\"code\":5007, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -2016,7 +2081,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                             << "\"code\":5008, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                            << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                            << "\"connections_in_room\":\"" << size << "\", "
                             << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                     std::string body = payload.str(); 
@@ -2033,7 +2098,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
 
         /** Room ocuupied webhooks */
-        if(topics[ws->getUserData()->rid].size() == 1){            
+        if(size == 1){            
             switch(ws->getUserData()->roomType) {
                 case static_cast<uint8_t>(Rooms::PUBLIC) : {                    
                     if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_ROOM] == 1){
@@ -2042,7 +2107,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                                 << "\"code\":5009, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -2064,7 +2129,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                                 << "\"code\":5010, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -2086,7 +2151,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                                 << "\"code\":5011, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str();
@@ -2108,7 +2173,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                                 << "\"code\":5012, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -2130,7 +2195,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                                 << "\"code\":5013, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -2152,7 +2217,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                                 << "\"code\":5014, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -2174,7 +2239,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                                 << "\"code\":5015, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -2196,7 +2261,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                                 << "\"code\":5016, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
-                                << "\"connections_in_room\":\"" << topics[ws->getUserData()->rid].size() << "\", "
+                                << "\"connections_in_room\":\"" << size << "\", "
                                 << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
 
                         std::string body = payload.str(); 
@@ -2345,34 +2410,45 @@ void worker_t::work()
         });
 
         /** Check if the user is banned and reject the connection */
-        if (bannedConnections["global"].find(upgradeData->uid) != bannedConnections["global"].end()) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden");
-            res->writeHeader("Content-Type", "application/json");
-            res->end("CONNECTION_BANNED");
+        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedAccessor;
+        if (bannedConnections.find(bannedAccessor, "global")) {
+            /** Access the inner map */
+            tbb::concurrent_hash_map<std::string, bool>& inner_map = bannedAccessor->second;
 
-            /** check if the connection is banned */
-            if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                        << "\"trigger\":\"CONNECTION_BANNED_GLOBALLY\", "  
-                        << "\"code\":3000, "
-                        << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"rid\":\"" << upgradeData->rid << "\", "
-                        << "\"message\":\"This connection is globally banned by the admin.\"}";
+            /** Accessor for the inner map */
+            tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
+            
+            /** Check if the user UID is banned in the inner map */
+            if (inner_map.find(innerAccessor, upgradeData->uid)) {
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                res->writeStatus("403 Forbidden");
+                res->writeHeader("Content-Type", "application/json");
+                res->end("CONNECTION_BANNED");
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
+                /** check if the connection is banned */
+                if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                            << "\"trigger\":\"CONNECTION_BANNED_GLOBALLY\", "
+                            << "\"code\":3000, "
+                            << "\"uid\":\"" << upgradeData->uid << "\", "
+                            << "\"rid\":\"" << upgradeData->rid << "\", "
+                            << "\"message\":\"This connection is globally banned by the admin.\"}";
+
+                    std::string body = payload.str();
+
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+
+                return;
             }
-
-            return;
         }
+
 
         /** check if a connection is already there with the same uid (thread safe) */
         tbb::concurrent_hash_map<std::string, bool>::const_accessor accessor;
@@ -2477,23 +2553,45 @@ void worker_t::work()
         data.ws = ws;
         data.worker = this; 
 
-        /** not thread safe */
-        connections.insert({ws->getUserData()->uid, data});
+        /** thread safe */
+        tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
+        if (!connections.find(conn_accessor, ws->getUserData()->uid)) {
+            /** Insert the new data if the uid doesn't already exist */
+            connections.insert(conn_accessor, ws->getUserData()->uid);
+            conn_accessor->second = data;  
+        } else {
+            /** something wrong has happended */
+            ws->end();
+        }
 
         /** thread safe */
         globalConnectionCounter.fetch_add(1, std::memory_order_relaxed);
 
         /** inserting the data for uid (thread safe) */
-        uid.insert({ws->getUserData()->uid, true});
+        tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
+        if (!uid.find(user_accessor, ws->getUserData()->uid)) {
+            /** The uid doesn't exist, insert it */ 
+            uid.insert(user_accessor, ws->getUserData()->uid);
+            user_accessor->second = true;  
+        } else {
+            /** something wrong has happended */
+            ws->end();
+        }
 
         ws->subscribe(ws->getUserData()->uid);
         ws->subscribe(BROADCAST);
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-        if(isMessagingDisabled.load(std::memory_order_relaxed)
-        || disabledConnections["global"].find(ws->getUserData()->uid) != disabledConnections["global"].end()
-        || disabledConnections[ws->getUserData()->rid].find(ws->getUserData()->uid) != disabledConnections[ws->getUserData()->rid].end()
-        ){
+        /** Check if messaging is disabled for the user */
+        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
+        tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
+
+        if (isMessagingDisabled.load(std::memory_order_relaxed) ||
+            (disabledConnections.find(outer_accessor, "global") &&
+            outer_accessor->second.find(inner_accessor, ws->getUserData()->uid)) ||
+            (disabledConnections.find(outer_accessor, ws->getUserData()->rid) &&
+            outer_accessor->second.find(inner_accessor, ws->getUserData()->uid))) {
+            
             ws->send("{\"event\":\"MESSAGING_DISABLED\"}", uWS::OpCode::TEXT, true);
         } else {
             if(static_cast<int>(message.size()) > UserData::getInstance().msgSizeAllowedInBytes){
@@ -2849,36 +2947,29 @@ void worker_t::work()
         }
     },
     .ping = [](auto *ws, std::string_view) {
-        /* You don't need to handle this one, we automatically respond to pings as per standard */
-        if (ws->getUserData()->key != UserData::getInstance().clientApiKey) {
-            ws->end(1008, "{\"event\":\"API_KEY_INVALID\"}");
-        } else if (bannedConnections["global"].find(ws->getUserData()->uid) != bannedConnections["global"].end()
-        || bannedConnections[ws->getUserData()->rid].find(ws->getUserData()->uid) != bannedConnections[ws->getUserData()->rid].end()
-        ) {
-            ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
-        }
+        /** automatically handled */
     },
     .pong = [](auto *ws, std::string_view) {
-        /* You don't need to handle this one either */
-        if (ws->getUserData()->key != UserData::getInstance().clientApiKey) {
-            ws->end(1008, "{\"event\":\"API_KEY_INVALID\"}");
-        } else if (
-        bannedConnections["global"].find(ws->getUserData()->uid) != bannedConnections["global"].end()
-        || bannedConnections[ws->getUserData()->rid].find(ws->getUserData()->uid) != bannedConnections[ws->getUserData()->rid].end()
-        ) {
-            ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
-        }
+        /** automatically handled */
     },
     .close = [](auto *ws, int /* code */, std::string_view /* message */) {
 
         /** thread safe */
-        connections.erase(ws->getUserData()->uid);
+        tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
+        if (connections.find(conn_accessor, ws->getUserData()->uid)) {
+            /** If the uid is found, erase it */
+            connections.erase(conn_accessor);  
+        }
 
         /** thread safe */
         globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
         
         /** Remove the uid from the set (thread safe) */
-        uid.erase(ws->getUserData()->uid);
+        tbb::concurrent_hash_map<std::string, bool>::accessor uid_accessor;
+        if (uid.find(uid_accessor, ws->getUserData()->uid)) {
+            /** If the uid is found, erase it */
+            uid.erase(uid_accessor);  
+        }
 
         /** manually unsubscribing */
         ws->unsubscribe(ws->getUserData()->uid);
@@ -3045,11 +3136,22 @@ void worker_t::work()
         nlohmann::json data = nlohmann::json::array(); 
 
         for (const auto& [rid, users] : topics) {  
+            /** Create a JSON object for the room */
             nlohmann::json roomData;
             roomData["rid"] = rid;
-            roomData["uid"] = nlohmann::json(users);  
 
-            data.push_back(roomData);
+            /** Store only the keys from the inner map */
+            std::vector<std::string> userKeys;
+            
+            for (const auto& [uid, _] : users) {  
+                userKeys.push_back(uid);
+            }
+
+            /** Convert vector to JSON array */
+            roomData["uid"] = std::move(userKeys);
+
+            /** Store the room data in the final list */
+            data.push_back(std::move(roomData));
         }
 
         res->writeStatus("200 OK");
@@ -3094,11 +3196,20 @@ void worker_t::work()
                         nlohmann::json roomData;
                         roomData["rid"] = rid;
 
-                        if (topics.find(rid) != topics.end()) {
-                            /** Convert unordered_set to a JSON array*/ 
-                            roomData["uid"] = nlohmann::json(topics[rid]);  
+                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
+
+                        if (topics.find(outer_accessor, rid)) {
+                            /** Convert the inner map to a JSON array */
+                            nlohmann::json uidArray = nlohmann::json::array();
+                            
+                            /** Iterate over the inner map and add the uids to the JSON array */
+                            for (const auto& entry : outer_accessor->second) {
+                                uidArray.push_back(entry.first);  /** entry.first is the uid */ 
+                            }
+                            
+                            roomData["uid"] = uidArray;
                         } else {
-                            roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */ 
+                            roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
                         }
 
                         data.push_back(roomData);
@@ -3154,15 +3265,8 @@ void worker_t::work()
 
                         if(ws->getUserData()->rid != rid){
                             /** Check if the user is banned and reject the connection */
-                            if (bannedConnections["global"].find(uid) != bannedConnections["global"].end()) {
-                                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-                                res->writeStatus("403 Forbidden");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"error\": \"You have been banned from the server!\"}");
-
-                                return;
-                            }
+                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
+                            tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
 
                             /** check if room length is valid */
                             if(rid.length() > 160 || rid.length() <= 0){
@@ -3221,14 +3325,17 @@ void worker_t::work()
                                 return;
                             }
 
-                            if (bannedConnections[rid].find(uid) != bannedConnections[rid].end()) {
-                                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                                
-                                res->writeStatus("403 Forbidden");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"error\": \"You have been banned from this room!\"}");
+                            /** Check if user is banned from the room */
+                            if (bannedConnections.find(outer_accessor, rid)) { 
+                                if (outer_accessor->second.find(inner_accessor, uid)) {
+                                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                                    
+                                    res->writeStatus("403 Forbidden");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end("{\"error\": \"You have been banned from this room!\"}");
 
-                                return;
+                                    return;
+                                }
                             }
 
                             if(roomType == static_cast<uint8_t>(Rooms::PRIVATE) 
@@ -3525,19 +3632,38 @@ void worker_t::work()
                 try {
                     nlohmann::json parsedJson = nlohmann::json::parse(body);
 
+                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                    tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
+
+                    /** saving all the banned connections in a map */
+
                     for (const auto& item : parsedJson) {
                         /** Extract `rid` and `uid` from each item in the request */ 
                         std::string rid = item["rid"];
-
                         std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                        if(rid == "global"){
-                            for (const auto& uid : uids) {
-                                bannedConnections["global"].insert(uid);
-                            }
-                        } else {
-                            for (const auto& uid : uids) {
-                                bannedConnections[rid].insert(uid);
+                        /** Try to find or insert the outer map entry */
+                        if (!bannedConnections.find(global_accessor, rid)) {
+                            bannedConnections.insert(global_accessor, rid);
+                        }
+
+                        for (const auto& uid : uids) {                            
+                            /** Check if uid already exists before inserting */
+                            if (!global_accessor->second.find(user_accessor, uid)) {
+                                global_accessor->second.insert(user_accessor, uid);
+                                user_accessor->second = true;
+
+                                /** Fetch the connection for the given uid from the connections map */
+                                tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
+                                if (connections.find(conn_accessor, uid)) {
+                                    uWS::WebSocket<true, true, PerSocketData>* ws = conn_accessor->second.ws; 
+                                    worker_t* worker = conn_accessor->second.worker; 
+
+                                    /** Disconnect the WebSocket or perform any other disconnection logic */
+                                    worker->loop_->defer([ws]() {
+                                        ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
+                                    });
+                                }
                             }
                         }
                     }
@@ -3579,20 +3705,26 @@ void worker_t::work()
             if (last) { 
                 try {
                     nlohmann::json parsedJson = nlohmann::json::parse(body);
+                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                    tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
                     for (const auto& item : parsedJson) {
                         /** Extract `rid` and `uid` from each item in the request */ 
                         std::string rid = item["rid"];
-
                         std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                        if(rid == "global"){
+                        /** Check if the room exists before trying to erase */
+                        if (bannedConnections.find(global_accessor, rid)) {
                             for (const auto& uid : uids) {
-                                bannedConnections["global"].erase(uid);
+                                /** Check if the user exists before erasing */
+                                if (global_accessor->second.find(user_accessor, uid)) {
+                                    global_accessor->second.erase(user_accessor);
+                                }
                             }
-                        } else {
-                            for (const auto& uid : uids) {
-                                bannedConnections[rid].erase(uid);
+
+                            /** If the inner map becomes empty, erase the entire entry */
+                            if (global_accessor->second.empty()) {
+                                bannedConnections.erase(global_accessor);
                             }
                         }
                     }
@@ -3676,6 +3808,8 @@ void worker_t::work()
             if (last) { 
                 try {
                     nlohmann::json parsedJson = nlohmann::json::parse(body);
+                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                    tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
                     for (const auto& item : parsedJson) {
                         /** Extract `rid` and `uid` from each item in the request */ 
@@ -3684,22 +3818,34 @@ void worker_t::work()
 
                         if (action == "enable")
                         {
-                            if(rid == "global"){
+                            /** Check if the room exists before trying to erase */
+                            if (disabledConnections.find(global_accessor, rid)) {
                                 for (const auto& uid : uids) {
-                                    disabledConnections["global"].erase(uid);  /** Remove each UID from the disabled list */
+                                    /** Check if the user exists before erasing */
+                                    if (global_accessor->second.find(user_accessor, uid)) {
+                                        global_accessor->second.erase(user_accessor);
+                                    }
                                 }
-                            } else {
-                                for (const auto& uid : uids) {
-                                    disabledConnections[rid].erase(uid);  /** Remove each UID from the disabled list */
+
+                                /** If the inner map becomes empty, erase the entire entry */
+                                if (global_accessor->second.empty()) {
+                                    disabledConnections.erase(global_accessor);
                                 }
                             }
                         }
                         else if (action == "disable")
                         {
-                            if(rid == "global"){
-                                disabledConnections["global"].insert(uids.begin(), uids.end());
-                            } else {
-                                disabledConnections[rid].insert(uids.begin(), uids.end());
+                            /** Try to find or insert the outer map entry */
+                            if (!disabledConnections.find(global_accessor, rid)) {
+                                disabledConnections.insert(global_accessor, rid);
+                            }
+
+                            for (const auto& uid : uids) {                            
+                                /** Check if uid already exists before inserting */
+                                if (!global_accessor->second.find(user_accessor, uid)) {
+                                    global_accessor->second.insert(user_accessor, uid);
+                                    user_accessor->second = true;
+                                }
                             }
                         }
                         else
@@ -3746,22 +3892,31 @@ void worker_t::work()
         }
 
         /** Create and reserve space for the JSON response */
-        nlohmann::json json_response = nlohmann::json::array();  
+        nlohmann::json data = nlohmann::json::array(); 
 
-        for (const auto& [room, users] : bannedConnections) {
+        for (const auto& [rid, users] : bannedConnections) {  
+            /** Create a JSON object for the room */
             nlohmann::json roomData;
-            roomData["rid"] = room;
-            roomData["uid"] = std::vector<std::string>(users.begin(), users.end());  
+            roomData["rid"] = rid;
 
-            if(users.size() > 0){
-                json_response.push_back(roomData);
+            /** Store only the keys from the inner map */
+            std::vector<std::string> userKeys;
+            
+            for (const auto& [uid, _] : users) {  
+                userKeys.push_back(uid);
             }
+
+            /** Convert vector to JSON array */
+            roomData["uid"] = std::move(userKeys);
+
+            /** Store the room data in the final list */
+            data.push_back(std::move(roomData));
         }
 
         /** Send the successful response with all banned connections */
         res->writeStatus("200 OK")
         ->writeHeader("Content-Type", "application/json")
-        ->end(std::move(json_response).dump());  /** Serialize the JSON response and send it */ 
+        ->end(data.dump());  /** Serialize the JSON response and send it */ 
 	}).get("/api/v1/connections/messaging/disabled", [this](auto *res, auto *req) {
         /** Handle the request to fetch all disabled connections */
 
@@ -3783,22 +3938,31 @@ void worker_t::work()
         }
 
         /** Create and reserve space for the JSON response */
-        nlohmann::json json_response = nlohmann::json::array();  
+        nlohmann::json json_response = nlohmann::json::array();
 
-        for (const auto& [room, users] : disabledConnections) {
+        for (const auto& [rid, users] : disabledConnections) {  
+            /** Create a JSON object for the room */
             nlohmann::json roomData;
-            roomData["rid"] = room;
-            roomData["uid"] = std::vector<std::string>(users.begin(), users.end());  
+            roomData["rid"] = rid;
 
-            if(users.size() > 0){
-                json_response.push_back(roomData);
+            /** Store only the keys from the inner map */
+            std::vector<std::string> userKeys;
+            
+            for (const auto& [uid, _] : users) {  
+                userKeys.push_back(uid);
             }
+
+            /** Convert vector to JSON array */
+            roomData["uid"] = std::move(userKeys);
+
+            /** Store the room data in the final list */
+            json_response.push_back(std::move(roomData));
         }
         
         /** Send the successful response with all banned connections */
         res->writeStatus("200 OK")
         ->writeHeader("Content-Type", "application/json")
-        ->end(std::move(json_response).dump());  /** Serialize the JSON response and send it */ 
+        ->end(json_response.dump());  /** Serialize the JSON response and send it */ 
 	}).get("/api/v1/messages/room/:rid", [this](auto *res, auto *req) {
         /** retrieve the messages for cache rooms (for other rooms no data will be returned) */
 
@@ -3810,20 +3974,26 @@ void worker_t::work()
         std::string_view apiKey = req->getHeader("api-key");
         std::string_view uid = req->getHeader("uid");
 
-        auto it = topics.find(std::string(rid));
+        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
 
-        if (it != topics.end()) {
-            /** Check if value exists in the set */ 
-            if (it->second.find(std::string(uid)) != it->second.end()) {
+        if (topics.find(outer_accessor, std::string(rid))) {
+            /** Access the inner map corresponding to 'rid' */
+            tbb::concurrent_hash_map<std::string, bool>& inner_map = outer_accessor->second;
+
+            /** Create an accessor for the inner map */
+            tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+
+            /** Check if value exists in the inner map (uid) */
+            if (inner_map.find(inner_accessor, std::string(uid))) {
                 int limit, offset;
 
                 try {
                     limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
                 } catch (const std::exception& e) {
-                    limit = 10; /** Default value if conversion fails */ 
+                    limit = 10; /** Default value if conversion fails */
                 }
 
-                if(limit > 10){
+                if (limit > 10) {
                     res->writeStatus("400 Bad Request");
                     res->writeHeader("Content-Type", "application/json");
                     res->end(R"({"error": "Limit cannot be greater than 10!"})");
@@ -3833,12 +4003,12 @@ void worker_t::work()
                 try {
                     offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
                 } catch (const std::exception& e) {
-                    offset = 0; /** Default value if conversion fails */ 
+                    offset = 0; /** Default value if conversion fails */
                 }
 
                 write_worker(std::string(rid), "", "", true);
 
-                if(apiKey != UserData::getInstance().clientApiKey){
+                if (apiKey != UserData::getInstance().clientApiKey) {
                     totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                     res->writeStatus("403");
                     res->writeHeader("Content-Type", "application/json");
@@ -3848,7 +4018,7 @@ void worker_t::work()
 
                 res->writeStatus("200 OK");
                 res->writeHeader("Content-Type", "application/json");
-                res->end(read_worker(std::string(rid), limit, offset));  
+                res->end(read_worker(std::string(rid), limit, offset));
             } else {
                 res->writeStatus("403 Forbidden");
                 res->writeHeader("Content-Type", "application/json");
