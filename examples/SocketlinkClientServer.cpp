@@ -3430,7 +3430,7 @@ void worker_t::work()
                             ws->getUserData()->roomType = roomType;
 
                             /** connecting to the new room */
-                            openConnection(ws, worker);
+                            // openConnection(ws, worker);
 
                             res->writeStatus("200 OK");
                             res->writeHeader("Content-Type", "application/json");
