@@ -1408,7 +1408,7 @@ void fetchAndPopulateUserData() {
     }
 }
 
-void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker = nullptr) {
+void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker) {
     std::string rid = ws->getUserData()->rid;
 
     /** unsubscribe the user from the room */
@@ -1458,7 +1458,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
             }
         }
 
-        if(worker != nullptr){
+        if(worker->thread_->get_id() != std::this_thread::get_id()){
             /** if the parent thread for this websocket is different, defer it to that thread */
             worker->loop_->defer([ws, rid]() {
                 ws->unsubscribe(rid);
@@ -2965,7 +2965,7 @@ void worker_t::work()
     .pong = [](auto *ws, std::string_view) {
         /** automatically handled */
     },
-    .close = [](auto *ws, int /* code */, std::string_view /* message */) {
+    .close = [this](auto *ws, int /* code */, std::string_view /* message */) {
 
         /** thread safe */
         tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
@@ -2988,7 +2988,7 @@ void worker_t::work()
         ws->unsubscribe(ws->getUserData()->uid);
         ws->unsubscribe(BROADCAST);
 
-        /* closeConnection(ws); */
+        closeConnection(ws, this);
     }
     }).get("/api/v1/metrics", [](auto *res, auto *req) {
         /** fetch all the server metrics */
