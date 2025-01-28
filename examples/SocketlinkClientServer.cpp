@@ -1852,7 +1852,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 
 void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker) {
     if(ws->getUserData()->rid.length() > 0){
-
         /** subscribing to the room in the same thread where the ws instance was created */
         if(worker->thread_->get_id() == std::this_thread::get_id()){
             ws->subscribe(ws->getUserData()->rid);
@@ -2541,10 +2540,10 @@ void worker_t::work()
             upgradeData->httpRes->cork([upgradeData]() {
                 upgradeData->httpRes->template upgrade<PerSocketData>({
                     /* We initialize PerSocketData struct here */
-                    .rid = "",
+                    .rid = upgradeData->rid,
                     .key = upgradeData->key,
                     .uid = upgradeData->uid,
-                    .roomType = 255,  
+                    .roomType = 6,  
                 }, upgradeData->secWebSocketKey,
                     upgradeData->secWebSocketProtocol,
                     upgradeData->secWebSocketExtensions,
@@ -2585,6 +2584,8 @@ void worker_t::work()
 
         ws->subscribe(ws->getUserData()->uid);
         ws->subscribe(BROADCAST);
+
+        openConnection(ws, this);
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
         /** Check if messaging is disabled for the user */
