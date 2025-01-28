@@ -1436,25 +1436,25 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 /** Perform operations when the inner map is empty */
                 
                 /** Delete the messages from LMDB */
-                delete_worker(rid);
+                /* delete_worker(rid); */
 
-                // /** Erase the room from the topics map */
-                // topics.erase(outer_accessor);
+                /** Erase the room from the topics map */
+                topics.erase(outer_accessor);
 
-                // /** Clear the disabled connections for the room */
-                // tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor disabledConnectionAccessor;
-                // if (disabledConnections.find(disabledConnectionAccessor, rid)) {
-                //     /** Erase the key (rid) from the outer map, which also removes the inner map */
-                //     disabledConnections.erase(disabledConnectionAccessor);
-                // }
+                /** Clear the disabled connections for the room */
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor disabledConnectionAccessor;
+                if (disabledConnections.find(disabledConnectionAccessor, rid)) {
+                    /** Erase the key (rid) from the outer map, which also removes the inner map */
+                    disabledConnections.erase(disabledConnectionAccessor);
+                }
 
 
-                // /** Clear the banned connections for the room */
-                // tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedConnectionAccessor;
-                // if (bannedConnections.find(bannedConnectionAccessor, rid)) {
-                //     /** Erase the key (rid) from the outer map, which also removes the inner map */
-                //     bannedConnections.erase(bannedConnectionAccessor);
-                // }
+                /** Clear the banned connections for the room */
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedConnectionAccessor;
+                if (bannedConnections.find(bannedConnectionAccessor, rid)) {
+                    /** Erase the key (rid) from the outer map, which also removes the inner map */
+                    bannedConnections.erase(bannedConnectionAccessor);
+                }
             }
         }
 
