@@ -3236,9 +3236,13 @@ void worker_t::work()
 
         if(apiKey != UserData::getInstance().clientApiKey){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+
+            res->cork([res]() {
+                res->writeStatus("403 Forbidden");
+                res->writeHeader("Content-Type", "application/json");
+                res->end("{\"error\": \"Unauthorized access. Invalid API key!\"}");
+            });
+
             return;
         }
 
@@ -3272,9 +3276,11 @@ void worker_t::work()
                             if(rid.length() > 160 || rid.length() <= 0){
                                 totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                                 
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"error\": \"The room id length should be between 1 to 160 characters!\"}");
+                                res->cork([res]() {
+                                    res->writeStatus("400 Bad Request");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end("{\"error\": \"The room id length should be between 1 to 160 characters!\"}");
+                                });
 
                                 return;
                             }
@@ -3318,9 +3324,11 @@ void worker_t::work()
                             {
                                 totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                                 
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"error\": \"The provided room type is invalid!\"}");
+                                res->cork([res]() {
+                                    res->writeStatus("400 Bad Request");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end("{\"error\": \"The provided room type is invalid!\"}");
+                                });
 
                                 return;
                             }
@@ -3330,9 +3338,11 @@ void worker_t::work()
                                 if (outer_accessor->second.find(inner_accessor, uid)) {
                                     totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                                     
-                                    res->writeStatus("403 Forbidden");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end("{\"error\": \"You have been banned from this room!\"}");
+                                    res->cork([res]() {
+                                        res->writeStatus("403 Forbidden");
+                                        res->writeHeader("Content-Type", "application/json");
+                                        res->end("{\"error\": \"You have been banned from this room!\"}");
+                                    });
 
                                     return;
                                 }
@@ -3405,19 +3415,22 @@ void worker_t::work()
                                     if(status != 200){
                                         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                                         
-                                        res->writeStatus("403 Forbidden");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end("{\"error\": \"You are not allowed to access this private room!\"}");
+                                        res->cork([res]() {
+                                            res->writeStatus("403 Forbidden");
+                                            res->writeHeader("Content-Type", "application/json");
+                                            res->end("{\"error\": \"You are not allowed to access this private room!\"}");
+                                        });
 
                                         return;
                                     }
                                 } else {
                                     totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                                     
-                                    res->writeStatus("403 Forbidden");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end("{\"error\": \"You are not allowed to access this private room!\"}");
-
+                                    res->cork([res]() {
+                                        res->writeStatus("403 Forbidden");
+                                        res->writeHeader("Content-Type", "application/json");
+                                        res->end("{\"error\": \"You are not allowed to access this private room!\"}");
+                                    });
                                     return;
                                 } 
                             }
@@ -3430,29 +3443,37 @@ void worker_t::work()
                             ws->getUserData()->roomType = roomType;
 
                             /** connecting to the new room */
-                            // openConnection(ws, worker);
+                            openConnection(ws, worker);
 
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Successfully updated the room for the connection!"})");
+                            res->cork([res]() {
+                                res->writeStatus("200 OK");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Successfully updated the room for the connection!"})");
+                            });
                         } else {
                             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                             
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "The connection is already in the same room!"})");
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"error": "The connection is already in the same room!"})");
+                            });
                         }
                     } else {
                         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                        res->writeStatus("404 Not Found");
-                        res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"error": "Connection not found!"})");
-                        return;
+
+                        res->cork([res]() {
+                            res->writeStatus("404 Not Found");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"error": "Connection not found!"})");
+                        });
                     }
                 } catch (std::exception &e) {
-                    res->writeStatus("400 Bad Request");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Invalid JSON format."})");
+                    res->cork([res]() {
+                        res->writeStatus("400 Bad Request");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"error": "Invalid JSON format."})");
+                    });
                 }
             }
         }); 
