@@ -1458,7 +1458,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
             }
         }
 
-
         if(worker != nullptr){
             /** if the parent thread for this websocket is different, defer it to that thread */
             worker->loop_->defer([ws, rid]() {
@@ -1855,9 +1854,14 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
     if(ws->getUserData()->rid.length() > 0){
 
         /** subscribing to the room in the same thread where the ws instance was created */
-        worker->loop_->defer([ws]() {
+        if(worker->thread_->get_id() == std::this_thread::get_id()){
             ws->subscribe(ws->getUserData()->rid);
-        });
+        } else {
+            /** Defer the subscription to the worker's loop */
+            worker->loop_->defer([ws]() {
+                ws->subscribe(ws->getUserData()->rid);
+            });
+        }
 
         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessorForWebhooks;
         int size = 0;
@@ -2536,10 +2540,10 @@ void worker_t::work()
             upgradeData->httpRes->cork([upgradeData]() {
                 upgradeData->httpRes->template upgrade<PerSocketData>({
                     /* We initialize PerSocketData struct here */
-                    .rid = "",
+                    .rid = upgradeData->rid,
                     .key = upgradeData->key,
                     .uid = upgradeData->uid,
-                    .roomType = 255,  
+                    .roomType = 6,  
                 }, upgradeData->secWebSocketKey,
                     upgradeData->secWebSocketProtocol,
                     upgradeData->secWebSocketExtensions,
@@ -2580,6 +2584,8 @@ void worker_t::work()
 
         ws->subscribe(ws->getUserData()->uid);
         ws->subscribe(BROADCAST);
+
+        openConnection(ws, this);
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
         /** Check if messaging is disabled for the user */
