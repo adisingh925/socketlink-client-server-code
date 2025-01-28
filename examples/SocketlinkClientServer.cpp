@@ -1417,46 +1417,46 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
         int size = 0;
 
         /** Check if the room exists in the topics map */
-        if (topics.find(outer_accessor, rid)) {
-            /** Access the inner map corresponding to 'rid' */
-            tbb::concurrent_hash_map<std::string, bool>& inner_map = outer_accessor->second;
+        // if (topics.find(outer_accessor, rid)) {
+        //     /** Access the inner map corresponding to 'rid' */
+        //     tbb::concurrent_hash_map<std::string, bool>& inner_map = outer_accessor->second;
 
-            /** Create accessor for the inner map */
-            tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+        //     /** Create accessor for the inner map */
+        //     tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
 
-            /** Erase the key (uid) from the inner map */
-            if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
-                inner_map.erase(inner_accessor);
-            }
+        //     /** Erase the key (uid) from the inner map */
+        //     if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
+        //         inner_map.erase(inner_accessor);
+        //     }
 
-            size = inner_map.size();
+        //     size = inner_map.size();
 
-            /** Check if the inner map is now empty */
-            if (size == 0) {
-                /** Perform operations when the inner map is empty */
+        //     /** Check if the inner map is now empty */
+        //     if (size == 0) {
+        //         /** Perform operations when the inner map is empty */
                 
-                /** Delete the messages from LMDB */
-                delete_worker(rid);
+        //         /** Delete the messages from LMDB */
+        //         delete_worker(rid);
 
-                /** Erase the room from the topics map */
-                topics.erase(outer_accessor);
+        //         /** Erase the room from the topics map */
+        //         topics.erase(outer_accessor);
 
-                /** Clear the disabled connections for the room */
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor disabledConnectionAccessor;
-                if (disabledConnections.find(disabledConnectionAccessor, rid)) {
-                    /** Erase the key (rid) from the outer map, which also removes the inner map */
-                    disabledConnections.erase(disabledConnectionAccessor);
-                }
+        //         /** Clear the disabled connections for the room */
+        //         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor disabledConnectionAccessor;
+        //         if (disabledConnections.find(disabledConnectionAccessor, rid)) {
+        //             /** Erase the key (rid) from the outer map, which also removes the inner map */
+        //             disabledConnections.erase(disabledConnectionAccessor);
+        //         }
 
 
-                /** Clear the banned connections for the room */
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedConnectionAccessor;
-                if (bannedConnections.find(bannedConnectionAccessor, rid)) {
-                    /** Erase the key (rid) from the outer map, which also removes the inner map */
-                    bannedConnections.erase(bannedConnectionAccessor);
-                }
-            }
-        }
+        //         /** Clear the banned connections for the room */
+        //         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedConnectionAccessor;
+        //         if (bannedConnections.find(bannedConnectionAccessor, rid)) {
+        //             /** Erase the key (rid) from the outer map, which also removes the inner map */
+        //             bannedConnections.erase(bannedConnectionAccessor);
+        //         }
+        //     }
+        // }
 
         if(worker->thread_->get_id() != std::this_thread::get_id()){
             /** if the parent thread for this websocket is different, defer it to that thread */
