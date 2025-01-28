@@ -1436,7 +1436,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 /** Perform operations when the inner map is empty */
                 
                 /** Delete the messages from LMDB */
-                // delete_worker(rid);
+                delete_worker(rid);
 
                 // /** Erase the room from the topics map */
                 // topics.erase(outer_accessor);
