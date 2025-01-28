@@ -1868,6 +1868,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         /** Check if the room exists in the topics map */
         if (topics.find(topicsAccessorForWebhooks, ws->getUserData()->rid)) {
+
             /** If the room exists, insert the uid into the inner map */
             tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
             if (topicsAccessorForWebhooks->second.find(innerAccessor, ws->getUserData()->uid)) {
@@ -2540,10 +2541,10 @@ void worker_t::work()
             upgradeData->httpRes->cork([upgradeData]() {
                 upgradeData->httpRes->template upgrade<PerSocketData>({
                     /* We initialize PerSocketData struct here */
-                    .rid = upgradeData->rid,
+                    .rid = "",
                     .key = upgradeData->key,
                     .uid = upgradeData->uid,
-                    .roomType = 6,  
+                    .roomType = 255,  
                 }, upgradeData->secWebSocketKey,
                     upgradeData->secWebSocketProtocol,
                     upgradeData->secWebSocketExtensions,
@@ -2584,8 +2585,6 @@ void worker_t::work()
 
         ws->subscribe(ws->getUserData()->uid);
         ws->subscribe(BROADCAST);
-
-        openConnection(ws, this);
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
         /** Check if messaging is disabled for the user */
