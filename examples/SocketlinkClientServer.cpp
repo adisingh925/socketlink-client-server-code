@@ -1897,7 +1897,14 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         payload << "{\"event\":\"CONNECTED_TO_ROOM\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
         std::string result = payload.str(); 
 
-        ws->send(result, uWS::OpCode::TEXT, true);
+        if(worker->thread_->get_id() == std::this_thread::get_id()){
+            ws->send(result, uWS::OpCode::TEXT, true);
+        } else {
+            /** Defer the message sending to the worker's loop */
+            worker->loop_->defer([ws, result]() {
+                ws->send(result, uWS::OpCode::TEXT, true);
+            });
+        }
 
         /** Broadcast the message to rest of the members of the group informing about the new connection */
         if(ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE)  
