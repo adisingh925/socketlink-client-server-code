@@ -2988,7 +2988,7 @@ void worker_t::work()
         ws->unsubscribe(ws->getUserData()->uid);
         ws->unsubscribe(BROADCAST);
 
-        closeConnection(ws);
+        /* closeConnection(ws); */
     }
     }).get("/api/v1/metrics", [](auto *res, auto *req) {
         /** fetch all the server metrics */
