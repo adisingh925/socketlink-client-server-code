@@ -3474,7 +3474,6 @@ void worker_t::work()
         });
 	}).post("/api/v1/broadcast", [this](auto *res, auto *req) {
         /** broadcast a message to everyone connected to the server */
-
         auto isAborted = std::make_shared<bool>(false);
 
         res->onAborted([isAborted]() {
