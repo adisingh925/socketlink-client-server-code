@@ -612,7 +612,7 @@ std::vector<worker_t> workers;
 std::atomic<std::chrono::steady_clock::time_point> globalCooldownEnd(std::chrono::steady_clock::now());
 
 /** Configuration parameters */ 
-constexpr double k = 0.05;      /** Scaling factor */ 
+constexpr double k = 0.1;      /** Scaling factor */ 
 constexpr double M = 1000.0;    /** Normalization constant for payload size */ 
 
 /** Thread local variables */
