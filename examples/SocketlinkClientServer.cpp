@@ -1088,6 +1088,11 @@ void sendHTTPSPOSTRequestFireAndForget(
     try {
         /** Disable SSL certificate verification if needed. 
          *  This is insecure and should only be used for testing purposes. */
+        if(UserData::getInstance().webhookIP.empty()){
+            /** DNS is not resolved, returning */
+            return;
+        }
+
         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
 
         if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {      
@@ -2378,7 +2383,6 @@ void worker_t::work()
             std::string secWebSocketKey;
             std::string secWebSocketProtocol;
             std::string secWebSocketExtensions;
-            std::string rid;
             std::string key;
             std::string uid;
             struct us_socket_context_t *context;
@@ -2388,7 +2392,6 @@ void worker_t::work()
             std::string(req->getHeader("sec-websocket-key")),
             std::string(req->getHeader("sec-websocket-protocol")),
             std::string(req->getHeader("sec-websocket-extensions")),
-            std::string(req->getQuery("rid")),
             std::string(req->getHeader("api-key")),
             std::string(req->getHeader("uid").empty() ? req->getHeader("sec-websocket-key") : req->getHeader("uid")),
             context,
@@ -2398,6 +2401,31 @@ void worker_t::work()
         res->onAborted([=]() {
             upgradeData->aborted = true;
         });
+
+        if(upgradeData->uid == upgradeData->secWebSocketKey){
+            /** check if the connection is banned */
+            if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
+                res->writeStatus("403 Forbidden");
+                res->writeHeader("Content-Type", "application/json");
+                res->end("EMPTY_UID");
+
+                std::ostringstream payload;
+                payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                        << "\"trigger\":\"EMPTY_UID\", "
+                        << "\"code\":3000, "
+                        << "\"uid\":\"" << upgradeData->uid << "\", "
+                        << "\"message\":\"uid cannot be empty!\"}";
+
+                std::string body = payload.str();
+
+                sendHTTPSPOSTRequestFireAndForget(
+                    UserData::getInstance().webHookBaseUrl,
+                    UserData::getInstance().webhookPath,
+                    body,
+                    {}
+                );
+            }
+        }
 
         /** Check if the user is banned and reject the connection */
         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedAccessor;
@@ -2422,7 +2450,6 @@ void worker_t::work()
                             << "\"trigger\":\"CONNECTION_BANNED_GLOBALLY\", "
                             << "\"code\":3000, "
                             << "\"uid\":\"" << upgradeData->uid << "\", "
-                            << "\"rid\":\"" << upgradeData->rid << "\", "
                             << "\"message\":\"This connection is globally banned by the admin.\"}";
 
                     std::string body = payload.str();
@@ -2439,7 +2466,6 @@ void worker_t::work()
             }
         }
 
-
         /** check if a connection is already there with the same uid (thread safe) */
         tbb::concurrent_hash_map<std::string, bool>::const_accessor accessor;
         if(uid.find(accessor, upgradeData->uid)){
@@ -2452,7 +2478,6 @@ void worker_t::work()
                         << "\"trigger\":\"UID_ALREADY_EXIST\", "  
                         << "\"code\":3010, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"rid\":\"" << upgradeData->rid << "\", "
                         << "\"message\":\"There is already a connection using this UID.\"}";
 
                 std::string body = payload.str(); 
@@ -2471,15 +2496,14 @@ void worker_t::work()
         /** Check if the connection limit has been exceeded */
         if (globalConnectionCounter.load(std::memory_order_relaxed) >= UserData::getInstance().connections) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end("CONNECTION_LIMIT_REACHED");
+            res->writeStatus("403 Forbidden")->end("MAX_CONNECTION_LIMIT_REACHED");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                        << "\"trigger\":\"CONNECTION_LIMIT_REACHED\", "  
+                        << "\"trigger\":\"MAX_CONNECTION_LIMIT_REACHED\", "  
                         << "\"code\":3002, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"rid\":\"" << upgradeData->rid << "\", "
                         << "\"message\":\"You have reached the max limit of allowed connections!\"}";
 
                 std::string body = payload.str(); 
@@ -2506,7 +2530,6 @@ void worker_t::work()
                         << "\"trigger\":\"INVALID_API_KEY\", "  
                         << "\"code\":3003, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"rid\":\"" << upgradeData->rid << "\", "
                         << "\"message\":\"The API key is invalid.\"}";
 
                 std::string body = payload.str(); 
@@ -2526,7 +2549,6 @@ void worker_t::work()
             upgradeData->httpRes->cork([upgradeData]() {
                 upgradeData->httpRes->template upgrade<PerSocketData>({
                     /* We initialize PerSocketData struct here */
-                    .rid = "",
                     .key = upgradeData->key,
                     .uid = upgradeData->uid,
                     .roomType = 255,  
