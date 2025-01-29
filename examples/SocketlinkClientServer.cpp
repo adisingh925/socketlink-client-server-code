@@ -1411,80 +1411,69 @@ void fetchAndPopulateUserData() {
 void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker) {
     std::string rid = ws->getUserData()->rid;
 
-    /** unsubscribe the user from the room */
-    if(rid.length() > 0){
+    /** Unsubscribe the user from the room */
+    if (!rid.empty()) {
         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
+
         int size = 0;
 
         /** Check if the room exists in the topics map */
         if (topics.find(outer_accessor, rid)) {
-            /** Access the inner map corresponding to 'rid' */
-            tbb::concurrent_hash_map<std::string, bool>& inner_map = outer_accessor->second;
+            auto& inner_map = outer_accessor->second;
 
-            /** Create accessor for the inner map */
-            tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
-
-            /** Erase the key (uid) from the inner map */
-            if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
-                inner_map.erase(inner_accessor);
+            /** Remove user from the inner map */
+            {
+                tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+                if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
+                    inner_map.erase(inner_accessor);
+                }
             }
 
             size = inner_map.size();
 
-            /** Check if the inner map is now empty */
+            /** Remove room if empty */
             if (size == 0) {
-                /** Perform operations when the inner map is empty */
-                
-                /** Delete the messages from LMDB */
-                /* delete_worker(rid); */
+                /** Delete LMDB messages */
+                // delete_worker(rid);
 
-                /** Erase the room from the topics map */
+                /** Remove room from topics */
                 topics.erase(outer_accessor);
 
-                /** Clear the disabled connections for the room */
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor disabledConnectionAccessor;
-                if (disabledConnections.find(disabledConnectionAccessor, rid)) {
-                    /** Erase the key (rid) from the outer map, which also removes the inner map */
-                    disabledConnections.erase(disabledConnectionAccessor);
-                }
-
-
-                /** Clear the banned connections for the room */
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedConnectionAccessor;
-                if (bannedConnections.find(bannedConnectionAccessor, rid)) {
-                    /** Erase the key (rid) from the outer map, which also removes the inner map */
-                    bannedConnections.erase(bannedConnectionAccessor);
+                /** Remove disabled and banned connections */
+                for (auto& map : {&disabledConnections, &bannedConnections}) {
+                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor map_accessor;
+                    if (map->find(map_accessor, rid)) {
+                        map->erase(map_accessor);
+                    }
                 }
             }
         }
 
-        if(worker->thread_->get_id() != std::this_thread::get_id()){
-            /** if the parent thread for this websocket is different, defer it to that thread */
-            worker->loop_->defer([ws, rid]() {
-                ws->unsubscribe(rid);
-            });
+        /** Unsubscribe on the correct thread */
+        auto unsubscribe_fn = [ws, rid]() { ws->unsubscribe(rid); };
+        if (worker->thread_->get_id() != std::this_thread::get_id()) {
+            worker->loop_->defer(unsubscribe_fn);
         } else {
-            ws->unsubscribe(rid);  
-        }      
+            unsubscribe_fn();
+        }
 
-        /**
-         * Broadcast the message to rest of the members of the group informing about the disconnection
-         */
-        if(ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) 
-        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE)  
-        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE)  
-        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-        ){
-            std::ostringstream payload;
-            payload << "{\"event\":\"SOMEONE_LEFT_THE_ROOM\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
-            std::string result = payload.str();
+        /** Broadcast disconnect message */
+        static const std::unordered_set<uint8_t> validRoomTypes = {
+            static_cast<uint8_t>(Rooms::PUBLIC_STATE),
+            static_cast<uint8_t>(Rooms::PRIVATE_STATE),
+            static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE),
+            static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        };
 
-            std::for_each(::workers.begin(), ::workers.end(), [rid, result](worker_t &w) {
-                /** Defer the message publishing to the worker's loop */ 
+        if (validRoomTypes.count(ws->getUserData()->roomType)) {
+            std::string result = R"({"event":"SOMEONE_LEFT_THE_ROOM", "uid":")" + ws->getUserData()->uid + R"("})";
+
+            /** Publish message to all workers */
+            for (auto& w : ::workers) {
                 w.loop_->defer([&w, rid, result]() {
                     w.app_->publish(rid, result, uWS::OpCode::TEXT, true);
                 });
-            });
+            }
         }
 
         /** connection close webhooks */
@@ -1850,81 +1839,71 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 }
 
 void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker) {
-    if(ws->getUserData()->rid.length() > 0){
-        /** subscribing to the room in the same thread where the ws instance was created */
-        if(worker->thread_->get_id() == std::this_thread::get_id()){
-            ws->subscribe(ws->getUserData()->rid);
-        } else {
-            /** Defer the subscription to the worker's loop */
-            worker->loop_->defer([ws]() {
-                ws->subscribe(ws->getUserData()->rid);
-            });
+    if (!ws->getUserData()->rid.empty()) {
+    const auto& rid = ws->getUserData()->rid;
+    const auto& uid = ws->getUserData()->uid;
+    auto currentThreadId = std::this_thread::get_id();
+    auto workerThreadId = worker->thread_->get_id();
+
+    /** Subscribe to the room in the same thread where the ws instance was created */
+    if (workerThreadId == currentThreadId) {
+        ws->subscribe(rid);
+    } else {
+        worker->loop_->defer([ws, rid]() {
+            ws->subscribe(rid);
+        });
+    }
+
+    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
+    int size = 0;
+
+    /** Insert user into topics map */
+    if (topics.find(topicsAccessor, rid)) {
+        /** Room exists, add UID if not present */
+        auto& innerMap = topicsAccessor->second;
+        tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
+        if (!innerMap.find(innerAccessor, uid)) {
+            innerMap.insert(innerAccessor, uid);
+            innerAccessor->second = true;
         }
+        size = innerMap.size();
+    } else {
+        /** Room does not exist, create a new entry */
+        tbb::concurrent_hash_map<std::string, bool> newInnerMap;
+        newInnerMap.insert({uid, true});
+        topics.insert(topicsAccessor, rid);
+        topicsAccessor->second = std::move(newInnerMap);
+        size = 1;
+    }
 
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessorForWebhooks;
-        int size = 0;
+    /** Send a message to self */
+    std::string selfMessage = "{\"event\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\"}";
 
-        /** Check if the room exists in the topics map */
-        if (topics.find(topicsAccessorForWebhooks, ws->getUserData()->rid)) {
-            /** If the room exists, insert the uid into the inner map */
-            tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
-            if (topicsAccessorForWebhooks->second.find(innerAccessor, ws->getUserData()->uid)) {
-                /** UID already exists, no need to insert */ 
-                innerAccessor.release();
-            } else {
-                /** Insert the new UID */ 
-                topicsAccessorForWebhooks->second.insert(innerAccessor, ws->getUserData()->uid);
-                innerAccessor->second = true;
-            }
+    if (workerThreadId == currentThreadId) {
+        ws->send(selfMessage, uWS::OpCode::TEXT, true);
+    } else {
+        worker->loop_->defer([ws, selfMessage]() {
+            ws->send(selfMessage, uWS::OpCode::TEXT, true);
+        });
+    }
 
-            /** Calculate the size of the inner map after insertion */
-            size = topicsAccessorForWebhooks->second.size();
-        } else {
-            /** Insert the new inner map into the main map under the given rid */
-            tbb::concurrent_hash_map<std::string, bool> newInnerMap;
-            newInnerMap.insert({ws->getUserData()->uid, true});
-            topics.insert(topicsAccessorForWebhooks, ws->getUserData()->rid);
-            topicsAccessorForWebhooks->second = std::move(newInnerMap);
+    /** Broadcast the message to others if the room is public/private */
+    if (ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
+        ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
+        ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
+        ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
+        
+            std::string broadcastMessage = "{\"event\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\"}";
 
-            /** Since only 1 element is there, size is 1 */
-            size = 1;
-        }
-
-        /** Send a message to self */
-        std::ostringstream payload;
-        payload << "{\"event\":\"CONNECTED_TO_ROOM\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
-        std::string result = payload.str(); 
-
-        if(worker->thread_->get_id() == std::this_thread::get_id()){
-            ws->send(result, uWS::OpCode::TEXT, true);
-        } else {
-            /** Defer the message sending to the worker's loop */
-            worker->loop_->defer([ws, result]() {
-                ws->send(result, uWS::OpCode::TEXT, true);
-            });
-        }
-
-        /** Broadcast the message to rest of the members of the group informing about the new connection */
-        if(ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE)  
-        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE)  
-        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE)   
-        || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)  
-        ){
-            std::ostringstream payload;
-            payload << "{\"event\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" << ws->getUserData()->uid << "\"}";
-            std::string result = payload.str();
-
-            std::for_each(::workers.begin(), ::workers.end(), [&ws, result, worker](worker_t &w) {
-                /** Check if the current thread ID matches the worker's thread ID */ 
-                if (worker->thread_->get_id() == w.thread_->get_id()) {
-                    ws->publish(ws->getUserData()->rid, result, uWS::OpCode::TEXT, true);
-                }else{
-                    /** Defer the message publishing to the worker's loop */ 
-                    w.loop_->defer([&w, &ws, result]() {
-                        w.app_->publish(ws->getUserData()->rid, result, uWS::OpCode::TEXT, true);
+            for (auto& w : ::workers) {
+                if (workerThreadId == w.thread_->get_id()) {
+                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                } else {
+                    w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
+                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
                     });
                 }
-            });
+            }
         }
 
         /** fire connection open webhook */
@@ -2560,34 +2539,36 @@ void worker_t::work()
     .open = [this](auto *ws) {
         WebSocketData data;
         data.ws = ws;
-        data.worker = this; 
+        data.worker = this;
 
-        /** thread safe */
+        std::string userId = ws->getUserData()->uid;
+
+        /** Thread-safe insertion into connections map */
         tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
-        if (!connections.find(conn_accessor, ws->getUserData()->uid)) {
-            /** Insert the new data if the uid doesn't already exist */
-            connections.insert(conn_accessor, ws->getUserData()->uid);
-            conn_accessor->second = data;  
+        bool inserted = connections.insert(conn_accessor, userId);
+        if (inserted) {
+            conn_accessor->second = std::move(data);
         } else {
-            /** something wrong has happended */
+            /** UID already exists, something went wrong */
             ws->end();
+            return;
         }
 
-        /** thread safe */
+        /** Increment global connection counter */
         globalConnectionCounter.fetch_add(1, std::memory_order_relaxed);
 
-        /** inserting the data for uid (thread safe) */
+        /** Thread-safe insertion into uid map */
         tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
-        if (!uid.find(user_accessor, ws->getUserData()->uid)) {
-            /** The uid doesn't exist, insert it */ 
-            uid.insert(user_accessor, ws->getUserData()->uid);
-            user_accessor->second = true;  
+        if (uid.insert(user_accessor, userId)) {
+            user_accessor->second = true;
         } else {
-            /** something wrong has happended */
+            /** UID already exists, something went wrong */
             ws->end();
+            return;
         }
 
-        ws->subscribe(ws->getUserData()->uid);
+        /** Subscribe to channels */
+        ws->subscribe(userId);
         ws->subscribe(BROADCAST);
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
@@ -2962,28 +2943,32 @@ void worker_t::work()
         /** automatically handled */
     },
     .close = [this](auto *ws, int /* code */, std::string_view /* message */) {
+        std::string userId = ws->getUserData()->uid;
 
-        /** thread safe */
-        tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
-        if (connections.find(conn_accessor, ws->getUserData()->uid)) {
-            /** If the uid is found, erase it */
-            connections.erase(conn_accessor);  
+        /** Thread-safe removal from connections map */
+        {
+            tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
+            if (connections.find(conn_accessor, userId)) {
+                connections.erase(conn_accessor);  // Correct usage
+            }
         }
 
-        /** thread safe */
+        /** Decrement global connection counter */
         globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
-        
-        /** Remove the uid from the set (thread safe) */
-        tbb::concurrent_hash_map<std::string, bool>::accessor uid_accessor;
-        if (uid.find(uid_accessor, ws->getUserData()->uid)) {
-            /** If the uid is found, erase it */
-            uid.erase(uid_accessor);  
+
+        /** Thread-safe removal from uid map */
+        {
+            tbb::concurrent_hash_map<std::string, bool>::accessor uid_accessor;
+            if (uid.find(uid_accessor, userId)) {
+                uid.erase(uid_accessor);  // Correct usage
+            }
         }
 
-        /** manually unsubscribing */
-        ws->unsubscribe(ws->getUserData()->uid);
+        /** Manually unsubscribing */
+        ws->unsubscribe(userId);
         ws->unsubscribe(BROADCAST);
 
+        /** Close connection */
         closeConnection(ws, this);
     }
     }).get("/api/v1/metrics", [](auto *res, auto *req) {
