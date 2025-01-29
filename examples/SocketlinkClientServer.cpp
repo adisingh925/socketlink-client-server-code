@@ -2278,17 +2278,21 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 /**
  * HTTP Webhook Error Codes
  * 
- * CONNECTION_BANNED_GLOBALLY - 3000
+ * ON_CONNECTION_UPGRADE_REJECTED
+ * 
+ * CONNECTION_BANNED_GLOBALLY - 3580
+ * MAX_CONNECTION_LIMIT_REACHED - 3982
+ * INVALID_API_KEY - 3203
+ * UID_ALREADY_EXIST - 3780
+ * EMPTY_UID - 3291
+ * 
  * CONNECTION_BANNED_ON_ROOM - 3001
- * CONNECTION_LIMIT_REACHED - 3002
- * INVALID_API_KEY - 3003
  * INVALID_ROOM_ID_LENGTH - 3004
  * INVALID_ROOM_TYPE - 3005
  * ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED - 3006
- * ON_RATE_LIMIT_EXCEEDED - 3007
- * ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED - 3008
- * ON_MESSAGE_SIZE_EXCEEDED - 3009
- * UID_ALREADY_EXIST - 3010
+ * ON_RATE_LIMIT_EXCEEDED - 3237
+ * ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED - 3758
+ * ON_MESSAGE_SIZE_EXCEEDED - 3349
  * 
  * Verification Codes
  * 
@@ -2412,7 +2416,7 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"EMPTY_UID\", "
-                        << "\"code\":3000, "
+                        << "\"code\":3291, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"message\":\"uid cannot be empty!\"}";
 
@@ -2448,9 +2452,9 @@ void worker_t::work()
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                             << "\"trigger\":\"CONNECTION_BANNED_GLOBALLY\", "
-                            << "\"code\":3000, "
+                            << "\"code\":3580, "
                             << "\"uid\":\"" << upgradeData->uid << "\", "
-                            << "\"message\":\"This connection is globally banned by the admin.\"}";
+                            << "\"message\":\"This connection is globally banned by the admin!\"}";
 
                     std::string body = payload.str();
 
@@ -2476,9 +2480,9 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"UID_ALREADY_EXIST\", "  
-                        << "\"code\":3010, "
+                        << "\"code\":3780, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"message\":\"There is already a connection using this UID.\"}";
+                        << "\"message\":\"There is already a connection using this UID!\"}";
 
                 std::string body = payload.str(); 
                 
@@ -2502,7 +2506,7 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"MAX_CONNECTION_LIMIT_REACHED\", "  
-                        << "\"code\":3002, "
+                        << "\"code\":3982, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"message\":\"You have reached the max limit of allowed connections!\"}";
 
@@ -2528,9 +2532,9 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"INVALID_API_KEY\", "  
-                        << "\"code\":3003, "
+                        << "\"code\":3203, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"message\":\"The API key is invalid.\"}";
+                        << "\"message\":\"The API key is invalid!\"}";
 
                 std::string body = payload.str(); 
                 
@@ -2596,15 +2600,19 @@ void worker_t::work()
         ws->subscribe(BROADCAST);
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
+        auto& userData = *ws->getUserData();
+        auto uid = userData.uid;
+        auto rid = userData.rid;
+
         /** Check if messaging is disabled for the user */
         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
         tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
 
         if (isMessagingDisabled.load(std::memory_order_relaxed) ||
             (disabledConnections.find(outer_accessor, "global") &&
-            outer_accessor->second.find(inner_accessor, ws->getUserData()->uid)) ||
-            (disabledConnections.find(outer_accessor, ws->getUserData()->rid) &&
-            outer_accessor->second.find(inner_accessor, ws->getUserData()->uid))) {
+            outer_accessor->second.find(inner_accessor, uid)) ||
+            (disabledConnections.find(outer_accessor, rid) &&
+            outer_accessor->second.find(inner_accessor, uid))) {
             
             ws->send("{\"event\":\"MESSAGING_DISABLED\"}", uWS::OpCode::TEXT, true);
         } else {
@@ -2617,8 +2625,8 @@ void worker_t::work()
                 if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_MESSAGE_SIZE_EXCEEDED\", "
-                            << "\"code\":3009, "
-                            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                            << "\"code\":3349, "
+                            << "\"uid\":\"" << uid << "\", "
                             << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msgSizeAllowedInBytes << "\"}";            
                     
                     std::string body = payload.str(); 
@@ -2641,8 +2649,8 @@ void worker_t::work()
                     if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
-                                << "\"code\":3007, "
-                                << "\"uid\":\"" << ws->getUserData()->uid << "\"}";
+                                << "\"code\":3237, "
+                                << "\"uid\":\"" << uid << "\"}";
 
                         std::string body = payload.str(); 
                         
@@ -2655,7 +2663,6 @@ void worker_t::work()
                     }
                 } else {
                     if (totalPayloadSent.load(std::memory_order_relaxed) < UserData::getInstance().maxMonthlyPayloadInBytes) {
-                        std::string rid = ws->getUserData()->rid;
                         unsigned int subscribers = app_->numSubscribers(rid);
 
                         /** Calculate cooldown duration */
@@ -2676,11 +2683,11 @@ void worker_t::work()
                             || ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
                             ){
                                 /** write the data in the local storage */
-                                write_worker(rid, ws->getUserData()->uid, std::string(message));
+                                write_worker(rid, uid, std::string(message));
 
                                 /** SQL integration works in cache channels only */
                                 if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
-                                    db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), ws->getUserData()->uid, rid);
+                                    db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid, rid);
                                 }
                             }
 
@@ -2704,8 +2711,8 @@ void worker_t::work()
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
                                                 << "\"code\":5017, "
-                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"uid\":\"" << uid << "\", "
+                                                << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}"; 
 
                                         std::string body = payload.str(); 
@@ -2725,8 +2732,8 @@ void worker_t::work()
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
                                                 << "\"code\":5018, "
-                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"uid\":\"" << uid << "\", "
+                                                << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";  
 
                                         std::string body = payload.str(); 
@@ -2746,8 +2753,8 @@ void worker_t::work()
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
                                                 << "\"code\":5019, "
-                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"uid\":\"" << uid << "\", "
+                                                << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}"; 
 
                                         std::string body = payload.str();
@@ -2767,8 +2774,8 @@ void worker_t::work()
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
                                                 << "\"code\":5020, "
-                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"uid\":\"" << uid << "\", "
+                                                << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
 
                                         std::string body = payload.str(); 
@@ -2788,8 +2795,8 @@ void worker_t::work()
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
                                                 << "\"code\":5021, "
-                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"uid\":\"" << uid << "\", "
+                                                << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
 
                                         std::string body = payload.str(); 
@@ -2809,8 +2816,8 @@ void worker_t::work()
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
                                                 << "\"code\":5022, "
-                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"uid\":\"" << uid << "\", "
+                                                << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
 
                                         std::string body = payload.str(); 
@@ -2830,8 +2837,8 @@ void worker_t::work()
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
                                                 << "\"code\":5023, "
-                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"uid\":\"" << uid << "\", "
+                                                << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
 
                                         std::string body = payload.str(); 
@@ -2851,8 +2858,8 @@ void worker_t::work()
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
                                                 << "\"code\":5024, "
-                                                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                                << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                                << "\"uid\":\"" << uid << "\", "
+                                                << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
 
                                         std::string body = payload.str(); 
@@ -2880,9 +2887,9 @@ void worker_t::work()
                         if(webhookStatus[Webhooks::ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED] == 1){
                             std::ostringstream payload;
                             payload << "{\"event\":\"ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\", "
-                                    << "\"code\":3008, "
-                                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                                    << "\"rid\":\"" << ws->getUserData()->rid << "\", "
+                                    << "\"code\":3758, "
+                                    << "\"uid\":\"" << uid << "\", "
+                                    << "\"rid\":\"" << rid << "\", "
                                     << "\"max_monthly_payload_in_bytes\":\"" << UserData::getInstance().maxMonthlyPayloadInBytes << "\"}";              
                             std::string body = payload.str(); 
                             
@@ -2902,8 +2909,8 @@ void worker_t::work()
                 if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
-                            << "\"code\":3007, "
-                            << "\"uid\":\"" << ws->getUserData()->uid << "\"}";
+                            << "\"code\":3237, "
+                            << "\"uid\":\"" << uid << "\"}";
 
                     std::string body = payload.str(); 
                     
