@@ -309,8 +309,6 @@ private:
      */
     bool insertBatchData() {
         try {
-            checkConnection();  /**< Ensure connection is established */
-
             if (!conn || batch_data.empty()){
                 batch_data.clear();  /**< Clear the batch data if empty */
                 return false;
@@ -366,6 +364,10 @@ private:
             return true;
         } catch (const MySQLException& e) {
             std::cerr << "Batch Insertion Error: " << e.what() << std::endl;
+
+            /** clearing the batch data */
+            batch_data.clear();
+
             return false;
         }
     }
