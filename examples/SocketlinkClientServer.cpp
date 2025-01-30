@@ -310,7 +310,11 @@ private:
     bool insertBatchData() {
         try {
             checkConnection();  /**< Ensure connection is established */
-            if (!conn || batch_data.empty()) return false;
+
+            if (!conn || batch_data.empty()){
+                batch_data.clear();  /**< Clear the batch data if empty */
+                return false;
+            }
 
             /** Build the query for batch insertion */
             std::string query = "INSERT INTO socketlink_messages (insert_time, message, identifier, room) VALUES ";
@@ -1677,7 +1681,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
             /** Remove room if empty */
             if (size == 0) {
                 /** Delete LMDB messages */
-                // delete_worker(rid);
+                /* delete_worker(rid); */
 
                 /** Remove room from topics */
                 topics.erase(outer_accessor);
