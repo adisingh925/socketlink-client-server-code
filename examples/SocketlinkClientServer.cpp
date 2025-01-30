@@ -212,10 +212,6 @@ public:
 //     }
 // };
 
-#include <stdexcept>
-#include <iostream>
-#include <mysql/mysql.h>
-
 class MySQLConnectionHandler {
 private:
     MYSQL *conn;  /**< MySQL connection object */
