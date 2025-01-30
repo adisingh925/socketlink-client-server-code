@@ -1410,13 +1410,13 @@ void sendHTTPSPOSTRequestFireAndForget(
             ssl_socket = nullptr;  
 
             /** dangerous retry */
-            sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);
+            /* sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers); */
         }else if (e.code() == boost::asio::error::connection_reset) {
             /** connection reset by peer */
             ssl_socket = nullptr;
 
             /** dangerous retry */
-            sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);  
+            /* sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers); */
         } else {
             /** some other error has occurred */
         }
