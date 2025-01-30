@@ -248,6 +248,8 @@ private:
             fprintf(stderr, "mysql_real_connect() failed: %s\n", mysql_error(conn));
             mysql_close(conn);  /**< Close connection on failure */
             conn = NULL;
+        } else{
+            createTableIfNotExists();  /**< Create the table if it doesn't exist */
         }
     }
 
