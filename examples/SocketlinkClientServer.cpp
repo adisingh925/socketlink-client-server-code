@@ -18,8 +18,7 @@
 #include <lmdb.h>
 #include <chrono>
 #include <condition_variable>
-#include <mysql_driver.h>
-#include <mysql_connection.h>
+#include <mysql/mysql.h>
 #include <cppconn/prepared_statement.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
@@ -62,154 +61,348 @@ public:
     UserData& operator=(const UserData&) = delete;
 };
 
+// class MySQLConnectionHandler {
+// private:
+//     std::unique_ptr<sql::Connection> con;
+//     std::vector<std::tuple<std::string, std::string, std::string, std::string>> batch_data;
+
+//     /** Create a new connection to the database */
+//     void createConnection() {
+//         try {       
+//             if (con && !con->isClosed()) {
+//                 con->close();
+//             }
+
+//             con.reset(); 
+
+//             auto *driver = sql::mysql::get_mysql_driver_instance();
+
+//             sql::ConnectOptionsMap connection_properties;
+//             connection_properties["hostName"] = UserData::getInstance().dbHost;
+//             connection_properties["userName"] = UserData::getInstance().dbUser;
+//             connection_properties["password"] = UserData::getInstance().dbPassword;
+//             connection_properties["schema"] = UserData::getInstance().dbName;
+//             connection_properties["port"] = UserData::getInstance().dbPort;
+//             connection_properties["OPT_CONNECT_TIMEOUT"] = 3;  
+
+//             /** Create a new connection */ 
+//             con = std::unique_ptr<sql::Connection>(driver->connect(connection_properties));
+
+//             /** Set the schema */ 
+//             con->setSchema(UserData::getInstance().dbName);
+
+//             /** Ensure the table exists */ 
+//             createTableIfNotExists();
+//         } catch (const sql::SQLException &e) {
+//             std::cerr << "Error creating connection: " << e.what() << std::endl;
+//             con.reset();
+//         }
+//     }
+
+//     void checkConnection() {
+//         if (!con || con->isClosed()) {  
+//             /** connection is lost reconnecting */
+//             createConnection();
+//         }
+//     }
+
+//     /** Create the table if it does not exist */
+//     void createTableIfNotExists() {
+//         try {
+//             const std::string createTableQuery = R"(
+//                 CREATE TABLE IF NOT EXISTS socketlink_messages (
+//                     id INT AUTO_INCREMENT PRIMARY KEY,
+//                     insert_time DATETIME NOT NULL,
+//                     message TEXT NOT NULL,
+//                     identifier VARCHAR(255) NOT NULL,
+//                     room VARCHAR(255) NOT NULL
+//                 );
+//             )";
+
+//             auto stmt = std::unique_ptr<sql::Statement>(con->createStatement());
+//             stmt->execute(createTableQuery);
+//         } catch (const sql::SQLException &e) {
+//             std::cerr << "Error creating table: " << e.what() << std::endl;
+//         }
+//     }
+
+//     /** Insert the batch of data into the database */
+//     bool insertBatchData() {
+//         try {
+//             checkConnection();  
+
+//             if (!con) {
+//                 /** no active connection, cannot insert batch */
+//                 return false;
+//             }
+
+//             /** Construct the insert query for the batch */
+//             std::ostringstream oss;
+//             oss << "INSERT INTO socketlink_messages (insert_time, message, identifier, room) VALUES ";
+//             for (size_t i = 0; i < batch_data.size(); ++i) {
+//                 if (i > 0) oss << ", ";
+//                 oss << "(?, ?, ?, ?)";
+//             }
+
+//             /** Prepare the statement */
+//             auto pstmt = std::unique_ptr<sql::PreparedStatement>(con->prepareStatement(oss.str()));
+
+//             /** Bind parameters for the batch */
+//             int paramIndex = 1;
+//             for (const auto& [insert_time, message, identifier, room] : batch_data) {
+//                 pstmt->setString(paramIndex++, insert_time);
+//                 pstmt->setString(paramIndex++, message);
+//                 pstmt->setString(paramIndex++, identifier);
+//                 pstmt->setString(paramIndex++, room);
+//             }
+
+//             /** Execute the batch */
+//             pstmt->execute();
+//             /* std::cout << "Inserted " << batch_data.size() << " rows into the database.\n"; */
+
+//             /** Clear the batch after executing */
+//             batch_data.clear();
+//             return true;
+//         } catch (const sql::SQLException &e) {
+//             std::cerr << "Batch insertion error: " << e.what() << std::endl;
+
+//             /** If error is connection-related, try reconnecting */ 
+//             if (e.getErrorCode() == 2006 || e.getErrorCode() == 2013) {  /** MySQL server has gone away */ 
+//                 std::cerr << "Attempting to reconnect..." << std::endl;
+//                 createConnection();
+//             }
+
+//             return false;
+//         }
+//     }
+
+// public:
+//     MySQLConnectionHandler() {
+//         createConnection();
+//     }
+
+//     /** Add a single entry to the batch and insert if batch size is reached */
+//     void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier, const std::string& room) {
+//         batch_data.push_back(std::make_tuple(insert_time, message, identifier, room));
+
+//         if (batch_data.size() >= 1000) {
+//             /** Execute the batch and clear the batch data */
+//             insertBatchData();
+//         }
+//     }
+
+//     /** Flush any remaining data in the batch */
+//     void flushRemainingData() {
+//         if (!batch_data.empty()) {
+//             insertBatchData();
+//         }
+//     }
+
+//     /** Public function to manually create the database connection */
+//     void manualCreateConnection() {
+//         createConnection(); /** Calls the private method */ 
+//     }
+
+//     void disconnect() {
+//         if (con && !con->isClosed()) {
+//             con->close();
+//         }
+
+//         con.reset();
+//     }
+// };
+
 class MySQLConnectionHandler {
 private:
-    std::unique_ptr<sql::Connection> con;
-    std::vector<std::tuple<std::string, std::string, std::string, std::string>> batch_data;
+    MYSQL *conn;  /**< MySQL connection object */
+    std::vector<std::tuple<std::string, std::string, std::string, std::string>> batch_data;  /**< Holds batch data to be inserted */
 
-    /** Create a new connection to the database */
+    /**
+     * Establishes a connection to the MySQL database.
+     * Closes any existing connection and initializes a new one.
+     */
     void createConnection() {
-        try {       
-            if (con && !con->isClosed()) {
-                con->close();
-            }
+        if (conn) {
+            mysql_close(conn);  /**< Close existing connection */
+        }
 
-            con.reset(); 
+        conn = mysql_init(NULL);  /**< Initialize a new MySQL connection */
+        if (!conn) {
+            fprintf(stderr, "mysql_init() failed\n");
+            return;
+        }
 
-            auto *driver = sql::mysql::get_mysql_driver_instance();
+        /** Set timeout for MySQL connection (in seconds) */
+        unsigned int timeout = 3;
+        mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
 
-            sql::ConnectOptionsMap connection_properties;
-            connection_properties["hostName"] = UserData::getInstance().dbHost;
-            connection_properties["userName"] = UserData::getInstance().dbUser;
-            connection_properties["password"] = UserData::getInstance().dbPassword;
-            connection_properties["schema"] = UserData::getInstance().dbName;
-            connection_properties["port"] = UserData::getInstance().dbPort;
-            connection_properties["OPT_CONNECT_TIMEOUT"] = 3;  
-
-            /** Create a new connection */ 
-            con = std::unique_ptr<sql::Connection>(driver->connect(connection_properties));
-
-            /** Set the schema */ 
-            con->setSchema(UserData::getInstance().dbName);
-
-            /** Ensure the table exists */ 
-            createTableIfNotExists();
-        } catch (const sql::SQLException &e) {
-            std::cerr << "Error creating connection: " << e.what() << std::endl;
-            con.reset();
+        /** Attempt to establish a connection using credentials */
+        if (!mysql_real_connect(
+            conn, 
+            UserData::getInstance().dbHost.c_str(), 
+            UserData::getInstance().dbUser.c_str(), 
+            UserData::getInstance().dbPassword.c_str(), 
+            UserData::getInstance().dbName.c_str(), 
+            UserData::getInstance().dbPort, NULL, 0
+        )) {
+            fprintf(stderr, "mysql_real_connect() failed: %s\n", mysql_error(conn));
+            mysql_close(conn);  /**< Close connection on failure */
+            conn = NULL;
         }
     }
 
+    /**
+     * Ensures there is an active MySQL connection.
+     * If not, it creates a new connection.
+     */
     void checkConnection() {
-        if (!con || con->isClosed()) {  
-            /** connection is lost reconnecting */
-            createConnection();
+        if (!conn) {
+            createConnection();  /**< Create a new connection if not present */
         }
     }
 
-    /** Create the table if it does not exist */
+    /**
+     * Creates the `socketlink_messages` table if it doesn't already exist.
+     * This table will store messages and metadata like timestamps, identifier, and room name.
+     */
     void createTableIfNotExists() {
-        try {
-            const std::string createTableQuery = R"(
-                CREATE TABLE IF NOT EXISTS socketlink_messages (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    insert_time DATETIME NOT NULL,
-                    message TEXT NOT NULL,
-                    identifier VARCHAR(255) NOT NULL,
-                    room VARCHAR(255) NOT NULL
-                );
-            )";
+        checkConnection();  /**< Ensure connection is established */
+        if (!conn) return;
 
-            auto stmt = std::unique_ptr<sql::Statement>(con->createStatement());
-            stmt->execute(createTableQuery);
-        } catch (const sql::SQLException &e) {
-            std::cerr << "Error creating table: " << e.what() << std::endl;
+        const char *query = 
+        "CREATE TABLE IF NOT EXISTS socketlink_messages ("
+        "id INT AUTO_INCREMENT PRIMARY KEY,"
+        "insert_time DATETIME NOT NULL,"
+        "message TEXT NOT NULL,"
+        "identifier VARCHAR(255) NOT NULL,"
+        "room VARCHAR(255) NOT NULL"
+        ")";
+
+        if (mysql_query(conn, query)) {
+            fprintf(stderr, "Table creation failed: %s\n", mysql_error(conn));  /**< Handle query failure */
         }
     }
 
-    /** Insert the batch of data into the database */
+    /**
+     * Inserts the batch data into the `socketlink_messages` table.
+     * The method prepares a batch query and uses parameterized statements to avoid SQL injection.
+     * 
+     * @return true if the batch insertion is successful, false otherwise.
+     */
     bool insertBatchData() {
-        try {
-            checkConnection();  
+        checkConnection();  /**< Ensure connection is established */
+        if (!conn || batch_data.empty()) return false;
 
-            if (!con) {
-                /** no active connection, cannot insert batch */
-                return false;
-            }
+        /** Build the query for batch insertion */
+        std::string query = "INSERT INTO socketlink_messages (insert_time, message, identifier, room) VALUES ";
+        for (size_t i = 0; i < batch_data.size(); ++i) {
+            if (i > 0) query += ", ";
+            query += "(?, ?, ?, ?)";
+        }
 
-            /** Construct the insert query for the batch */
-            std::ostringstream oss;
-            oss << "INSERT INTO socketlink_messages (insert_time, message, identifier, room) VALUES ";
-            for (size_t i = 0; i < batch_data.size(); ++i) {
-                if (i > 0) oss << ", ";
-                oss << "(?, ?, ?, ?)";
-            }
-
-            /** Prepare the statement */
-            auto pstmt = std::unique_ptr<sql::PreparedStatement>(con->prepareStatement(oss.str()));
-
-            /** Bind parameters for the batch */
-            int paramIndex = 1;
-            for (const auto& [insert_time, message, identifier, room] : batch_data) {
-                pstmt->setString(paramIndex++, insert_time);
-                pstmt->setString(paramIndex++, message);
-                pstmt->setString(paramIndex++, identifier);
-                pstmt->setString(paramIndex++, room);
-            }
-
-            /** Execute the batch */
-            pstmt->execute();
-            /* std::cout << "Inserted " << batch_data.size() << " rows into the database.\n"; */
-
-            /** Clear the batch after executing */
-            batch_data.clear();
-            return true;
-        } catch (const sql::SQLException &e) {
-            std::cerr << "Batch insertion error: " << e.what() << std::endl;
-
-            /** If error is connection-related, try reconnecting */ 
-            if (e.getErrorCode() == 2006 || e.getErrorCode() == 2013) {  /** MySQL server has gone away */ 
-                std::cerr << "Attempting to reconnect..." << std::endl;
-                createConnection();
-            }
-
+        MYSQL_STMT *stmt = mysql_stmt_init(conn);  /**< Initialize the prepared statement */
+        if (!stmt || mysql_stmt_prepare(stmt, query.c_str(), query.length())) {
+            fprintf(stderr, "Statement preparation failed: %s\n", mysql_error(conn));
             return false;
         }
+
+        /** Bind parameters to the prepared statement */
+        MYSQL_BIND bind[4 * batch_data.size()];
+        memset(bind, 0, sizeof(bind));
+        int paramIndex = 0;
+
+        /** Loop through batch data and bind values */
+        for (const auto &[insert_time, message, identifier, room] : batch_data) {
+            bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
+            bind[paramIndex].buffer = (void *)insert_time.c_str();
+            bind[paramIndex].buffer_length = insert_time.length();
+            paramIndex++;
+
+            bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
+            bind[paramIndex].buffer = (void *)message.c_str();
+            bind[paramIndex].buffer_length = message.length();
+            paramIndex++;
+
+            bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
+            bind[paramIndex].buffer = (void *)identifier.c_str();
+            bind[paramIndex].buffer_length = identifier.length();
+            paramIndex++;
+
+            bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
+            bind[paramIndex].buffer = (void *)room.c_str();
+            bind[paramIndex].buffer_length = room.length();
+            paramIndex++;
+        }
+
+        /** Bind the parameters to the statement and execute */
+        if (mysql_stmt_bind_param(stmt, bind) || mysql_stmt_execute(stmt)) {
+            fprintf(stderr, "Batch insertion failed: %s\n", mysql_stmt_error(stmt));
+            mysql_stmt_close(stmt);  /**< Close the statement on failure */
+            return false;
+        }
+
+        mysql_stmt_close(stmt);  /**< Close the statement after execution */
+        batch_data.clear();  /**< Clear the batch data after successful insertion */
+        return true;
     }
 
 public:
-    MySQLConnectionHandler() {
-        createConnection();
+    /**
+     * Constructor initializes the MySQL connection.
+     */
+    MySQLConnectionHandler() : conn(nullptr) {
+        createConnection();  /**< Create the initial connection */
     }
 
-    /** Add a single entry to the batch and insert if batch size is reached */
-    void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier, const std::string& room) {
-        batch_data.push_back(std::make_tuple(insert_time, message, identifier, room));
-
-        if (batch_data.size() >= 1000) {
-            /** Execute the batch and clear the batch data */
-            insertBatchData();
+    /**
+     * Destructor ensures that the MySQL connection is closed when the object is destroyed.
+     */
+    ~MySQLConnectionHandler() {
+        if (conn) {
+            mysql_close(conn);  /**< Close the connection if it exists */
         }
     }
 
-    /** Flush any remaining data in the batch */
+    /**
+     * Inserts a single message into the batch data.
+     * If the batch size reaches the threshold (1000), it triggers the batch insert.
+     * 
+     * @param insert_time The timestamp of the message.
+     * @param message The message content.
+     * @param identifier A unique identifier for the message.
+     * @param room The room name where the message belongs.
+     */
+    void insertSingleData(const std::string &insert_time, const std::string &message, const std::string &identifier, const std::string &room) {
+        batch_data.emplace_back(insert_time, message, identifier, room);
+        if (batch_data.size() >= 1000) {
+            insertBatchData();  /**< Insert the batch if the size exceeds the threshold */
+        }
+    }
+
+    /**
+     * Forces insertion of any remaining batch data into the database.
+     */
     void flushRemainingData() {
         if (!batch_data.empty()) {
-            insertBatchData();
+            insertBatchData();  /**< Insert the remaining data in the batch */
         }
     }
 
-    /** Public function to manually create the database connection */
+    /**
+     * Manually creates a connection to the database.
+     */
     void manualCreateConnection() {
-        createConnection(); /** Calls the private method */ 
+        createConnection();  /**< Manually create a connection to the database */
     }
 
+    /**
+     * Disconnects the MySQL connection.
+     */
     void disconnect() {
-        if (con && !con->isClosed()) {
-            con->close();
+        if (conn) {
+            mysql_close(conn);  /**< Close the connection */
+            conn = NULL;
         }
-
-        con.reset();
     }
 };
 
