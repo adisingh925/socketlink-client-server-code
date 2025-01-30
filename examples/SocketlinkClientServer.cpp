@@ -212,44 +212,56 @@ public:
 //     }
 // };
 
+#include <stdexcept>
+#include <iostream>
+#include <mysql/mysql.h>
+
 class MySQLConnectionHandler {
 private:
     MYSQL *conn;  /**< MySQL connection object */
     std::vector<std::tuple<std::string, std::string, std::string, std::string>> batch_data;  /**< Holds batch data to be inserted */
+
+    // Custom exception class for MySQL errors
+    class MySQLException : public std::runtime_error {
+    public:
+        explicit MySQLException(const std::string& message)
+            : std::runtime_error(message) {}
+    };
 
     /**
      * Establishes a connection to the MySQL database.
      * Closes any existing connection and initializes a new one.
      */
     void createConnection() {
-        if (conn) {
-            mysql_close(conn);  /**< Close existing connection */
-        }
+        try {
+            if (conn) {
+                mysql_close(conn);  /**< Close existing connection */
+            }
 
-        conn = mysql_init(NULL);  /**< Initialize a new MySQL connection */
-        if (!conn) {
-            fprintf(stderr, "mysql_init() failed\n");
-            return;
-        }
+            conn = mysql_init(NULL);  /**< Initialize a new MySQL connection */
+            if (!conn) {
+                throw MySQLException("mysql_init() failed");
+            }
 
-        /** Set timeout for MySQL connection (in seconds) */
-        unsigned int timeout = 3;
-        mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
+            /** Set timeout for MySQL connection (in seconds) */
+            unsigned int timeout = 3;
+            mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
 
-        /** Attempt to establish a connection using credentials */
-        if (!mysql_real_connect(
-            conn, 
-            UserData::getInstance().dbHost.c_str(), 
-            UserData::getInstance().dbUser.c_str(), 
-            UserData::getInstance().dbPassword.c_str(), 
-            UserData::getInstance().dbName.c_str(), 
-            UserData::getInstance().dbPort, NULL, 0
-        )) {
-            fprintf(stderr, "mysql_real_connect() failed: %s\n", mysql_error(conn));
-            mysql_close(conn);  /**< Close connection on failure */
-            conn = NULL;
-        } else{
+            /** Attempt to establish a connection using credentials */
+            if (!mysql_real_connect(
+                conn,
+                UserData::getInstance().dbHost.c_str(),
+                UserData::getInstance().dbUser.c_str(),
+                UserData::getInstance().dbPassword.c_str(),
+                UserData::getInstance().dbName.c_str(),
+                UserData::getInstance().dbPort, NULL, 0
+            )) {
+                throw MySQLException("mysql_real_connect() failed: " + std::string(mysql_error(conn)));
+            }
+
             createTableIfNotExists();  /**< Create the table if it doesn't exist */
+        } catch (const MySQLException& e) {
+            std::cerr << "MySQL Error: " << e.what() << std::endl;
         }
     }
 
@@ -258,8 +270,12 @@ private:
      * If not, it creates a new connection.
      */
     void checkConnection() {
-        if (!conn) {
-            createConnection();  /**< Create a new connection if not present */
+        try {
+            if (!conn) {
+                createConnection();  /**< Create a new connection if not present */
+            }
+        } catch (const MySQLException& e) {
+            std::cerr << "Connection Error: " << e.what() << std::endl;
         }
     }
 
@@ -268,20 +284,24 @@ private:
      * This table will store messages and metadata like timestamps, identifier, and room name.
      */
     void createTableIfNotExists() {
-        checkConnection();  /**< Ensure connection is established */
-        if (!conn) return;
+        try {
+            checkConnection();  /**< Ensure connection is established */
+            if (!conn) return;
 
-        const char *query = 
-        "CREATE TABLE IF NOT EXISTS socketlink_messages ("
-        "id INT AUTO_INCREMENT PRIMARY KEY,"
-        "insert_time DATETIME NOT NULL,"
-        "message TEXT NOT NULL,"
-        "identifier VARCHAR(255) NOT NULL,"
-        "room VARCHAR(255) NOT NULL"
-        ")";
+            const char* query =
+                "CREATE TABLE IF NOT EXISTS socketlink_messages ("
+                "id INT AUTO_INCREMENT PRIMARY KEY,"
+                "insert_time DATETIME NOT NULL,"
+                "message TEXT NOT NULL,"
+                "identifier VARCHAR(255) NOT NULL,"
+                "room VARCHAR(255) NOT NULL"
+                ")";
 
-        if (mysql_query(conn, query)) {
-            fprintf(stderr, "Table creation failed: %s\n", mysql_error(conn));  /**< Handle query failure */
+            if (mysql_query(conn, query)) {
+                throw MySQLException("Table creation failed: " + std::string(mysql_error(conn)));
+            }
+        } catch (const MySQLException& e) {
+            std::cerr << "Table Creation Error: " << e.what() << std::endl;
         }
     }
 
@@ -292,60 +312,62 @@ private:
      * @return true if the batch insertion is successful, false otherwise.
      */
     bool insertBatchData() {
-        checkConnection();  /**< Ensure connection is established */
-        if (!conn || batch_data.empty()) return false;
+        try {
+            checkConnection();  /**< Ensure connection is established */
+            if (!conn || batch_data.empty()) return false;
 
-        /** Build the query for batch insertion */
-        std::string query = "INSERT INTO socketlink_messages (insert_time, message, identifier, room) VALUES ";
-        for (size_t i = 0; i < batch_data.size(); ++i) {
-            if (i > 0) query += ", ";
-            query += "(?, ?, ?, ?)";
-        }
+            /** Build the query for batch insertion */
+            std::string query = "INSERT INTO socketlink_messages (insert_time, message, identifier, room) VALUES ";
+            for (size_t i = 0; i < batch_data.size(); ++i) {
+                if (i > 0) query += ", ";
+                query += "(?, ?, ?, ?)";
+            }
 
-        MYSQL_STMT *stmt = mysql_stmt_init(conn);  /**< Initialize the prepared statement */
-        if (!stmt || mysql_stmt_prepare(stmt, query.c_str(), query.length())) {
-            fprintf(stderr, "Statement preparation failed: %s\n", mysql_error(conn));
+            MYSQL_STMT* stmt = mysql_stmt_init(conn);  /**< Initialize the prepared statement */
+            if (!stmt || mysql_stmt_prepare(stmt, query.c_str(), query.length())) {
+                throw MySQLException("Statement preparation failed: " + std::string(mysql_error(conn)));
+            }
+
+            /** Bind parameters to the prepared statement */
+            MYSQL_BIND bind[4 * batch_data.size()];
+            memset(bind, 0, sizeof(bind));
+            int paramIndex = 0;
+
+            /** Loop through batch data and bind values */
+            for (const auto& [insert_time, message, identifier, room] : batch_data) {
+                bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
+                bind[paramIndex].buffer = (void*)insert_time.c_str();
+                bind[paramIndex].buffer_length = insert_time.length();
+                paramIndex++;
+
+                bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
+                bind[paramIndex].buffer = (void*)message.c_str();
+                bind[paramIndex].buffer_length = message.length();
+                paramIndex++;
+
+                bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
+                bind[paramIndex].buffer = (void*)identifier.c_str();
+                bind[paramIndex].buffer_length = identifier.length();
+                paramIndex++;
+
+                bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
+                bind[paramIndex].buffer = (void*)room.c_str();
+                bind[paramIndex].buffer_length = room.length();
+                paramIndex++;
+            }
+
+            /** Bind the parameters to the statement and execute */
+            if (mysql_stmt_bind_param(stmt, bind) || mysql_stmt_execute(stmt)) {
+                throw MySQLException("Batch insertion failed: " + std::string(mysql_stmt_error(stmt)));
+            }
+
+            mysql_stmt_close(stmt);  /**< Close the statement after execution */
+            batch_data.clear();  /**< Clear the batch data after successful insertion */
+            return true;
+        } catch (const MySQLException& e) {
+            std::cerr << "Batch Insertion Error: " << e.what() << std::endl;
             return false;
         }
-
-        /** Bind parameters to the prepared statement */
-        MYSQL_BIND bind[4 * batch_data.size()];
-        memset(bind, 0, sizeof(bind));
-        int paramIndex = 0;
-
-        /** Loop through batch data and bind values */
-        for (const auto &[insert_time, message, identifier, room] : batch_data) {
-            bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
-            bind[paramIndex].buffer = (void *)insert_time.c_str();
-            bind[paramIndex].buffer_length = insert_time.length();
-            paramIndex++;
-
-            bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
-            bind[paramIndex].buffer = (void *)message.c_str();
-            bind[paramIndex].buffer_length = message.length();
-            paramIndex++;
-
-            bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
-            bind[paramIndex].buffer = (void *)identifier.c_str();
-            bind[paramIndex].buffer_length = identifier.length();
-            paramIndex++;
-
-            bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
-            bind[paramIndex].buffer = (void *)room.c_str();
-            bind[paramIndex].buffer_length = room.length();
-            paramIndex++;
-        }
-
-        /** Bind the parameters to the statement and execute */
-        if (mysql_stmt_bind_param(stmt, bind) || mysql_stmt_execute(stmt)) {
-            fprintf(stderr, "Batch insertion failed: %s\n", mysql_stmt_error(stmt));
-            mysql_stmt_close(stmt);  /**< Close the statement on failure */
-            return false;
-        }
-
-        mysql_stmt_close(stmt);  /**< Close the statement after execution */
-        batch_data.clear();  /**< Clear the batch data after successful insertion */
-        return true;
     }
 
 public:
@@ -353,15 +375,23 @@ public:
      * Constructor initializes the MySQL connection.
      */
     MySQLConnectionHandler() : conn(nullptr) {
-        createConnection();  /**< Create the initial connection */
+        try {
+            createConnection();  /**< Create the initial connection */
+        } catch (const MySQLException& e) {
+            std::cerr << "Constructor Error: " << e.what() << std::endl;
+        }
     }
 
     /**
      * Destructor ensures that the MySQL connection is closed when the object is destroyed.
      */
     ~MySQLConnectionHandler() {
-        if (conn) {
-            mysql_close(conn);  /**< Close the connection if it exists */
+        try {
+            if (conn) {
+                mysql_close(conn);  /**< Close the connection if it exists */
+            }
+        } catch (const MySQLException& e) {
+            std::cerr << "Destructor Error: " << e.what() << std::endl;
         }
     }
 
@@ -374,10 +404,14 @@ public:
      * @param identifier A unique identifier for the message.
      * @param room The room name where the message belongs.
      */
-    void insertSingleData(const std::string &insert_time, const std::string &message, const std::string &identifier, const std::string &room) {
-        batch_data.emplace_back(insert_time, message, identifier, room);
-        if (batch_data.size() >= 1000) {
-            insertBatchData();  /**< Insert the batch if the size exceeds the threshold */
+    void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier, const std::string& room) {
+        try {
+            batch_data.emplace_back(insert_time, message, identifier, room);
+            if (batch_data.size() >= 1000) {
+                insertBatchData();  /**< Insert the batch if the size exceeds the threshold */
+            }
+        } catch (const MySQLException& e) {
+            std::cerr << "Insert Data Error: " << e.what() << std::endl;
         }
     }
 
@@ -385,8 +419,12 @@ public:
      * Forces insertion of any remaining batch data into the database.
      */
     void flushRemainingData() {
-        if (!batch_data.empty()) {
-            insertBatchData();  /**< Insert the remaining data in the batch */
+        try {
+            if (!batch_data.empty()) {
+                insertBatchData();  /**< Insert the remaining data in the batch */
+            }
+        } catch (const MySQLException& e) {
+            std::cerr << "Flush Data Error: " << e.what() << std::endl;
         }
     }
 
@@ -394,16 +432,24 @@ public:
      * Manually creates a connection to the database.
      */
     void manualCreateConnection() {
-        createConnection();  /**< Manually create a connection to the database */
+        try {
+            createConnection();  /**< Manually create a connection to the database */
+        } catch (const MySQLException& e) {
+            std::cerr << "Manual Connection Error: " << e.what() << std::endl;
+        }
     }
 
     /**
      * Disconnects the MySQL connection.
      */
     void disconnect() {
-        if (conn) {
-            mysql_close(conn);  /**< Close the connection */
-            conn = NULL;
+        try {
+            if (conn) {
+                mysql_close(conn);  /**< Close the connection */
+                conn = NULL;
+            }
+        } catch (const MySQLException& e) {
+            std::cerr << "Disconnect Error: " << e.what() << std::endl;
         }
     }
 };
