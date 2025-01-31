@@ -309,7 +309,7 @@ private:
      */
     bool insertBatchData() {
         try {
-            if (!conn || batch_data.empty()){
+            if (!conn){
                 batch_data.clear();  /**< Clear the batch data if empty */
                 return false;
             }
@@ -367,7 +367,6 @@ private:
 
             /** clearing the batch data */
             batch_data.clear();
-            batch_data.shrink_to_fit();
 
             return false;
         }
@@ -409,9 +408,14 @@ public:
      */
     void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier, const std::string& room) {
         try {
-            batch_data.emplace_back(insert_time, message, identifier, room);
-            if (batch_data.size() % 1000 == 0) {
-                insertBatchData();  /**< Insert the batch if the size exceeds the threshold */
+            if(batch_data.size() < 5000){
+                batch_data.emplace_back(insert_time, message, identifier, room);
+                if (batch_data.size() % 1000 == 0) {
+                    insertBatchData();  /**< Insert the batch if the size exceeds the threshold */
+                }
+            } else {
+                /** We need to clear the batch since it is not getting cleared because of some reasons */
+                batch_data.clear();
             }
         } catch (const MySQLException& e) {
             std::cerr << "Insert Data Error: " << e.what() << std::endl;
