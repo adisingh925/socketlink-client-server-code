@@ -410,7 +410,7 @@ public:
     void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier, const std::string& room) {
         try {
             batch_data.emplace_back(insert_time, message, identifier, room);
-            if (batch_data.size() >= 1000) {
+            if (batch_data.size() % 1000 == 0) {
                 insertBatchData();  /**< Insert the batch if the size exceeds the threshold */
             }
         } catch (const MySQLException& e) {
