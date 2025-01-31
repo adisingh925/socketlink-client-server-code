@@ -281,7 +281,6 @@ private:
      */
     void createTableIfNotExists() {
         try {
-            checkConnection();  /**< Ensure connection is established */
             if (!conn) return;
 
             const char* query =
@@ -367,6 +366,7 @@ private:
 
             /** clearing the batch data */
             batch_data.clear();
+            batch_data.shrink_to_fit();
 
             return false;
         }
