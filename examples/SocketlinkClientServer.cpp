@@ -253,9 +253,10 @@ private:
                 UserData::getInstance().dbPort, NULL, 0
             )) {
                 throw MySQLException("mysql_real_connect() failed: " + std::string(mysql_error(conn)));
+            } else {
+                mysql_query(conn, "SET SESSION query_cache_type = OFF");  /**< Disable query caching */
+                createTableIfNotExists();  /**< Create the table if it doesn't exist */
             }
-
-            createTableIfNotExists();  /**< Create the table if it doesn't exist */
         } catch (const MySQLException& e) {
             std::cerr << "MySQL Error: " << e.what() << std::endl;
         }
