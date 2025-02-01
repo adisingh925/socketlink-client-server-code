@@ -739,7 +739,7 @@ constexpr const char* BROADCAST = "SOCKETLINK_BROADCAST";
 constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 
 /** is logs enabled */
-constexpr bool LOGS_ENABLED = false;
+constexpr bool LOGS_ENABLED = true;
 
 /** HMAC-SHA256 Constants */
 constexpr int HMAC_SHA256_DIGEST_LENGTH = 32;  /**< SHA-256 produces a 32-byte (256-bit) output */
@@ -1198,7 +1198,7 @@ void sendHTTPSPOSTRequestFireAndForget(
 
         if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {  
             log("creating a new https connection");
-                
+
             ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
 
             /** Specify the endpoint using the IP address and port. 
