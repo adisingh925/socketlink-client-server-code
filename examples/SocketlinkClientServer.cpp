@@ -1145,7 +1145,7 @@ HTTPResponse sendHTTPSPOSTRequest(
     std::string baseURL, std::string path, 
     const std::string& body, 
     const httplib::Headers& headers = {}
-    ) {
+) {
     try
     {
         /** Create an HTTPS client for the IP service */ 
@@ -2465,6 +2465,7 @@ void worker_t::work()
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
+    .compression = uWS::SHARED_COMPRESSOR,
     .maxPayloadLength = 1024 * 1024,
     .idleTimeout = 60,
     .maxBackpressure = 4 * 1024,
