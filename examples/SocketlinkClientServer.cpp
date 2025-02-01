@@ -1196,7 +1196,9 @@ void sendHTTPSPOSTRequestFireAndForget(
 
         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
 
-        if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {      
+        if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {  
+            log("creating a new https connection");
+                
             ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
 
             /** Specify the endpoint using the IP address and port. 
