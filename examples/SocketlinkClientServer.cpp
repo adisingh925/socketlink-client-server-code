@@ -3543,41 +3543,96 @@ void worker_t::work()
                     return;
                 }
 
-                if (roomType >= static_cast<uint8_t>(Rooms::PRIVATE) && webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1) {
-                    std::ostringstream payload;
-                    payload << R"({"event":"ON_VERIFICATION_REQUEST", "trigger":")"
-                            << (roomType == static_cast<uint8_t>(Rooms::PRIVATE) ? "INIT_PRIVATE_ROOM_VERIFICATION" :
-                                roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ? "INIT_PRIVATE_STATE_ROOM_VERIFICATION" :
-                                roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) ? "INIT_PRIVATE_CACHE_ROOM_VERIFICATION" :
-                                "INIT_PRIVATE_STATE_CACHE_ROOM_VERIFICATION")
-                            << R"(", "code":)" << (4000 + (roomType - static_cast<uint8_t>(Rooms::PRIVATE)))
-                            << R"(, "uid":")" << uid << R"(", "rid":")" << rid << R"("})";
+                if(roomType == static_cast<uint8_t>(Rooms::PRIVATE) 
+                || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) 
+                || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
+                || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+                ){
+                    if(webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1){
+                        std::ostringstream payload;
 
-                    httplib::Headers headers;
-                    if (!UserData::getInstance().webhookSecret.empty()) {
-                        unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];
-                        hmac_sha256(SECRET, strlen(SECRET), payload.str().c_str(), payload.str().length(), hmac_result);
-                        headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}};
-                    }
+                        switch (roomType)
+                        {
+                            case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                                payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                                << "\"trigger\":\"INIT_PRIVATE_ROOM_VERIFICATION\", "
+                                << "\"code\":4001, "
+                                << "\"uid\":\"" << uid << "\", "
+                                << "\"rid\":\"" << rid << "\"}";
+                                break;
+                            }
 
-                    int status = sendHTTPSPOSTRequest(
-                        UserData::getInstance().webHookBaseUrl,
-                        UserData::getInstance().webhookPath,
-                        payload.str(),
-                        headers
-                    ).status;
+                            case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                                payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                                << "\"trigger\":\"INIT_PRIVATE_STATE_ROOM_VERIFICATION\", "
+                                << "\"code\":4002, "
+                                << "\"uid\":\"" << uid << "\", "
+                                << "\"rid\":\"" << rid << "\"}";
+                                break;
+                            }
 
-                    if (status != 200) {
+                            case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                                payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                                << "\"trigger\":\"INIT_PRIVATE_CACHE_ROOM_VERIFICATION\", "
+                                << "\"code\":4003, "
+                                << "\"uid\":\"" << uid << "\", "
+                                << "\"rid\":\"" << rid << "\"}";
+                                break;
+                            }
+
+                            case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                                payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                                << "\"trigger\":\"INIT_PRIVATE_STATE_CACHE_ROOM_VERIFICATION\", "
+                                << "\"code\":4004, "
+                                << "\"uid\":\"" << uid << "\", "
+                                << "\"rid\":\"" << rid << "\"}";
+                                break;
+                            }
+                        }
+
+                        std::string body = payload.str(); 
+                        httplib::Headers headers = {};
+
+                        /** if the webhook secret is present add the hmac */
+                        if(UserData::getInstance().webhookSecret.length() > 0){
+                            unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
+                            hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
+                            headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
+                        }
+        
+                        int status = sendHTTPSPOSTRequest(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            headers
+                        ).status;
+
+                        if(status != 200){
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                            
+                            if(!*isAborted){
+                                res->cork([res]() {
+                                    res->writeStatus("403 Forbidden");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end("{\"error\": \"You are not allowed to access this private room!\"}");
+                                });
+                            }
+
+                            return;
+                        }
+                    } else {
                         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                        if (!res->hasResponded()) {
+
+                        if(!*isAborted){
                             res->cork([res]() {
                                 res->writeStatus("403 Forbidden");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"error": "You are not allowed to access this private room!"})");
+                                res->end("{\"error\": \"You are not allowed to access this private room!\"}");
                             });
                         }
+
                         return;
-                    }
+                    } 
                 }
 
                 closeConnection(ws, worker);
