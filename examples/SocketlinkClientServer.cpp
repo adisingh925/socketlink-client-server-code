@@ -727,7 +727,7 @@ constexpr const char* BROADCAST = "SOCKETLINK_BROADCAST";
 constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 
 /** is logs enabled */
-constexpr bool LOGS_ENABLED = true;
+constexpr bool LOGS_ENABLED = false;
 
 /** HMAC-SHA256 Constants */
 constexpr int HMAC_SHA256_DIGEST_LENGTH = 32;  /**< SHA-256 produces a 32-byte (256-bit) output */
@@ -1214,7 +1214,6 @@ void sendHTTPSPOSTRequestFireAndForget(
         std::ostream request_stream(&request_buffer);
 
         if(UserData::getInstance().webhookSecret.length() > 0){
-            log("sending request with HMAC");
             unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
             hmac_sha256(UserData::getInstance().webhookSecret.c_str(), strlen(UserData::getInstance().webhookSecret.c_str()), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
                         
@@ -1225,7 +1224,6 @@ void sendHTTPSPOSTRequestFireAndForget(
             << "Content-Type: application/json\r\n"
             << "X-HMAC-Signature: " << to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH) << "\r\n";  /**< Include HMAC in headers */
         } else {
-            log("sending request without HMAC");
             /** Construct the HTTP request headers without hmac */
             request_stream << "POST " << path << " HTTP/1.1\r\n"
             << "Host: " << baseURL << "\r\n"
