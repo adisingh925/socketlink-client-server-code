@@ -1225,6 +1225,7 @@ void sendHTTPSPOSTRequestFireAndForget(
             << "Content-Type: application/json\r\n"
             << "X-HMAC-Signature: " << to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH) << "\r\n";  /**< Include HMAC in headers */
         } else {
+            log("sending request without HMAC");
             /** Construct the HTTP request headers without hmac */
             request_stream << "POST " << path << " HTTP/1.1\r\n"
             << "Host: " << baseURL << "\r\n"
