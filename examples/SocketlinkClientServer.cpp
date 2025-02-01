@@ -19,7 +19,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <mysql/mysql.h>
-#include <cppconn/prepared_statement.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 #include <tbb/concurrent_hash_map.h>
@@ -2477,7 +2476,6 @@ void worker_t::work()
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
-    .compression = uWS::CompressOptions(uWS::DEDICATED_COMPRESSOR_4KB | uWS::DEDICATED_DECOMPRESSOR),
     .maxPayloadLength = 1024 * 1024,
     .idleTimeout = 60,
     .maxBackpressure = 4 * 1024,
@@ -2794,15 +2792,15 @@ void worker_t::work()
                                 }
                             }
 
-                            /** publishing message, compress if greater than or equal to 10 kb */
-                            ws->publish(rid, message, opCode, message.size() >= 10 * 1024);
+                            /** publishing message */
+                            ws->publish(rid, message, opCode, true);
 
                             std::for_each(::workers.begin(), ::workers.end(), [message, opCode, rid](worker_t &w) {
                                 /** Check if the current thread ID matches the worker's thread ID */ 
                                 if (std::this_thread::get_id() != w.thread_->get_id()) {
                                     /** Defer the message publishing to the worker's loop */ 
                                     w.loop_->defer([&w, message, opCode, rid]() {
-                                        w.app_->publish(rid, message, opCode, message.size() >= 10 * 1024);
+                                        w.app_->publish(rid, message, opCode, true);
                                     });
                                 }
                             });
