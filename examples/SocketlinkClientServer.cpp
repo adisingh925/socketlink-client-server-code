@@ -3481,24 +3481,52 @@ void worker_t::work()
                 }
 
                 uint8_t roomType = 255;
-                if (rid.rfind("pub-state-cache-", 0) == 0) roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
-                else if (rid.rfind("pri-state-cache-", 0) == 0) roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
-                else if (rid.rfind("pub-cache-", 0) == 0) roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
-                else if (rid.rfind("pri-cache-", 0) == 0) roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
-                else if (rid.rfind("pub-state-", 0) == 0) roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
-                else if (rid.rfind("pri-state-", 0) == 0) roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
-                else if (rid.rfind("pub-", 0) == 0) roomType = static_cast<uint8_t>(Rooms::PUBLIC);
-                else if (rid.rfind("pri-", 0) == 0) roomType = static_cast<uint8_t>(Rooms::PRIVATE);
 
-                if (roomType == 255) {
+                /** checking if the correct room type is received */
+                if (rid.rfind("pub-state-cache-", 0) == 0)
+                {
+                    roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
+                }
+                else if (rid.rfind("pri-state-cache-", 0) == 0)
+                {
+                    roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
+                }
+                else if (rid.rfind("pub-cache-", 0) == 0)
+                {
+                    roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
+                }
+                else if (rid.rfind("pri-cache-", 0) == 0)
+                {
+                    roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
+                }
+                else if (rid.rfind("pub-state-", 0) == 0)
+                {
+                    roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
+                }
+                else if (rid.rfind("pri-state-", 0) == 0)
+                {
+                    roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
+                }
+                else if (rid.rfind("pub-", 0) == 0)
+                {
+                    roomType = static_cast<uint8_t>(Rooms::PUBLIC);
+                }
+                else if (rid.rfind("pri-", 0) == 0)
+                {
+                    roomType = static_cast<uint8_t>(Rooms::PRIVATE);
+                }
+                else
+                {
                     totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                    if (!res->hasResponded()) {
+                    
+                    if(!*isAborted){
                         res->cork([res]() {
                             res->writeStatus("400 Bad Request");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "The provided room type is invalid!"})");
+                            res->end("{\"error\": \"The provided room type is invalid!\"}");
                         });
                     }
+
                     return;
                 }
 
