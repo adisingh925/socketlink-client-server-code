@@ -259,7 +259,8 @@ public:
      */
     void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier, const std::string& room) {
         try {
-            if(batch_data.size() <= 3000){
+            /** It will be retried 3 times, after that the batch will be dropped to protect excessive memory use */
+            if(batch_data.size() <= (UserData::getInstance().mysqlDBCommitBatchSize * 3)){
                 batch_data.emplace_back(insert_time, message, identifier, room);
                 if (batch_data.size() % UserData::getInstance().mysqlDBCommitBatchSize == 0) {
                     insertBatchData();  /**< Insert the batch if the size exceeds the threshold */
