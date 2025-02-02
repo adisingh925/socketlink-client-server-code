@@ -1167,200 +1167,107 @@ HTTPResponse sendHTTPSPOSTRequest(
     }
 }
 
-// /** send a FIRE-AND-FOREGET http post request for webhook */
-// void sendHTTPSPOSTRequestFireAndForget(
-//     const std::string& baseURL, 
-//     const std::string& path, 
-//     const std::string& body, 
-//     const std::map<std::string, std::string>& headers = {}
-// ) {
-//     try {
-//         /** Disable SSL certificate verification if needed. 
-//          *  This is insecure and should only be used for testing purposes. */
-//         if(UserData::getInstance().webhookIP.empty()){
-//             /** DNS is not resolved, returning */
-//             return;
-//         }
-
-//         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
-
-//         if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {  
-//             ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
-
-//             /** Specify the endpoint using the IP address and port. 
-//              *  Ensure the IP address is correctly formatted. */
-//             boost::asio::ip::tcp::endpoint endpoint(
-//                 boost::asio::ip::make_address(UserData::getInstance().webhookIP),
-//                 443
-//             );
-
-//             /** Establish a connection to the endpoint. */
-//             ssl_socket->lowest_layer().connect(endpoint);
-
-//             boost::asio::socket_base::keep_alive keepAliveOption(true);
-//             ssl_socket->lowest_layer().set_option(keepAliveOption);
-
-//             /** Perform the SSL handshake. */
-//             ssl_socket->handshake(boost::asio::ssl::stream_base::client);
-//         }
-
-//         /** Enable the TCP no-delay option to minimize latency. */
-//         boost::asio::ip::tcp::no_delay no_delay_option(true);
-//         ssl_socket->lowest_layer().set_option(no_delay_option);
-
-//         /** Prepare a buffer for the HTTP request using boost::asio::streambuf. 
-//          *  This ensures efficient memory management. */
-//         boost::asio::streambuf request_buffer;
-//         std::ostream request_stream(&request_buffer);
-
-//         if(UserData::getInstance().webhookSecret.length() > 0){
-//             unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
-//             hmac_sha256(UserData::getInstance().webhookSecret.c_str(), strlen(UserData::getInstance().webhookSecret.c_str()), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
-                        
-//             /** Construct the HTTP request headers with hmac */
-//             request_stream << "POST " << path << " HTTP/1.1\r\n"
-//             << "Host: " << baseURL << "\r\n"
-//             << "Connection: keep-alive\r\n"
-//             << "Content-Type: application/json\r\n"
-//             << "X-HMAC-Signature: " << to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH) << "\r\n";  /**< Include HMAC in headers */
-//         } else {
-//             /** Construct the HTTP request headers without hmac */
-//             request_stream << "POST " << path << " HTTP/1.1\r\n"
-//             << "Host: " << baseURL << "\r\n"
-//             << "Connection: keep-alive\r\n"
-//             << "Content-Type: application/json\r\n";
-//         }
-        
-//         /** Add any custom headers provided as a map. */
-//         for (const auto& header : headers) {
-//             request_stream << header.first << ": " << header.second << "\r\n";
-//         }
-
-//         /** Specify the content length and finalize the headers. */
-//         request_stream << "Content-Length: " << body.size() << "\r\n" << "\r\n";
-
-//         /** Send the request headers over the SSL socket. */
-//         boost::asio::write(*ssl_socket, request_buffer); 
-
-//         /** Send the request body over the SSL socket. */
-//         boost::asio::write(*ssl_socket, boost::asio::buffer(body)); 
-
-//         /** Properly shut down and close the connection. */
-//         /* ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
-//         ssl_socket->lowest_layer().close();
-
-//         ssl_socket = nullptr; */
-//     } catch (const boost::system::system_error& e) {
-//         if (e.code() == boost::asio::error::broken_pipe) {
-//             /** broken pipe error, resending */
-//             ssl_socket = nullptr;  
-
-//             /** dangerous retry */
-//             /* sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers); */
-//         } else if (e.code() == boost::asio::error::connection_reset) {
-//             /** connection reset by peer */
-//             ssl_socket = nullptr;
-
-//             /** dangerous retry */
-//             /* sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers); */
-//         } else {
-//             /** some other error has occurred */
-//         }
-//     }
-// }
-
 /** send a FIRE-AND-FOREGET http post request for webhook */
 void sendHTTPSPOSTRequestFireAndForget(
     const std::string& baseURL, 
     const std::string& path, 
     const std::string& body, 
-    const std::map<std::string, std::string>& headers = {},
-    const std::chrono::seconds& timeout = std::chrono::seconds(5)  /**< Default timeout of 5 seconds */
+    const std::map<std::string, std::string>& headers = {}
 ) {
     try {
-        if (UserData::getInstance().webhookIP.empty()) {
+        /** Disable SSL certificate verification if needed. 
+         *  This is insecure and should only be used for testing purposes. */
+        if(UserData::getInstance().webhookIP.empty()){
+            /** DNS is not resolved, returning */
             return;
         }
 
         ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
 
-        boost::asio::steady_timer timer(io_context);
-
         if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {  
             ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
 
+            /** Specify the endpoint using the IP address and port. 
+             *  Ensure the IP address is correctly formatted. */
             boost::asio::ip::tcp::endpoint endpoint(
                 boost::asio::ip::make_address(UserData::getInstance().webhookIP),
                 443
             );
 
-            ssl_socket->lowest_layer().async_connect(endpoint, [&](const boost::system::error_code& ec) {
-                if (!ec) {
-                    boost::asio::socket_base::keep_alive keepAliveOption(true);
-                    ssl_socket->lowest_layer().set_option(keepAliveOption);
+            /** Establish a connection to the endpoint. */
+            ssl_socket->lowest_layer().connect(endpoint);
+            
+            /** if the request cannot be delivered immediately it will be dropped */
+            ssl_socket->lowest_layer().non_blocking(true); 
 
-                    ssl_socket->async_handshake(boost::asio::ssl::stream_base::client, [&](const boost::system::error_code& ec) {
-                        if (!ec) {
-                            boost::asio::ip::tcp::no_delay no_delay_option(true);
-                            ssl_socket->lowest_layer().set_option(no_delay_option);
+            boost::asio::socket_base::keep_alive keepAliveOption(true);
+            ssl_socket->lowest_layer().set_option(keepAliveOption);
 
-                            boost::asio::streambuf request_buffer;
-                            std::ostream request_stream(&request_buffer);
-
-                            if (UserData::getInstance().webhookSecret.length() > 0) {
-                                unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];
-                                hmac_sha256(UserData::getInstance().webhookSecret.c_str(), strlen(UserData::getInstance().webhookSecret.c_str()), body.c_str(), body.length(), hmac_result);
-
-                                request_stream << "POST " << path << " HTTP/1.1\r\n"
-                                               << "Host: " << baseURL << "\r\n"
-                                               << "Connection: keep-alive\r\n"
-                                               << "Content-Type: application/json\r\n"
-                                               << "X-HMAC-Signature: " << to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH) << "\r\n";
-                            } else {
-                                request_stream << "POST " << path << " HTTP/1.1\r\n"
-                                               << "Host: " << baseURL << "\r\n"
-                                               << "Connection: keep-alive\r\n"
-                                               << "Content-Type: application/json\r\n";
-                            }
-
-                            for (const auto& header : headers) {
-                                request_stream << header.first << ": " << header.second << "\r\n";
-                            }
-
-                            request_stream << "Content-Length: " << body.size() << "\r\n" << "\r\n";
-
-                            timer.expires_after(timeout);
-                            timer.async_wait([&](const boost::system::error_code& ec) {
-                                if (!ec) {
-                                    ssl_socket->lowest_layer().close();
-                                    ssl_socket = nullptr;
-                                }
-                            });
-
-                            boost::asio::async_write(*ssl_socket, request_buffer, [&](const boost::system::error_code& ec, std::size_t) {
-                                if (!ec) {
-                                    boost::asio::async_write(*ssl_socket, boost::asio::buffer(body), [&](const boost::system::error_code& ec, std::size_t) {
-                                        timer.cancel();
-                                    });
-                                } else {
-                                    ssl_socket->lowest_layer().close();
-                                    ssl_socket = nullptr;
-                                }
-                            });
-                        } else {
-                            ssl_socket = nullptr;
-                        }
-                    });
-                } else {
-                    ssl_socket = nullptr;
-                }
-            });
-
-            io_context.run();
+            /** Perform the SSL handshake. */
+            ssl_socket->handshake(boost::asio::ssl::stream_base::client);
         }
+
+        /** Enable the TCP no-delay option to minimize latency. */
+        boost::asio::ip::tcp::no_delay no_delay_option(true);
+        ssl_socket->lowest_layer().set_option(no_delay_option);
+
+        /** Prepare a buffer for the HTTP request using boost::asio::streambuf. 
+         *  This ensures efficient memory management. */
+        boost::asio::streambuf request_buffer;
+        std::ostream request_stream(&request_buffer);
+
+        if(UserData::getInstance().webhookSecret.length() > 0){
+            unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
+            hmac_sha256(UserData::getInstance().webhookSecret.c_str(), strlen(UserData::getInstance().webhookSecret.c_str()), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
+                        
+            /** Construct the HTTP request headers with hmac */
+            request_stream << "POST " << path << " HTTP/1.1\r\n"
+            << "Host: " << baseURL << "\r\n"
+            << "Connection: keep-alive\r\n"
+            << "Content-Type: application/json\r\n"
+            << "X-HMAC-Signature: " << to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH) << "\r\n";  /**< Include HMAC in headers */
+        } else {
+            /** Construct the HTTP request headers without hmac */
+            request_stream << "POST " << path << " HTTP/1.1\r\n"
+            << "Host: " << baseURL << "\r\n"
+            << "Connection: keep-alive\r\n"
+            << "Content-Type: application/json\r\n";
+        }
+        
+        /** Add any custom headers provided as a map. */
+        for (const auto& header : headers) {
+            request_stream << header.first << ": " << header.second << "\r\n";
+        }
+
+        /** Specify the content length and finalize the headers. */
+        request_stream << "Content-Length: " << body.size() << "\r\n" << "\r\n";
+
+        /** Send the request headers over the SSL socket. */
+        boost::asio::write(*ssl_socket, request_buffer); 
+
+        /** Send the request body over the SSL socket. */
+        boost::asio::write(*ssl_socket, boost::asio::buffer(body)); 
+
+        /** Properly shut down and close the connection. */
+        /* ssl_socket->lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+        ssl_socket->lowest_layer().close();
+
+        ssl_socket = nullptr; */
     } catch (const boost::system::system_error& e) {
-        if (e.code() == boost::asio::error::broken_pipe || e.code() == boost::asio::error::connection_reset) {
+        if (e.code() == boost::asio::error::broken_pipe) {
+            /** broken pipe error, resending */
+            ssl_socket = nullptr;  
+
+            /** dangerous retry */
+            /* sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers); */
+        } else if (e.code() == boost::asio::error::connection_reset) {
+            /** connection reset by peer */
             ssl_socket = nullptr;
+
+            /** dangerous retry */
+            /* sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers); */
+        } else {
+            /** some other error has occurred */
         }
     }
 }
