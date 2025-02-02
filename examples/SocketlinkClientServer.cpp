@@ -20,22 +20,36 @@ private:
     UserData() = default;
 
 public:
-    int msgSizeAllowedInBytes;
+    /** server configuration variables, can be changed on user demand */
+    unsigned int msgSizeAllowedInBytes;
+    unsigned int maxBackpressureInKb;
+    unsigned short idleTimeoutInSeconds;
+
     unsigned long long maxMonthlyPayloadInBytes;
     int connections;
     std::string clientApiKey;
     std::string adminApiKey;
+
+    /** webhook configuration */
     std::string webHookBaseUrl;
     std::string webhookPath;
     std::string webhookSecret;
     uint64_t webhooks;
-    int batchSize = 1000;
     std::string webhookIP;
+
+    /** mysql db configuration */
+    int mysqlDBCommitBatchSize = 1000;
     std::string dbHost;
     int dbPort;
     std::string dbUser;
     std::string dbPassword;
     std::string dbName;
+
+    /** lmdb configurations */
+    int lmdbCommitBatchSize = 1000;
+    unsigned long long lmdbDatabaseSizeInBytes;
+
+    /** auto populated according to the values of above variables */
     uint32_t features;
 
     /** Public static method to get the single instance */ 
@@ -247,7 +261,7 @@ public:
         try {
             if(batch_data.size() <= 3000){
                 batch_data.emplace_back(insert_time, message, identifier, room);
-                if (batch_data.size() % 1000 == 0) {
+                if (batch_data.size() % UserData::getInstance().mysqlDBCommitBatchSize == 0) {
                     insertBatchData();  /**< Insert the batch if the size exceeds the threshold */
                 }
             } else {
@@ -812,7 +826,7 @@ void init_env() {
     }
 
     /** map size is 10 GB */
-    if (mdb_env_set_mapsize(env, 20ULL * 1024 * 1024 * 1024) != 0) { 
+    if (mdb_env_set_mapsize(env, UserData::getInstance().lmdbDatabaseSizeInBytes) != 0) { 
         std::cerr << "Failed to set map size.\n";
         exit(-1);
     }
@@ -827,7 +841,7 @@ void init_env() {
         exit(-1);
     }
 
-    if (mdb_env_open(env, "./messages_db", 0, 0664) != 0) {
+    if (mdb_env_open(env, "./messages_db", MDB_WRITEMAP, 0664) != 0) {
         std::cerr << "Failed to open LMDB environment.\n";
         exit(-1);
     }
@@ -835,13 +849,10 @@ void init_env() {
     std::cout << "Environment initialized successfully.\n";
 }
 
-/** write the data to the LMDB */
+/** write the data to the LMDB, LMDB has internal locking mechanish so no need to mutexes */
 void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content, bool needsCommit = false) {
     MDB_txn* txn;
     MDB_dbi dbi;
-
-    /** Lock the mutex to ensure thread-safety for shared resources */
-    std::lock_guard<std::mutex> lock(write_worker_mutex);
 
     /** Batch to store messages before writing them to the database */
     static std::vector<std::tuple<std::string, std::string>> batch;
@@ -861,7 +872,7 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
     }
 
     /** Begin a write transaction when batch size reaches limit or a commit is explicitly needed */
-    if (batch.size() >= UserData::getInstance().batchSize || needsCommit) {
+    if (batch.size() >= UserData::getInstance().lmdbCommitBatchSize || (needsCommit && batch.size() > 0)) {
         /** Begin a new write transaction */
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             std::cerr << "Failed to begin write transaction.\n";
@@ -1428,8 +1439,6 @@ int populateUserData(std::string data) {
             && dbName.length() > 0
             && dbPort != 0
         ){
-            log("SQL Integration Enabled");
-
             if (
                 UserData::getInstance().dbHost != dbHost 
                 || UserData::getInstance().dbUser != dbUser
@@ -1437,8 +1446,6 @@ int populateUserData(std::string data) {
                 || UserData::getInstance().dbName != dbName
                 || UserData::getInstance().dbPort != dbPort
             ){
-                log("SQL Integration Data Updated");
-
                 userData.dbHost = dbHost;
                 userData.dbUser = dbUser;
                 userData.dbPassword = dbPassword;
@@ -1531,9 +1538,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 
             /** Remove room if empty */
             if (size == 0) {
-                /** Delete LMDB messages */
-                /* delete_worker(rid); */
-
                 /** Remove room from topics */
                 topics.erase(outer_accessor);
 
@@ -2457,10 +2461,11 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
  * ON_ROOM_VACATED_PUBLIC_STATE_CACHE_ROOM - 5039
  * ON_ROOM_VACATED_PRIVATE_STATE_CACHE_ROOM - 5040
  * 
- * INFO
+ ********************** INFO *******************************
  * 
  * ON_RATE_LIMIT_LIFTED - 6001
  * ON_MESSAGE_DROPPED - 6002
+ * 
  */
 
 /* uWebSocket worker thread function. */
@@ -2483,9 +2488,9 @@ void worker_t::work()
   app_->ws<PerSocketData>("/*", {
     /* Settings */
     .compression = uWS::SHARED_COMPRESSOR,
-    .maxPayloadLength = 1024 * 1024,
-    .idleTimeout = 60,
-    .maxBackpressure = 4 * 1024,
+    .maxPayloadLength = (UserData::getInstance().msgSizeAllowedInBytes / 1024),
+    .idleTimeout = UserData::getInstance().idleTimeoutInSeconds,
+    .maxBackpressure = UserData::getInstance().maxBackpressureInKb,
     .closeOnBackpressureLimit = false,
     .resetIdleTimeoutOnSend = true,
     .sendPingsAutomatically = true,
