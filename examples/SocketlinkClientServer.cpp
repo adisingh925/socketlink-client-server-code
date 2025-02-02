@@ -2370,23 +2370,38 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 /**
  * HTTP Webhook Error Codes
  * 
- * ON_CONNECTION_UPGRADE_REJECTED
+ *************** ON_CONNECTION_UPGRADE_REJECTED ****************************
  * 
- * CONNECTION_BANNED_GLOBALLY - 3580
+ * UID_BANNED_GLOBALLY - 3580
  * MAX_CONNECTION_LIMIT_REACHED - 3982
  * INVALID_API_KEY - 3203
  * UID_ALREADY_EXIST - 3780
  * EMPTY_UID - 3291
  * 
- * CONNECTION_BANNED_ON_ROOM - 3001
- * INVALID_ROOM_ID_LENGTH - 3004
- * INVALID_ROOM_TYPE - 3005
- * ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED - 3006
+ ********************** ON_ROOM_UPDATE **************************************
+ * 
+ * UID_BANNED_ON_ROOM - 3371
+ * INVALID_ROOM_ID_LENGTH - 3484
+ * INVALID_ROOM_TYPE - 3925
+ * ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED - 3376
+ * UID_NOT_FOUND - 3910
+ * ROOM_ACCESS_DENIED - 3511
+ * 
+ ****************** LIMITS_EXCEEDED *************************
+
  * ON_RATE_LIMIT_EXCEEDED - 3237
  * ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED - 3758
  * ON_MESSAGE_SIZE_EXCEEDED - 3349
  * 
- * Verification Codes
+ ***************** SUCCESS *********************** 
+ *
+ * ON_ROOM_SUCCESSFULLY_UPDATED - 7481
+ * 
+ ***************** ERROR_CODES ******************
+ *
+ * INVALID_JSON - 8931
+ * 
+ ************************* VERIFICATION_CODES ***************************
  * 
  * INIT
  * 
@@ -2544,7 +2559,7 @@ void worker_t::work()
                 if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                            << "\"trigger\":\"CONNECTION_BANNED_GLOBALLY\", "
+                            << "\"trigger\":\"UID_BANNED_GLOBALLY\", "
                             << "\"code\":3580, "
                             << "\"uid\":\"" << upgradeData->uid << "\", "
                             << "\"message\":\"This connection is globally banned by the admin!\"}";
@@ -3442,7 +3457,7 @@ void worker_t::work()
                 res->cork([res]() {
                     res->writeStatus("403 Forbidden");
                     res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+                    res->end(R"({"error": "Unauthorized access. Invalid API key!", "code": 3203})");
                 });
             }
             return;
@@ -3466,7 +3481,7 @@ void worker_t::work()
                         res->cork([res]() {
                             res->writeStatus("400 Bad Request");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "The room id length should be between 1 to 160 characters!"})");
+                            res->end(R"({"error": "The room id length should be between 1 to 160 characters!", "code": 3484})");
                         });
                     }
                     return;
@@ -3515,7 +3530,7 @@ void worker_t::work()
                         res->cork([res]() {
                             res->writeStatus("400 Bad Request");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end("{\"error\": \"The provided room type is invalid!\"}");
+                            res->end("{\"error\": \"The provided room type is invalid!\", \"code\": 3925}");
                         });
                     }
 
@@ -3529,7 +3544,7 @@ void worker_t::work()
                         res->cork([res]() {
                             res->writeStatus("404 Not Found");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Connection not found!"})");
+                            res->end(R"({"error": "Connection not found!", "code": 3910})");
                         });
                     }
                     return;
@@ -3544,7 +3559,7 @@ void worker_t::work()
                         res->cork([res]() {
                             res->writeStatus("400 Bad Request");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "The connection is already in the same room!"})");
+                            res->end(R"({"error": "You are already in the same room!", "code": 3780})");
                         });
                     }
                     return;
@@ -3557,7 +3572,7 @@ void worker_t::work()
                         res->cork([res]() {
                             res->writeStatus("403 Forbidden");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "You have been banned from this room!"})");
+                            res->end(R"({"error": "You have been banned from this room!", "code": 3371})");
                         });
                     }
                     return;
@@ -3634,7 +3649,7 @@ void worker_t::work()
                                 res->cork([res]() {
                                     res->writeStatus("403 Forbidden");
                                     res->writeHeader("Content-Type", "application/json");
-                                    res->end("{\"error\": \"You are not allowed to access this private room!\"}");
+                                    res->end("{\"error\": \"You are not allowed to access this private room!\", \"code\": 3511}");
                                 });
                             }
 
@@ -3643,11 +3658,30 @@ void worker_t::work()
                     } else {
                         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
+                        if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
+                            std::ostringstream payload;
+                            payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                                    << "\"trigger\":\"ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED\", "  
+                                    << "\"code\":3376, "
+                                    << "\"uid\":\"" << uid << "\", "
+                                    << "\"rid\":\"" << rid << "\", "
+                                    << "\"message\":\"Please enable ON_VERIFICATION_REQUEST webhook to use private rooms!\"}";
+
+                            std::string body = payload.str(); 
+                            
+                            sendHTTPSPOSTRequestFireAndForget(
+                                UserData::getInstance().webHookBaseUrl,
+                                UserData::getInstance().webhookPath,
+                                body,
+                                {}
+                            );
+                        }
+
                         if(!*isAborted){
                             res->cork([res]() {
                                 res->writeStatus("403 Forbidden");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"error\": \"You are not allowed to access this private room!\"}");
+                                res->end("{\"error\": \"You are not allowed to access this private room!\", \"code\": 3511}");
                             });
                         }
 
@@ -3664,7 +3698,7 @@ void worker_t::work()
                     res->cork([res]() {
                         res->writeStatus("200 OK");
                         res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"message": "Successfully updated the room for the connection!"})");
+                        res->end(R"({"message": "Successfully updated the room for the uid!", "code": 7481})");
                     });
                 }
             } catch (const std::exception &e) {
@@ -3672,7 +3706,7 @@ void worker_t::work()
                     res->cork([res, e]() {
                         res->writeStatus("400 Bad Request");
                         res->writeHeader("Content-Type", "application/json");
-                        res->end("{\"error\": \"Invalid JSON format: " + std::string(e.what()) + "\"}");
+                        res->end("{\"error\": \"Invalid JSON format: " + std::string(e.what()) + "\", \"code\": 8931}");
                     });
                 }
             }
@@ -3733,7 +3767,7 @@ void worker_t::work()
                         res->cork([res]() {
                             res->writeStatus("400 Bad Request");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Invalid JSON format."})");
+                            res->end(R"({"error": "Invalid JSON format!"})");
                         });
                     }
                 }
