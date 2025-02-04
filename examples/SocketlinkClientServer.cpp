@@ -1345,10 +1345,7 @@ void resolveAndStoreIPAddress(const std::string& hostname) {
 }
 
 /** This function will parse and populate the userdata */
-int populateUserData(std::string data) {
-
-    std::cout << data << std::endl;
-    
+int populateUserData(std::string data) {    
     nlohmann::json parsedJson = nlohmann::json::parse(data);
     int needsDBUpdate = 0;
 
@@ -2514,7 +2511,7 @@ void worker_t::work()
     .compression = uWS::SHARED_COMPRESSOR,
     .maxPayloadLength = (UserData::getInstance().msgSizeAllowedInBytes / 1024),
     .idleTimeout = UserData::getInstance().idleTimeoutInSeconds,
-    .maxBackpressure = UserData::getInstance().maxBackpressureInKb,
+    .maxBackpressure = (UserData::getInstance().maxBackpressureInKb * 1024),
     .closeOnBackpressureLimit = false,
     .resetIdleTimeoutOnSend = true,
     .sendPingsAutomatically = true,
@@ -2778,7 +2775,7 @@ void worker_t::work()
             }
             else if (ws->getUserData()->sendingAllowed)
             {
-                if(ws->getBufferedAmount() > 4 * 1024 * 1024){
+                if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInKb * 1024){
                     ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
                     ws->getUserData()->sendingAllowed = false;
@@ -3083,7 +3080,7 @@ void worker_t::work()
         }
     },
     .drain = [](auto *ws) {
-        if(ws->getBufferedAmount() < 2 * 1024 * 1024){
+        if(ws->getBufferedAmount() < ((UserData::getInstance().maxBackpressureInKb / 2) * 1024)){
             ws->getUserData()->sendingAllowed = true;
             ws->send("{\"event\":\"RATE_LIMIT_LIFTED\"}", uWS::OpCode::TEXT, true);
 
