@@ -22,7 +22,7 @@ private:
 public:
     /** server configuration variables, can be changed on user demand */
     unsigned int msgSizeAllowedInBytes;
-    unsigned int maxBackpressureInKb;
+    unsigned int maxBackpressureInBytes;
     unsigned short idleTimeoutInSeconds;
 
     unsigned long long maxMonthlyPayloadInBytes;
@@ -1407,8 +1407,8 @@ int populateUserData(std::string data) {
         userData.idleTimeoutInSeconds = parsedJson["idle_timeout_in_seconds"].get<unsigned short>();
     }
 
-    if(parsedJson.contains("max_backpressure_in_kb") && !parsedJson["max_backpressure_in_kb"].is_null()){
-        userData.maxBackpressureInKb = parsedJson["max_backpressure_in_kb"].get<unsigned int>();
+    if(parsedJson.contains("max_backpressure_in_bytes") && !parsedJson["max_backpressure_in_bytes"].is_null()){
+        userData.maxBackpressureInBytes = parsedJson["max_backpressure_in_bytes"].get<unsigned int>();
     }
 
     /** populate features */
@@ -2509,9 +2509,9 @@ void worker_t::work()
   app_->ws<PerSocketData>("/*", {
     /* Settings */
     .compression = uWS::SHARED_COMPRESSOR,
-    .maxPayloadLength = (UserData::getInstance().msgSizeAllowedInBytes / 1024),
+    .maxPayloadLength = UserData::getInstance().msgSizeAllowedInBytes,
     .idleTimeout = UserData::getInstance().idleTimeoutInSeconds,
-    .maxBackpressure = (UserData::getInstance().maxBackpressureInKb * 1024),
+    .maxBackpressure = UserData::getInstance().maxBackpressureInBytes,
     .closeOnBackpressureLimit = false,
     .resetIdleTimeoutOnSend = true,
     .sendPingsAutomatically = true,
@@ -2775,7 +2775,7 @@ void worker_t::work()
             }
             else if (ws->getUserData()->sendingAllowed)
             {
-                if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInKb * 1024){
+                if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes){
                     ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
                     ws->getUserData()->sendingAllowed = false;
@@ -3080,7 +3080,7 @@ void worker_t::work()
         }
     },
     .drain = [](auto *ws) {
-        if(ws->getBufferedAmount() < ((UserData::getInstance().maxBackpressureInKb / 2) * 1024)){
+        if(ws->getBufferedAmount() < (UserData::getInstance().maxBackpressureInBytes / 2)){
             ws->getUserData()->sendingAllowed = true;
             ws->send("{\"event\":\"RATE_LIMIT_LIFTED\"}", uWS::OpCode::TEXT, true);
 
