@@ -1364,7 +1364,7 @@ int populateUserData(std::string data) {
     }
 
     if (parsedJson.contains("msg_size_allowed_in_bytes") && !parsedJson["msg_size_allowed_in_bytes"].is_null()) {
-        userData.msgSizeAllowedInBytes = parsedJson["msg_size_allowed_in_bytes"].get<int>();
+        userData.msgSizeAllowedInBytes = parsedJson["msg_size_allowed_in_bytes"].get<unsigned int>();
     }
 
     if (parsedJson.contains("max_monthly_payload_in_bytes") && !parsedJson["max_monthly_payload_in_bytes"].is_null()) {
@@ -1389,6 +1389,26 @@ int populateUserData(std::string data) {
 
     if (parsedJson.contains("webhook_secret") && !parsedJson["webhook_secret"].is_null()) {
         userData.webhookSecret = parsedJson["webhook_secret"].get<std::string>();
+    }
+
+    if(parsedJson.contains("max_storage_allowed_in_gb") && !parsedJson["max_storage_allowed_in_gb"].is_null()){
+        userData.lmdbDatabaseSizeInBytes = parsedJson["max_storage_allowed_in_gb"].get<unsigned long long>();
+    }
+
+    if(parsedJson.contains("lmdb_commit_batch_size") && !parsedJson["lmdb_commit_batch_size"].is_null()){
+        userData.lmdbCommitBatchSize = parsedJson["lmdb_commit_batch_size"].get<int>();
+    }
+
+    if(parsedJson.contains("db_commit_batch_size") && !parsedJson["db_commit_batch_size"].is_null()){
+        userData.mysqlDBCommitBatchSize = parsedJson["db_commit_batch_size"].get<int>();
+    }
+
+    if(parsedJson.contains("idle_timeout_in_seconds") && !parsedJson["idle_timeout_in_seconds"].is_null()){
+        userData.idleTimeoutInSeconds = parsedJson["idle_timeout_in_seconds"].get<unsigned short>();
+    }
+
+    if(parsedJson.contains("max_backpressure_in_kb") && !parsedJson["max_backpressure_in_kb"].is_null()){
+        userData.maxBackpressureInKb = parsedJson["max_backpressure_in_kb"].get<unsigned int>();
     }
 
     /** populate features */
