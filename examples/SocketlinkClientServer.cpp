@@ -23,7 +23,8 @@ public:
     /** server configuration variables, can be changed on user demand */
     unsigned int msgSizeAllowedInBytes;
     unsigned int maxBackpressureInBytes;
-    unsigned short idleTimeoutInSeconds;
+    unsigned short idleTimeoutInSeconds = 60;
+    unsigned short maxLifetimeInMinutes = 0;
 
     unsigned long long maxMonthlyPayloadInBytes;
     int connections;
@@ -2515,6 +2516,7 @@ void worker_t::work()
     .closeOnBackpressureLimit = false,
     .resetIdleTimeoutOnSend = true,
     .sendPingsAutomatically = true,
+    .maxLifetime = UserData::getInstance().maxLifetimeInMinutes,
     /* Handlers */
     .upgrade = [](auto *res, auto *req, auto *context) {
         struct UpgradeData {
