@@ -2500,7 +2500,8 @@ void worker_t::work()
   app_ = std::make_shared<uWS::SSLApp>(
     uWS::SSLApp({
         .key_file_name = "ssl/privkey.pem",
-        .cert_file_name = "ssl/cert.pem"
+        .cert_file_name = "ssl/cert.pem",
+        .ssl_prefer_low_memory_usage = true,
     })
   );
 
