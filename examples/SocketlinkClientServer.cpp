@@ -1408,6 +1408,10 @@ int populateUserData(std::string data) {
         userData.idleTimeoutInSeconds = parsedJson["idle_timeout_in_seconds"].get<unsigned short>();
     }
 
+    if(parsedJson.contains("max_lifetime_in_minutes") && !parsedJson["max_lifetime_in_minutes"].is_null()){
+        userData.maxLifetimeInMinutes = parsedJson["max_lifetime_in_minutes"].get<unsigned short>();
+    }
+
     if(parsedJson.contains("max_backpressure_in_bytes") && !parsedJson["max_backpressure_in_bytes"].is_null()){
         userData.maxBackpressureInBytes = parsedJson["max_backpressure_in_bytes"].get<unsigned int>();
     }
@@ -1480,6 +1484,9 @@ int populateUserData(std::string data) {
                 featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
                 needsDBUpdate = 1;
             }
+        } else {
+            featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 0;
+            needsDBUpdate = 1;
         }
     }
     else if (is_sql_integration_enabled == -1)
