@@ -4742,6 +4742,22 @@ void createCertificate(std::string_view domain) {
     std::cout << "Creating a new SSL certificate for " << domain << "...\n";
     std::string createCmd = "sudo certbot certonly --standalone --non-interactive --agree-tos --email adisingh925@gmail.com --key-type ecdsa --staging -d " + std::string(domain);
     std::system(createCmd.c_str());
+
+    std::ofstream hookFile("/etc/letsencrypt/renewal-hooks/deploy/restart-socketlink.sh");
+    if (hookFile) {
+        hookFile << "#!/bin/bash\n";
+        hookFile << "echo \"SSL certificate renewed. Restarting socketlink-client-backend.service...\"\n";
+        hookFile << "systemctl restart socketlink-client-backend.service\n";
+        hookFile << "echo \"Server restarted successfully.\"\n";
+        hookFile.close();
+
+        /** Make the script executable */ 
+        std::string chmodCmd = "sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-socketlink.sh";
+        std::system(chmodCmd.c_str());
+        std::cout << "Deploy hook created successfully!\n";
+    } else {
+        std::cerr << "Failed to create deploy hook!\n";
+    }
 }
 
 /**
