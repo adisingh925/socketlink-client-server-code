@@ -4740,7 +4740,7 @@ bool isCertificateValid(std::string_view domain) {
  */
 void createCertificate(std::string_view domain) {
     std::cout << "Creating a new SSL certificate for " << domain << "...\n";
-    std::string createCmd = "sudo certbot certonly --standalone --non-interactive --agree-tos --email adisingh925@gmail.com -d " + std::string(domain);
+    std::string createCmd = "sudo certbot certonly --standalone --non-interactive --agree-tos --email adisingh925@gmail.com --key-type ecdsa --staging -d " + std::string(domain);
     std::system(createCmd.c_str());
 }
 
