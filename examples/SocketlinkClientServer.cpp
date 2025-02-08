@@ -2516,6 +2516,9 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
+    std::cout<< keyFilePath << std::endl;
+    std::cout<< certFileName << std::endl;
+    
   /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/ 
   loop_ = uWS::Loop::get();
 
