@@ -4648,7 +4648,7 @@ void worker_t::work()
  */
 bool isDNSResolvedToIP(std::string_view domain, std::string_view expectedIP) {
     addrinfo hints{}, *res = nullptr;
-    hints.ai_family = AF_INET; // IPv4 (use AF_UNSPEC for both IPv4 & IPv6)
+    hints.ai_family = AF_INET; /** IPv4 (use AF_UNSPEC for both IPv4 & IPv6) */ 
 
     /** Perform a DNS lookup */
     if (getaddrinfo(domain.data(), nullptr, &hints, &res) != 0) {
@@ -4687,7 +4687,7 @@ void waitForCorrectDNS(std::string_view domain, std::string_view expectedIP) {
     /** Keep checking until the DNS resolves correctly */
     while (!isDNSResolvedToIP(domain, expectedIP)) {
         std::cout << "DNS not resolved correctly. Retrying in 10 seconds...\n";
-        std::this_thread::sleep_for(std::chrono::seconds(10)); // Avoid excessive CPU usage
+        std::this_thread::sleep_for(std::chrono::seconds(10)); /** Avoid excessive CPU usage */ 
     }
 
     std::cout << "DNS correctly resolved for " << domain << " to " << expectedIP << "!\n";
@@ -4773,43 +4773,43 @@ void renewCertificate(std::string_view domain) {
 
 /* Main */
 int main() {
-  /** Fetch and populated data before starting the threads */
-  fetchAndPopulateUserData();
-  init_env();
+    /** Fetch and populated data before starting the threads */
+    fetchAndPopulateUserData();
+    init_env();
 
-  std::string domain = UserData::getInstance().subdomain + ".socketlink.io";
-  waitForCorrectDNS(domain, UserData::getInstance().ip);  
+    std::string domain = UserData::getInstance().subdomain + ".socketlink.io";
+    waitForCorrectDNS(domain, UserData::getInstance().ip);  
 
-  if (!doesCertificateExist(domain))
-  {
-      std::cout << "No SSL certificate found. Creating a new one...\n";
-      createCertificate(domain);
-  }
-  else if (!isCertificateValid(domain))
-  {
-      std::cout << "SSL certificate is expired. Renewing...\n";
-      renewCertificate(domain);
-  }
-  else
-  {
-      std::cout << "SSL certificate is valid. No renewal needed.\n";
-  }
+    if (!doesCertificateExist(domain))
+    {
+        std::cout << "No SSL certificate found. Creating a new one...\n";
+        createCertificate(domain);
+    }
+    else if (!isCertificateValid(domain))
+    {
+        std::cout << "SSL certificate is expired. Renewing...\n";
+        renewCertificate(domain);
+    }
+    else
+    {
+        std::cout << "SSL certificate is valid. No renewal needed.\n";
+    }
 
-  workers.resize(std::thread::hardware_concurrency());
-  
-  std::transform(workers.begin(), workers.end(), workers.begin(), [](worker_t &w) {
-    w.thread_ = std::make_shared<std::thread>([&w]() {
-      /* create uWebSocket worker and capture uWS::Loop, uWS::App objects. */
-      w.work();
+    workers.resize(std::thread::hardware_concurrency());
+    
+    std::transform(workers.begin(), workers.end(), workers.begin(), [](worker_t &w) {
+        w.thread_ = std::make_shared<std::thread>([&w]() {
+        /* create uWebSocket worker and capture uWS::Loop, uWS::App objects. */
+        w.work();
+        });
+        return w;
     });
-    return w;
-  });
-  
-  std::for_each(workers.begin(), workers.end(), [](worker_t &w) {
-      w.thread_->join();
-  });
+    
+    std::for_each(workers.begin(), workers.end(), [](worker_t &w) {
+        w.thread_->join();
+    });
 
-  mdb_env_close(env);
-  
-  return 0;
+    mdb_env_close(env);
+    
+    return 0;
 }
