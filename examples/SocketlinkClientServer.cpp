@@ -2511,6 +2511,9 @@ void openConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* wo
  * 
  */
 
+ const std::string keyFilePath = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
+ const std::string certFileName = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
+
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
@@ -2520,8 +2523,8 @@ void worker_t::work()
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
   app_ = std::make_shared<uWS::App>(
     uWS::App({
-        .key_file_name = "ssl/privkey.pem",
-        .cert_file_name = "ssl/cert.pem",
+        .key_file_name = keyFilePath.c_str(),
+        .cert_file_name = certFileName.c_str(),
         .ssl_prefer_low_memory_usage = true,
     })
   );
