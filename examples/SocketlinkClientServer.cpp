@@ -535,7 +535,7 @@ struct worker_t
   std::shared_ptr<MySQLConnectionHandler> db_handler;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::App> app_;
+  std::shared_ptr<uWS::SSLApp> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -683,7 +683,7 @@ enum class Rooms : uint8_t {
 
 /** stores data for websocket and its worker for later use */
 struct WebSocketData {
-    uWS::WebSocket<false, true, PerSocketData>* ws;
+    uWS::WebSocket<true, true, PerSocketData>* ws;
     worker_t* worker; 
 };
 
@@ -1527,8 +1527,7 @@ int populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-        std::string dropletId = "475299146";
+        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
 
         unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
         hmac_sha256(SECRET, strlen(SECRET), dropletId.c_str(), dropletId.length(), hmac_result);  /**< Compute HMAC */
@@ -1556,7 +1555,7 @@ void fetchAndPopulateUserData() {
 }
 
 /** unsubscribe from the current room and do some cleanup */
-void closeConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* worker) {
+void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker) {
     std::string rid = ws->getUserData()->rid;
 
     /** Unsubscribe the user from the room */
@@ -1984,7 +1983,7 @@ void closeConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* w
 }
 
 /** subscribe to a new room */
-void openConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* worker) {
+void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker) {
     if (!ws->getUserData()->rid.empty()) {
     const auto& rid = ws->getUserData()->rid;
     const auto& uid = ws->getUserData()->uid;
@@ -2521,8 +2520,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::App>(
-    uWS::App({
+  app_ = std::make_shared<uWS::SSLApp>(
+    uWS::SSLApp({
         .key_file_name = keyFilePath.c_str(),
         .cert_file_name = certFileName.c_str(),
         .ssl_prefer_low_memory_usage = true,
@@ -4023,7 +4022,7 @@ void worker_t::work()
                                 /** Fetch the connection for the given uid from the connections map */
                                 tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
                                 if (connections.find(conn_accessor, uid)) {
-                                    uWS::WebSocket<false, true, PerSocketData>* ws = conn_accessor->second.ws; 
+                                    uWS::WebSocket<true, true, PerSocketData>* ws = conn_accessor->second.ws; 
                                     worker_t* worker = conn_accessor->second.worker; 
 
                                     /** Disconnect the WebSocket or perform any other disconnection logic */
