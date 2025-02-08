@@ -2512,12 +2512,12 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
  * 
  */
 
- const std::string keyFilePath = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
- const std::string certFileName = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
-
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
+    const std::string keyFilePath = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
+    const std::string certFileName = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
+   
     std::cout << UserData::getInstance().subdomain << std::endl;
     std::cout<< keyFilePath << std::endl;
     std::cout<< certFileName << std::endl;
