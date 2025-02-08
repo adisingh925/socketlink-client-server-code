@@ -11,6 +11,7 @@
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 #include <tbb/concurrent_hash_map.h>
+#include <filesystem>
 
 /******************************************************************************************************************************************************************************/
 
@@ -21,8 +22,8 @@ private:
 
 public:
     /** server configuration variables, can be changed on user demand */
-    unsigned int msgSizeAllowedInBytes;
-    unsigned int maxBackpressureInBytes;
+    unsigned int msgSizeAllowedInBytes = 10240;
+    unsigned int maxBackpressureInBytes = 4096;
     unsigned short idleTimeoutInSeconds = 60;
     unsigned short maxLifetimeInMinutes = 0;
 
@@ -52,6 +53,10 @@ public:
 
     /** auto populated according to the values of above variables */
     uint32_t features;
+
+    /** user info */
+    std::string subdomain;
+    std::string ip;
 
     /** Public static method to get the single instance */ 
     static UserData& getInstance() {
@@ -530,7 +535,7 @@ struct worker_t
   std::shared_ptr<MySQLConnectionHandler> db_handler;
 
   /* Need to capture the uWS::App object (instance). */
-  std::shared_ptr<uWS::SSLApp> app_;
+  std::shared_ptr<uWS::App> app_;
 
   /* Thread object for uWebSocket worker */
   std::shared_ptr<std::thread> thread_;
@@ -678,7 +683,7 @@ enum class Rooms : uint8_t {
 
 /** stores data for websocket and its worker for later use */
 struct WebSocketData {
-    uWS::WebSocket<true, true, PerSocketData>* ws;
+    uWS::WebSocket<false, true, PerSocketData>* ws;
     worker_t* worker; 
 };
 
@@ -1416,6 +1421,14 @@ int populateUserData(std::string data) {
         userData.maxBackpressureInBytes = parsedJson["max_backpressure_in_bytes"].get<unsigned int>();
     }
 
+    if(parsedJson.contains("subdomain") && !parsedJson["subdomain"].is_null()){
+        userData.subdomain = parsedJson["subdomain"].get<std::string>();
+    }
+
+    if(parsedJson.contains("ip") && !parsedJson["ip"].is_null()){
+        userData.ip = parsedJson["ip"].get<std::string>();
+    }
+
     /** populate features */
     populateFeatureStatus(UserData::getInstance().features);
 
@@ -1514,7 +1527,8 @@ int populateUserData(std::string data) {
  */
 void fetchAndPopulateUserData() {
     try {
-        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        // std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
+        std::string dropletId = "475299146";
 
         unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
         hmac_sha256(SECRET, strlen(SECRET), dropletId.c_str(), dropletId.length(), hmac_result);  /**< Compute HMAC */
@@ -1542,7 +1556,7 @@ void fetchAndPopulateUserData() {
 }
 
 /** unsubscribe from the current room and do some cleanup */
-void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker) {
+void closeConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* worker) {
     std::string rid = ws->getUserData()->rid;
 
     /** Unsubscribe the user from the room */
@@ -1970,7 +1984,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 }
 
 /** subscribe to a new room */
-void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker) {
+void openConnection(uWS::WebSocket<false, true, PerSocketData>* ws, worker_t* worker) {
     if (!ws->getUserData()->rid.empty()) {
     const auto& rid = ws->getUserData()->rid;
     const auto& uid = ws->getUserData()->uid;
@@ -2504,8 +2518,8 @@ void worker_t::work()
   loop_ = uWS::Loop::get();
 
   /* uWS::App object / instance is used in uWS::Loop::defer(lambda_function) */
-  app_ = std::make_shared<uWS::SSLApp>(
-    uWS::SSLApp({
+  app_ = std::make_shared<uWS::App>(
+    uWS::App({
         .key_file_name = "ssl/privkey.pem",
         .cert_file_name = "ssl/cert.pem",
         .ssl_prefer_low_memory_usage = true,
@@ -4006,7 +4020,7 @@ void worker_t::work()
                                 /** Fetch the connection for the given uid from the connections map */
                                 tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
                                 if (connections.find(conn_accessor, uid)) {
-                                    uWS::WebSocket<true, true, PerSocketData>* ws = conn_accessor->second.ws; 
+                                    uWS::WebSocket<false, true, PerSocketData>* ws = conn_accessor->second.ws; 
                                     worker_t* worker = conn_accessor->second.worker; 
 
                                     /** Disconnect the WebSocket or perform any other disconnection logic */
@@ -4623,11 +4637,145 @@ void worker_t::work()
   std::cout << "Thread " << std::this_thread::get_id() << " exiting" << std::endl;
 }
 
+/**
+ * Checks if the DNS for the given domain resolves to the expected IP address.
+ *
+ * @param domain The domain name to check.
+ * @param expectedIP The expected IP address.
+ * @return true if DNS resolves correctly, false otherwise.
+ */
+bool isDNSResolvedToIP(std::string_view domain, std::string_view expectedIP) {
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_INET; // IPv4 (use AF_UNSPEC for both IPv4 & IPv6)
+
+    /** Perform a DNS lookup */
+    if (getaddrinfo(domain.data(), nullptr, &hints, &res) != 0) {
+        return false;
+    }
+
+    char resolvedIP[INET_ADDRSTRLEN];
+    bool matched = false;
+
+    /** Iterate through resolved addresses */
+    for (addrinfo* p = res; p != nullptr; p = p->ai_next) {
+        sockaddr_in* addr = reinterpret_cast<sockaddr_in*>(p->ai_addr);
+        inet_ntop(AF_INET, &addr->sin_addr, resolvedIP, INET_ADDRSTRLEN);
+        
+        /** Compare resolved IP with expected IP */
+        if (expectedIP == resolvedIP) {
+            matched = true;
+            break;
+        }
+    }
+
+    /** Free memory allocated by getaddrinfo */
+    freeaddrinfo(res);
+    return matched;
+}
+
+/**
+ * Continuously checks DNS resolution until it matches the expected IP.
+ *
+ * @param domain The domain name to check.
+ * @param expectedIP The expected IP address.
+ */
+void waitForCorrectDNS(std::string_view domain, std::string_view expectedIP) {
+    std::cout << "Waiting for DNS resolution of " << domain << " to match " << expectedIP << "...\n";
+
+    /** Keep checking until the DNS resolves correctly */
+    while (!isDNSResolvedToIP(domain, expectedIP)) {
+        std::cout << "DNS not resolved correctly. Retrying in 10 seconds...\n";
+        std::this_thread::sleep_for(std::chrono::seconds(10)); // Avoid excessive CPU usage
+    }
+
+    std::cout << "DNS correctly resolved for " << domain << " to " << expectedIP << "!\n";
+}
+
+/**
+ * Checks if an SSL certificate exists for the domain.
+ *
+ * @param domain The domain name.
+ * @return true if the certificate exists, false otherwise.
+ */
+bool doesCertificateExist(std::string_view domain) {
+    std::string certPath = "/etc/letsencrypt/live/" + std::string(domain) + "/cert.pem";
+    
+    /** Check if the certificate file exists */
+    struct stat buffer;
+    return (stat(certPath.c_str(), &buffer) == 0);
+}
+
+/**
+ * Checks if the SSL certificate for the domain is valid for at least the next 24 hours.
+ *
+ * @param domain The domain name.
+ * @return true if the certificate is valid, false otherwise.
+ */
+bool isCertificateValid(std::string_view domain) {
+    std::array<char, 128> buffer{};
+    std::string checkCmd = "openssl x509 -checkend 86400 -noout -in /etc/letsencrypt/live/" + std::string(domain) + "/cert.pem";
+
+    /** Execute the command using popen */
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(checkCmd.c_str(), "r"), pclose);
+    if (!pipe) {
+        std::cerr << "Failed to check certificate validity.\n";
+        return false;
+    }
+
+    /** Read the command output */
+    if (fgets(buffer.data(), buffer.size(), pipe.get()) == nullptr) {
+        std::cout << "Certificate expired or invalid for " << domain << ".\n";
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Creates a new SSL certificate for the domain using Certbot.
+ *
+ * @param domain The domain name.
+ */
+void createCertificate(std::string_view domain) {
+    std::cout << "Creating a new SSL certificate for " << domain << "...\n";
+    std::string createCmd = "sudo certbot certonly --standalone --non-interactive --agree-tos --email adisingh925@gmail.com -d " + std::string(domain);
+    std::system(createCmd.c_str());
+}
+
+/**
+ * Renews the SSL certificate for the domain if necessary.
+ *
+ * @param domain The domain name.
+ */
+void renewCertificate(std::string_view domain) {
+    std::cout << "Renewing SSL certificate for " << domain << "...\n";
+    std::string renewCmd = "certbot renew --quiet --non-interactive --preferred-challenges http";
+    std::system(renewCmd.c_str());
+}
+
 /* Main */
 int main() {
   /** Fetch and populated data before starting the threads */
   fetchAndPopulateUserData();
   init_env();
+
+  std::string domain = UserData::getInstance().subdomain + ".socketlink.io";
+  waitForCorrectDNS(domain, UserData::getInstance().ip);  
+
+  if (!doesCertificateExist(domain))
+  {
+      std::cout << "No SSL certificate found. Creating a new one...\n";
+      createCertificate(domain);
+  }
+  else if (!isCertificateValid(domain))
+  {
+      std::cout << "SSL certificate is expired. Renewing...\n";
+      renewCertificate(domain);
+  }
+  else
+  {
+      std::cout << "SSL certificate is valid. No renewal needed.\n";
+  }
 
   workers.resize(std::thread::hardware_concurrency());
   
