@@ -1352,8 +1352,6 @@ void resolveAndStoreIPAddress(const std::string& hostname) {
 
 /** This function will parse and populate the userdata */
 int populateUserData(std::string data) {    
-    std::cout << data << std::endl;
-
     nlohmann::json parsedJson = nlohmann::json::parse(data);
     int needsDBUpdate = 0;
 
@@ -2517,10 +2515,6 @@ void worker_t::work()
 {
     const std::string keyFilePath = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
     const std::string certFileName = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
-   
-    std::cout << UserData::getInstance().subdomain << std::endl;
-    std::cout<< keyFilePath << std::endl;
-    std::cout<< certFileName << std::endl;
 
   /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/ 
   loop_ = uWS::Loop::get();
