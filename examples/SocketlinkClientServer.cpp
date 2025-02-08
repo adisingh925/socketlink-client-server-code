@@ -1353,7 +1353,7 @@ void resolveAndStoreIPAddress(const std::string& hostname) {
 /** This function will parse and populate the userdata */
 int populateUserData(std::string data) {    
     std::cout << data << std::endl;
-    
+
     nlohmann::json parsedJson = nlohmann::json::parse(data);
     int needsDBUpdate = 0;
 
@@ -2518,6 +2518,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
+    std::cout << UserData::getInstance().subdomain << std::endl;
     std::cout<< keyFilePath << std::endl;
     std::cout<< certFileName << std::endl;
 
