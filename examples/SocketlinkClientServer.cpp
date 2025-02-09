@@ -1410,11 +1410,23 @@ int populateUserData(std::string data) {
     }
 
     if(parsedJson.contains("idle_timeout_in_seconds") && !parsedJson["idle_timeout_in_seconds"].is_null()){
-        userData.idleTimeoutInSeconds = parsedJson["idle_timeout_in_seconds"].get<unsigned short>();
+        unsigned short idleTimeoutInSeconds = parsedJson["idle_timeout_in_seconds"].get<unsigned short>();
+        if(userData.idleTimeoutInSeconds == 60 && idleTimeoutInSeconds != userData.idleTimeoutInSeconds){
+            userData.idleTimeoutInSeconds = idleTimeoutInSeconds;
+        } else {
+            userData.idleTimeoutInSeconds = idleTimeoutInSeconds;
+            needsDBUpdate = 2;
+        }
     }
 
     if(parsedJson.contains("max_lifetime_in_minutes") && !parsedJson["max_lifetime_in_minutes"].is_null()){
-        userData.maxLifetimeInMinutes = parsedJson["max_lifetime_in_minutes"].get<unsigned short>();
+        unsigned short maxLifetimeInMinutes = parsedJson["max_lifetime_in_minutes"].get<unsigned short>();
+        if(userData.maxLifetimeInMinutes == 0 && maxLifetimeInMinutes != userData.maxLifetimeInMinutes){
+            userData.maxLifetimeInMinutes = maxLifetimeInMinutes;
+        } else {
+            userData.maxLifetimeInMinutes = maxLifetimeInMinutes;
+            needsDBUpdate = 2;
+        }
     }
 
     if(parsedJson.contains("max_backpressure_in_bytes") && !parsedJson["max_backpressure_in_bytes"].is_null()){
@@ -3272,9 +3284,9 @@ void worker_t::work()
                     }
 
                     /** Parse the JSON response */ 
-                    int needsDBUpdate = populateUserData(body);
+                    int action = populateUserData(body);
                     
-                    if(needsDBUpdate == 1){
+                    if(action == 1){
                         /** check if the connection parameters are changed */
                         std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
                             /** Defer the message publishing to the worker's loop */ 
@@ -3282,7 +3294,7 @@ void worker_t::work()
                                 w.db_handler->manualCreateConnection();
                             });
                         });
-                    } else if(needsDBUpdate == -1) {
+                    } else if(action == -1) {
                         std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
                             /** Defer the message publishing to the worker's loop */ 
                             w.loop_->defer([&w]() {
@@ -3298,6 +3310,10 @@ void worker_t::work()
                             res->writeHeader("Content-Type", "application/json");
                             res->end(R"({"message": "Metadata invalidated successfully."})");
                         });
+                    }
+
+                    if(action == 2){
+                        std::exit(0);
                     }
                 } catch (std::exception &e) {
                     if(!*isAborted){
@@ -4588,7 +4604,65 @@ void worker_t::work()
                 });
             }
         }
-	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
+	})
+    // .get("/api/v1/restart", [](auto *res, auto *req) {
+    //     /** send pong as a response for ping */
+    //     auto isAborted = std::make_shared<bool>(false);
+
+    //     res->onAborted([isAborted]() {
+    //         /** connection aborted */
+    //         *isAborted = true;
+    //     });
+
+    //     std::string_view secret = req->getHeader("secret");
+    //     std::string_view apiKey = req->getHeader("api-key");
+    //     std::string_view timestamp = req->getHeader("timestamp");
+
+        
+    //     /** check if the API key is valid or not */
+    //     if(apiKey != UserData::getInstance().adminApiKey){
+    //         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+    //         if(!*isAborted){
+    //             res->cork([res]() {
+    //                 res->writeStatus("403");
+    //                 res->writeHeader("Content-Type", "application/json");
+    //                 res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+    //             });
+    //         }
+
+    //         return;
+    //     }
+
+    //     /** generate the secret and compare */
+    //     unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
+    //     hmac_sha256(SECRET, strlen(SECRET), std::string(timestamp).c_str(), timestamp.length(), hmac_result);  /**< Compute HMAC */
+        
+    //     /** compare HMAC and respond accordingly */
+    //     if(secret != to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)){
+    //         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+    //         if(!*isAborted){
+    //             res->cork([res]() {
+    //                 res->writeStatus("403");
+    //                 res->writeHeader("Content-Type", "application/json");
+    //                 res->end(R"({"error": "Unauthorized access. Invalid signature!"})");
+    //             });
+    //         }
+
+    //         return;
+    //     }
+
+    //     if(!*isAborted){
+    //         res->cork([res]() {
+    //             res->writeStatus("200 OK");
+    //             res->end();
+    //         });
+    //     }
+
+    //     std::exit(0);
+	// })
+    .get("/api/v1/ping", [](auto *res, auto */*req*/) {
         /** send pong as a response for ping */
         auto isAborted = std::make_shared<bool>(false);
 
@@ -4740,7 +4814,7 @@ bool isCertificateValid(std::string_view domain) {
  */
 void createCertificate(std::string_view domain) {
     std::cout << "Creating a new SSL certificate for " << domain << "...\n";
-    std::string createCmd = "certbot certonly --standalone --non-interactive --agree-tos "
+    std::string createCmd = "certbot certonly --staging --standalone --non-interactive --agree-tos "
     "--email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain) + 
     " --config-dir /home/socketlink/certbot-config "
     "--work-dir /home/socketlink/certbot-work "
