@@ -4820,22 +4820,6 @@ void createCertificate(std::string_view domain) {
     "--work-dir /home/socketlink/certbot-work "
     "--logs-dir /home/socketlink/certbot-logs";
     std::system(createCmd.c_str());
-
-    std::ofstream hookFile("/home/socketlink/certbot-config/renewal-hooks/deploy/restart-socketlink.sh");
-    if (hookFile) {
-        hookFile << "#!/bin/bash\n";
-        hookFile << "echo \"SSL certificate renewed. Restarting socketlink-client-backend.service...\"\n";
-        hookFile << "systemctl restart socketlink-client-backend.service\n";
-        hookFile << "echo \"Server restarted successfully.\"\n";
-        hookFile.close();
-    
-        /** Make the script executable */ 
-        std::string chmodCmd = "chmod +x /home/socketlink/certbot-config/renewal-hooks/deploy/restart-socketlink.sh";
-        std::system(chmodCmd.c_str());
-        std::cout << "Deploy hook created successfully!\n";
-    } else {
-        std::cerr << "Failed to create deploy hook!\n";
-    }
 }
 
 /**
