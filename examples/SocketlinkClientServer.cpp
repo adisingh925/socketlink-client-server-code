@@ -4858,8 +4858,7 @@ void watchCertChanges(std::string_view domain) {
         /** 
          * Sleep for 24 hours before checking the file again to minimize resource usage.
          */
-        // std::this_thread::sleep_for(std::chrono::hours(24));
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::hours(24));
 
         /** 
          * Get the current last modified time of the certificate file.
