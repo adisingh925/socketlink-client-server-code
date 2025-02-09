@@ -4747,16 +4747,16 @@ void createCertificate(std::string_view domain) {
     "--logs-dir /home/socketlink/certbot-logs";
     std::system(createCmd.c_str());
 
-    std::ofstream hookFile("/etc/letsencrypt/renewal-hooks/deploy/restart-socketlink.sh");
+    std::ofstream hookFile("/home/socketlink/certbot-config/renewal-hooks/deploy/restart-socketlink.sh");
     if (hookFile) {
         hookFile << "#!/bin/bash\n";
         hookFile << "echo \"SSL certificate renewed. Restarting socketlink-client-backend.service...\"\n";
         hookFile << "systemctl restart socketlink-client-backend.service\n";
         hookFile << "echo \"Server restarted successfully.\"\n";
         hookFile.close();
-
+    
         /** Make the script executable */ 
-        std::string chmodCmd = "chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-socketlink.sh";
+        std::string chmodCmd = "chmod +x /home/socketlink/certbot-config/renewal-hooks/deploy/restart-socketlink.sh";
         std::system(chmodCmd.c_str());
         std::cout << "Deploy hook created successfully!\n";
     } else {
@@ -4771,7 +4771,11 @@ void createCertificate(std::string_view domain) {
  */
 void renewCertificate(std::string_view domain) {
     std::cout << "Renewing SSL certificate for " << domain << "...\n";
-    std::string renewCmd = "certbot renew --quiet --non-interactive --preferred-challenges http";
+    std::string renewCmd = 
+    "certbot renew --quiet --non-interactive --preferred-challenges http "
+    "--config-dir /home/socketlink/certbot-config "
+    "--work-dir /home/socketlink/certbot-work "
+    "--logs-dir /home/socketlink/certbot-logs";
     std::system(renewCmd.c_str());
 }
 
