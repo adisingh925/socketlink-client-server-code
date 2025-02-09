@@ -4853,6 +4853,49 @@ void renewCertificate(std::string_view domain) {
     std::system(renewCmd.c_str());
 }
 
+/**
+ * @brief Monitors the SSL certificate file for changes and restarts the server if modified.
+ * 
+ * This function runs in a separate thread and checks the last modified time of the certificate file 
+ * once every 24 hours. If a change is detected, it restarts the `socketlink-client-backend.service`.
+ */
+void watchCertChanges(std::string_view domain) {
+    /** 
+     * Define the certificate file path that needs to be monitored for changes.
+     */
+    const std::string certPath = "/home/socketlink/certbot-config/live/" + std::string(domain) + "/fullchain.pem";
+
+    /** 
+     * Get the last modified time of the certificate file at startup.
+     */
+    std::filesystem::file_time_type lastModifiedTime = std::filesystem::last_write_time(certPath);
+
+    while (true) {
+        /** 
+         * Sleep for 24 hours before checking the file again to minimize resource usage.
+         */
+        // std::this_thread::sleep_for(std::chrono::hours(24));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        /** 
+         * Get the current last modified time of the certificate file.
+         */
+        auto currentModifiedTime = std::filesystem::last_write_time(certPath);
+
+        /**
+         * If the file has been modified since the last check, restart the service.
+         */
+        if (currentModifiedTime != lastModifiedTime) {
+            std::cout << "Certificate changed, restarting service...\n";
+
+            /** 
+             * Restart the server using systemd user service.
+             */
+            std::exit(0);
+        }
+    }
+}
+
 /* Main */
 int main() {
     /** Fetch and populated data before starting the threads */
@@ -4876,6 +4919,10 @@ int main() {
     {
         std::cout << "SSL certificate is valid. No renewal needed.\n";
     }
+
+    /** running the file change watcher thread */
+    std::thread watcher(watchCertChanges, domain);
+    watcher.detach();
 
     workers.resize(std::thread::hardware_concurrency());
     
