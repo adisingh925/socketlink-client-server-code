@@ -4740,7 +4740,11 @@ bool isCertificateValid(std::string_view domain) {
  */
 void createCertificate(std::string_view domain) {
     std::cout << "Creating a new SSL certificate for " << domain << "...\n";
-    std::string createCmd = "certbot certonly --standalone --staging --non-interactive --agree-tos --email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain);
+    std::string createCmd = "certbot certonly --standalone --staging --non-interactive --agree-tos "
+    "--email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain) + 
+    " --config-dir /home/socketlink/certbot-config "
+    "--work-dir /home/socketlink/certbot-work "
+    "--logs-dir /home/socketlink/certbot-logs";
     std::system(createCmd.c_str());
 
     std::ofstream hookFile("/etc/letsencrypt/renewal-hooks/deploy/restart-socketlink.sh");
