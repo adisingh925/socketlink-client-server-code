@@ -4740,7 +4740,7 @@ bool isCertificateValid(std::string_view domain) {
  */
 void createCertificate(std::string_view domain) {
     std::cout << "Creating a new SSL certificate for " << domain << "...\n";
-    std::string createCmd = "sudo certbot certonly --standalone --non-interactive --agree-tos --email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain);
+    std::string createCmd = "certbot certonly --standalone --non-interactive --agree-tos --email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain);
     std::system(createCmd.c_str());
 
     std::ofstream hookFile("/etc/letsencrypt/renewal-hooks/deploy/restart-socketlink.sh");
@@ -4752,7 +4752,7 @@ void createCertificate(std::string_view domain) {
         hookFile.close();
 
         /** Make the script executable */ 
-        std::string chmodCmd = "sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-socketlink.sh";
+        std::string chmodCmd = "chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-socketlink.sh";
         std::system(chmodCmd.c_str());
         std::cout << "Deploy hook created successfully!\n";
     } else {
