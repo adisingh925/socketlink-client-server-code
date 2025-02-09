@@ -2513,8 +2513,8 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
-    const std::string keyFilePath = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
-    const std::string certFileName = "/etc/letsencrypt/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
+    const std::string keyFilePath = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
+    const std::string certFileName = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
 
   /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/ 
   loop_ = uWS::Loop::get();
@@ -4700,7 +4700,7 @@ void waitForCorrectDNS(std::string_view domain, std::string_view expectedIP) {
  * @return true if the certificate exists, false otherwise.
  */
 bool doesCertificateExist(std::string_view domain) {
-    std::string certPath = "/etc/letsencrypt/live/" + std::string(domain) + "/cert.pem";
+    std::string certPath = "/home/socketlink/certbot-config/live/" + std::string(domain) + "/cert.pem";
     
     /** Check if the certificate file exists */
     struct stat buffer;
@@ -4715,7 +4715,7 @@ bool doesCertificateExist(std::string_view domain) {
  */
 bool isCertificateValid(std::string_view domain) {
     std::array<char, 128> buffer{};
-    std::string checkCmd = "openssl x509 -checkend 86400 -noout -in /etc/letsencrypt/live/" + std::string(domain) + "/cert.pem";
+    std::string checkCmd = "openssl x509 -checkend 86400 -noout -in /home/socketlink/certbot-config/live/" + std::string(domain) + "/cert.pem";
 
     /** Execute the command using popen */
     std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(checkCmd.c_str(), "r"), pclose);
