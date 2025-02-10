@@ -3313,7 +3313,10 @@ void worker_t::work()
                     }
 
                     if(action == 2){
-                        std::exit(0);
+                        std::thread([]() {
+                            std::this_thread::sleep_for(std::chrono::seconds(1)); 
+                            std::exit(0);
+                        }).detach();
                     }
                 } catch (std::exception &e) {
                     if(!*isAborted){
