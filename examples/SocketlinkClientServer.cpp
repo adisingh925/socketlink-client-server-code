@@ -2536,7 +2536,7 @@ void worker_t::work()
     uWS::SSLApp({
         .key_file_name = keyFilePath.c_str(),
         .cert_file_name = certFileName.c_str(),
-        .ssl_prefer_low_memory_usage = true,
+        .ssl_prefer_low_memory_usage = false,
     })
   );
 
