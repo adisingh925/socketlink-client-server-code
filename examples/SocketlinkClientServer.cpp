@@ -1458,61 +1458,56 @@ int populateUserData(std::string data) {
         }
     }
 
-    if(is_sql_integration_enabled == 1){
-        std::string dbHost = "";
-        std::string dbUser = "";
-        std::string dbPassword = "";
-        std::string dbName = "";
-        int dbPort = 0;
+    std::string dbHost = "";
+    std::string dbUser = "";
+    std::string dbPassword = "";
+    std::string dbName = "";
+    int dbPort = 0;
 
-        /** Store db data */
-        if (parsedJson.contains("db_host") && !parsedJson["db_host"].is_null()) {
-            dbHost = parsedJson["db_host"].get<std::string>();
-        }
-        if (parsedJson.contains("db_user") && !parsedJson["db_user"].is_null()) {
-            dbUser = parsedJson["db_user"].get<std::string>();
-        }
-        if (parsedJson.contains("db_password") && !parsedJson["db_password"].is_null()) {
-            dbPassword = parsedJson["db_password"].get<std::string>();
-        }
-        if (parsedJson.contains("db_name") && !parsedJson["db_name"].is_null()) {
-            dbName = parsedJson["db_name"].get<std::string>();
-        }
-        if (parsedJson.contains("db_port") && !parsedJson["db_port"].is_null()) {
-            dbPort = parsedJson["db_port"].get<int>();
-        }
+    /** Store db data */
+    if (parsedJson.contains("db_host") && !parsedJson["db_host"].is_null()) {
+        dbHost = parsedJson["db_host"].get<std::string>();
+    }
+    if (parsedJson.contains("db_user") && !parsedJson["db_user"].is_null()) {
+        dbUser = parsedJson["db_user"].get<std::string>();
+    }
+    if (parsedJson.contains("db_password") && !parsedJson["db_password"].is_null()) {
+        dbPassword = parsedJson["db_password"].get<std::string>();
+    }
+    if (parsedJson.contains("db_name") && !parsedJson["db_name"].is_null()) {
+        dbName = parsedJson["db_name"].get<std::string>();
+    }
+    if (parsedJson.contains("db_port") && !parsedJson["db_port"].is_null()) {
+        dbPort = parsedJson["db_port"].get<int>();
+    }
 
-        /** Enable SQL Integration feature */
-        if(
-            dbHost.length() > 0
-            && dbUser.length() > 0
-            && dbPassword.length() > 0
-            && dbName.length() > 0
-            && dbPort != 0
+    /** Enable SQL Integration feature */
+    if(
+        dbHost.length() > 0
+        && dbUser.length() > 0
+        && dbPassword.length() > 0
+        && dbName.length() > 0
+        && dbPort != 0
+    ){
+        if (
+            UserData::getInstance().dbHost != dbHost 
+            || UserData::getInstance().dbUser != dbUser
+            || UserData::getInstance().dbPassword != dbPassword
+            || UserData::getInstance().dbName != dbName
+            || UserData::getInstance().dbPort != dbPort
         ){
-            if (
-                UserData::getInstance().dbHost != dbHost 
-                || UserData::getInstance().dbUser != dbUser
-                || UserData::getInstance().dbPassword != dbPassword
-                || UserData::getInstance().dbName != dbName
-                || UserData::getInstance().dbPort != dbPort
-            ){
-                userData.dbHost = dbHost;
-                userData.dbUser = dbUser;
-                userData.dbPassword = dbPassword;
-                userData.dbName = dbName;
-                userData.dbPort = dbPort;
+            userData.dbHost = dbHost;
+            userData.dbUser = dbUser;
+            userData.dbPassword = dbPassword;
+            userData.dbName = dbName;
+            userData.dbPort = dbPort;
+        } 
+    }
 
-                featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
-                needsDBUpdate = 1;
-            } else {
-                featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
-                needsDBUpdate = 1;
-            }
-        } else {
-            featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 0;
-            needsDBUpdate = 1;
-        }
+    if (is_sql_integration_enabled == 1)
+    {
+        featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
+        needsDBUpdate = 1;
     }
     else if (is_sql_integration_enabled == -1)
     {
