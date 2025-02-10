@@ -4602,65 +4602,7 @@ void worker_t::work()
                 });
             }
         }
-	})
-    // .get("/api/v1/restart", [](auto *res, auto *req) {
-    //     /** send pong as a response for ping */
-    //     auto isAborted = std::make_shared<bool>(false);
-
-    //     res->onAborted([isAborted]() {
-    //         /** connection aborted */
-    //         *isAborted = true;
-    //     });
-
-    //     std::string_view secret = req->getHeader("secret");
-    //     std::string_view apiKey = req->getHeader("api-key");
-    //     std::string_view timestamp = req->getHeader("timestamp");
-
-        
-    //     /** check if the API key is valid or not */
-    //     if(apiKey != UserData::getInstance().adminApiKey){
-    //         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-    //         if(!*isAborted){
-    //             res->cork([res]() {
-    //                 res->writeStatus("403");
-    //                 res->writeHeader("Content-Type", "application/json");
-    //                 res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-    //             });
-    //         }
-
-    //         return;
-    //     }
-
-    //     /** generate the secret and compare */
-    //     unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
-    //     hmac_sha256(SECRET, strlen(SECRET), std::string(timestamp).c_str(), timestamp.length(), hmac_result);  /**< Compute HMAC */
-        
-    //     /** compare HMAC and respond accordingly */
-    //     if(secret != to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)){
-    //         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-    //         if(!*isAborted){
-    //             res->cork([res]() {
-    //                 res->writeStatus("403");
-    //                 res->writeHeader("Content-Type", "application/json");
-    //                 res->end(R"({"error": "Unauthorized access. Invalid signature!"})");
-    //             });
-    //         }
-
-    //         return;
-    //     }
-
-    //     if(!*isAborted){
-    //         res->cork([res]() {
-    //             res->writeStatus("200 OK");
-    //             res->end();
-    //         });
-    //     }
-
-    //     std::exit(0);
-	// })
-    .get("/api/v1/ping", [](auto *res, auto */*req*/) {
+	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
         /** send pong as a response for ping */
         auto isAborted = std::make_shared<bool>(false);
 
