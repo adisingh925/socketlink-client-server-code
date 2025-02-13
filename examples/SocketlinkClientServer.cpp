@@ -2859,14 +2859,16 @@ void worker_t::work()
                             }
 
                             /** publishing message */
-                            ws->publish(rid, message, opCode, true);
+                            /* ws->publish(rid, message, opCode, true); */
+                            std::string data = "{\"data\":\"" + std::string(message) + "\",\"source\":\"user\"}";
+                            ws->publish(rid, data, opCode, true);
 
-                            std::for_each(::workers.begin(), ::workers.end(), [message, opCode, rid](worker_t &w) {
+                            std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
                                 /** Check if the current thread ID matches the worker's thread ID */ 
                                 if (std::this_thread::get_id() != w.thread_->get_id()) {
                                     /** Defer the message publishing to the worker's loop */ 
-                                    w.loop_->defer([&w, message, opCode, rid]() {
-                                        w.app_->publish(rid, message, opCode, true);
+                                    w.loop_->defer([&w, data, opCode, rid]() {
+                                        w.app_->publish(rid, data, opCode, true);
                                     });
                                 }
                             });
@@ -4824,6 +4826,11 @@ int main() {
     /** Fetch and populated data before starting the threads */
     fetchAndPopulateUserData();
     init_env();
+
+    if(UserData::getInstance().subdomain.empty()){
+        /** something is wrong with the data, restarting the server */
+        std::exit(0);
+    }
 
     std::string domain = UserData::getInstance().subdomain + ".socketlink.io";
     waitForCorrectDNS(domain, UserData::getInstance().ip);  
