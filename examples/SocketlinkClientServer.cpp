@@ -2453,6 +2453,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
  ***************** ERROR_CODES ******************
  *
  * INVALID_JSON - 8931
+ * INTERNAL_SERVER_ERROR - 5000
  * 
  ************************* VERIFICATION_CODES ***************************
  * 
@@ -3519,266 +3520,279 @@ void worker_t::work()
         auto isAborted = std::make_shared<bool>(false);
         res->onAborted([isAborted]() { *isAborted = true; });
 
-        if (req->getHeader("api-key") != UserData::getInstance().clientApiKey) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            if (!res->hasResponded()) {
-                res->cork([res]() {
-                    res->writeStatus("403 Forbidden");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!", "code": 3203})");
-                });
+        try {
+            if (req->getHeader("api-key") != UserData::getInstance().clientApiKey) {
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                if (!res->hasResponded()) {
+                    res->cork([res]() {
+                        res->writeStatus("401 Unauthorized");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access. Invalid API key!", "code": 3203})");
+                    });
+                }
+
+                return;
             }
-            return;
-        }
-
-        std::string body;
-        body.reserve(1024);
-
-        res->onData([res, isAborted, body = std::move(body)](std::string_view data, bool last) mutable {
-            body.append(data);
-            if (!last) return;
-
-            try {
-                auto parsedJson = nlohmann::json::parse(body);
-                std::string rid = parsedJson["rid"];
-                std::string uid = parsedJson["uid"];
-
-                if (rid.empty() || rid.length() > 160) {
-                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                    if (!res->hasResponded()) {
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "The room id length should be between 1 to 160 characters!", "code": 3484})");
-                        });
-                    }
-                    return;
-                }
-
-                uint8_t roomType = 255;
-
-                /** checking if the correct room type is received */
-                if (rid.rfind("pub-state-cache-", 0) == 0)
-                {
-                    roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
-                }
-                else if (rid.rfind("pri-state-cache-", 0) == 0)
-                {
-                    roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
-                }
-                else if (rid.rfind("pub-cache-", 0) == 0)
-                {
-                    roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
-                }
-                else if (rid.rfind("pri-cache-", 0) == 0)
-                {
-                    roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
-                }
-                else if (rid.rfind("pub-state-", 0) == 0)
-                {
-                    roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
-                }
-                else if (rid.rfind("pri-state-", 0) == 0)
-                {
-                    roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
-                }
-                else if (rid.rfind("pub-", 0) == 0)
-                {
-                    roomType = static_cast<uint8_t>(Rooms::PUBLIC);
-                }
-                else if (rid.rfind("pri-", 0) == 0)
-                {
-                    roomType = static_cast<uint8_t>(Rooms::PRIVATE);
-                }
-                else
-                {
-                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                    
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end("{\"error\": \"The provided room type is invalid!\", \"code\": 3925}");
-                        });
-                    }
-
-                    return;
-                }
-
-                tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
-                if (!connections.find(accessor, uid)) {
-                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                    if (!res->hasResponded()) {
-                        res->cork([res]() {
-                            res->writeStatus("404 Not Found");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Connection not found!", "code": 3910})");
-                        });
-                    }
-                    return;
-                }
-
-                auto *ws = accessor->second.ws;
-                auto *worker = accessor->second.worker;
-
-                if (ws->getUserData()->rid == rid) {
-                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                    if (!res->hasResponded()) {
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "You are already in the same room!", "code": 3780})");
-                        });
-                    }
-                    return;
-                }
-
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
-                if (bannedConnections.find(outer_accessor, rid) && outer_accessor->second.count(uid)) {
-                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                    if (!res->hasResponded()) {
-                        res->cork([res]() {
-                            res->writeStatus("403 Forbidden");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "You have been banned from this room!", "code": 3371})");
-                        });
-                    }
-                    return;
-                }
-
-                if(roomType == static_cast<uint8_t>(Rooms::PRIVATE) 
-                || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) 
-                || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
-                || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-                ){
-                    if(webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1){
-                        std::ostringstream payload;
-
-                        switch (roomType)
-                        {
-                            case static_cast<uint8_t>(Rooms::PRIVATE) : {
-                                payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                                << "\"trigger\":\"INIT_PRIVATE_ROOM_VERIFICATION\", "
-                                << "\"code\":4001, "
-                                << "\"uid\":\"" << uid << "\", "
-                                << "\"rid\":\"" << rid << "\"}";
-                                break;
-                            }
-
-                            case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
-                                payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                                << "\"trigger\":\"INIT_PRIVATE_STATE_ROOM_VERIFICATION\", "
-                                << "\"code\":4002, "
-                                << "\"uid\":\"" << uid << "\", "
-                                << "\"rid\":\"" << rid << "\"}";
-                                break;
-                            }
-
-                            case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
-                                payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                                << "\"trigger\":\"INIT_PRIVATE_CACHE_ROOM_VERIFICATION\", "
-                                << "\"code\":4003, "
-                                << "\"uid\":\"" << uid << "\", "
-                                << "\"rid\":\"" << rid << "\"}";
-                                break;
-                            }
-
-                            case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
-                                payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                                << "\"trigger\":\"INIT_PRIVATE_STATE_CACHE_ROOM_VERIFICATION\", "
-                                << "\"code\":4004, "
-                                << "\"uid\":\"" << uid << "\", "
-                                << "\"rid\":\"" << rid << "\"}";
-                                break;
-                            }
-                        }
-
-                        std::string body = payload.str(); 
-                        httplib::Headers headers = {};
-
-                        /** if the webhook secret is present add the hmac */
-                        if(UserData::getInstance().webhookSecret.length() > 0){
-                            unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
-                            hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
-                            headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
-                        }
-        
-                        int status = sendHTTPSPOSTRequest(
-                            UserData::getInstance().webHookBaseUrl,
-                            UserData::getInstance().webhookPath,
-                            body,
-                            headers
-                        ).status;
-
-                        if(status != 200){
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                            
-                            if(!*isAborted){
-                                res->cork([res]() {
-                                    res->writeStatus("403 Forbidden");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end("{\"error\": \"You are not allowed to access this private room!\", \"code\": 3511}");
-                                });
-                            }
-
-                            return;
-                        }
-                    } else {
+    
+            std::string body;
+            body.reserve(1024);
+    
+            res->onData([res, isAborted, body = std::move(body)](std::string_view data, bool last) mutable {
+                body.append(data);
+                if (!last) return;
+    
+                try {
+                    auto parsedJson = nlohmann::json::parse(body);
+                    std::string rid = parsedJson["rid"];
+                    std::string uid = parsedJson["uid"];
+    
+                    if (rid.empty() || rid.length() > 160) {
                         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-                        if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
-                            std::ostringstream payload;
-                            payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                                    << "\"trigger\":\"ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED\", "  
-                                    << "\"code\":3376, "
-                                    << "\"uid\":\"" << uid << "\", "
-                                    << "\"rid\":\"" << rid << "\", "
-                                    << "\"message\":\"Please enable ON_VERIFICATION_REQUEST webhook to use private rooms!\"}";
-
-                            std::string body = payload.str(); 
-                            
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {}
-                            );
-                        }
-
-                        if(!*isAborted){
+                        if (!res->hasResponded()) {
                             res->cork([res]() {
-                                res->writeStatus("403 Forbidden");
+                                res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"error\": \"You are not allowed to access this private room!\", \"code\": 3511}");
+                                res->end(R"({"message": "The room id length should be between 1 to 160 characters!", "code": 3484})");
                             });
                         }
 
                         return;
-                    } 
-                }
+                    }
+    
+                    uint8_t roomType = 255;
+    
+                    /** checking if the correct room type is received */
+                    if (rid.rfind("pub-state-cache-", 0) == 0)
+                    {
+                        roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
+                    }
+                    else if (rid.rfind("pri-state-cache-", 0) == 0)
+                    {
+                        roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
+                    }
+                    else if (rid.rfind("pub-cache-", 0) == 0)
+                    {
+                        roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
+                    }
+                    else if (rid.rfind("pri-cache-", 0) == 0)
+                    {
+                        roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
+                    }
+                    else if (rid.rfind("pub-state-", 0) == 0)
+                    {
+                        roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
+                    }
+                    else if (rid.rfind("pri-state-", 0) == 0)
+                    {
+                        roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
+                    }
+                    else if (rid.rfind("pub-", 0) == 0)
+                    {
+                        roomType = static_cast<uint8_t>(Rooms::PUBLIC);
+                    }
+                    else if (rid.rfind("pri-", 0) == 0)
+                    {
+                        roomType = static_cast<uint8_t>(Rooms::PRIVATE);
+                    }
+                    else
+                    {
+                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                        
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end("{\"message\": \"The provided room type is invalid!\", \"code\": 3925}");
+                            });
+                        }
+    
+                        return;
+                    }
+    
+                    tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
+                    if (!connections.find(accessor, uid)) {
+                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                        if (!res->hasResponded()) {
+                            res->cork([res]() {
+                                res->writeStatus("404 Not Found");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Connection not found for the given uid!", "code": 3910})");
+                            });
+                        }
+                        return;
+                    }
+    
+                    auto *ws = accessor->second.ws;
+                    auto *worker = accessor->second.worker;
+    
+                    if (ws->getUserData()->rid == rid) {
+                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                        if (!res->hasResponded()) {
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "You are already in the same room!", "code": 3780})");
+                            });
+                        }
 
-                closeConnection(ws, worker);
-                ws->getUserData()->rid = rid;
-                ws->getUserData()->roomType = roomType;
-                openConnection(ws, worker);
+                        return;
+                    }
+    
+                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
+                    if (bannedConnections.find(outer_accessor, rid) && outer_accessor->second.count(uid)) {
+                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                        if (!res->hasResponded()) {
+                            res->cork([res]() {
+                                res->writeStatus("403 Forbidden");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "You have been banned from this room!", "code": 3371})");
+                            });
+                        }
+                        return;
+                    }
+    
+                    if(roomType == static_cast<uint8_t>(Rooms::PRIVATE) 
+                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) 
+                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
+                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+                    ){
+                        if(webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1){
+                            std::ostringstream payload;
+    
+                            switch (roomType)
+                            {
+                                case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                                    << "\"trigger\":\"INIT_PRIVATE_ROOM_VERIFICATION\", "
+                                    << "\"code\":4001, "
+                                    << "\"uid\":\"" << uid << "\", "
+                                    << "\"rid\":\"" << rid << "\"}";
+                                    break;
+                                }
+    
+                                case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                                    << "\"trigger\":\"INIT_PRIVATE_STATE_ROOM_VERIFICATION\", "
+                                    << "\"code\":4002, "
+                                    << "\"uid\":\"" << uid << "\", "
+                                    << "\"rid\":\"" << rid << "\"}";
+                                    break;
+                                }
+    
+                                case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                                    << "\"trigger\":\"INIT_PRIVATE_CACHE_ROOM_VERIFICATION\", "
+                                    << "\"code\":4003, "
+                                    << "\"uid\":\"" << uid << "\", "
+                                    << "\"rid\":\"" << rid << "\"}";
+                                    break;
+                                }
+    
+                                case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                                    << "\"trigger\":\"INIT_PRIVATE_STATE_CACHE_ROOM_VERIFICATION\", "
+                                    << "\"code\":4004, "
+                                    << "\"uid\":\"" << uid << "\", "
+                                    << "\"rid\":\"" << rid << "\"}";
+                                    break;
+                                }
+                            }
+    
+                            std::string body = payload.str(); 
+                            httplib::Headers headers = {};
+    
+                            /** if the webhook secret is present add the hmac */
+                            if(UserData::getInstance().webhookSecret.length() > 0){
+                                unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
+                                hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
+                                headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
+                            }
+            
+                            int status = sendHTTPSPOSTRequest(
+                                UserData::getInstance().webHookBaseUrl,
+                                UserData::getInstance().webhookPath,
+                                body,
+                                headers
+                            ).status;
+    
+                            if(status != 200){
+                                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                                
+                                if(!*isAborted){
+                                    res->cork([res]() {
+                                        res->writeStatus("403 Forbidden");
+                                        res->writeHeader("Content-Type", "application/json");
+                                        res->end("{\"message\": \"You are not allowed to access this private room!\", \"code\": 3511}");
+                                    });
+                                }
+    
+                                return;
+                            }
+                        } else {
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+    
+                            if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
+                                std::ostringstream payload;
+                                payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                                        << "\"trigger\":\"ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED\", "  
+                                        << "\"code\":3376, "
+                                        << "\"uid\":\"" << uid << "\", "
+                                        << "\"rid\":\"" << rid << "\", "
+                                        << "\"message\":\"Please enable ON_VERIFICATION_REQUEST webhook to use private rooms!\"}";
+    
+                                std::string body = payload.str(); 
+                                
+                                sendHTTPSPOSTRequestFireAndForget(
+                                    UserData::getInstance().webHookBaseUrl,
+                                    UserData::getInstance().webhookPath,
+                                    body,
+                                    {}
+                                );
+                            }
+    
+                            if(!*isAborted){
+                                res->cork([res]() {
+                                    res->writeStatus("403 Forbidden");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end("{\"message\": \"The ON_VERIFICATION_REQUEST webhook must be enabled to activate private rooms!\", \"code\": 3376}");
+                                });
+                            }
+    
+                            return;
+                        } 
+                    }
+    
+                    closeConnection(ws, worker);
+                    ws->getUserData()->rid = rid;
+                    ws->getUserData()->roomType = roomType;
+                    openConnection(ws, worker);
+    
+                    if (!res->hasResponded()) {
+                        res->cork([res]() {
+                            res->writeStatus("200 OK");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"message": "Successfully updated the room for the uid!", "code": 7481})");
+                        });
+                    }
+                } catch (const std::exception &e) {
+                    if (!res->hasResponded()) {
+                        res->cork([res, e]() {
+                            res->writeStatus("400 Bad Request");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end("{\"message\": \"Invalid JSON format : " + std::string(e.what()) + "\", \"code\": 8931}");
+                        });
+                    }
+                }
+            });
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-                if (!res->hasResponded()) {
-                    res->cork([res]() {
-                        res->writeStatus("200 OK");
-                        res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"message": "Successfully updated the room for the uid!", "code": 7481})");
-                    });
-                }
-            } catch (const std::exception &e) {
-                if (!res->hasResponded()) {
-                    res->cork([res, e]() {
-                        res->writeStatus("400 Bad Request");
-                        res->writeHeader("Content-Type", "application/json");
-                        res->end("{\"error\": \"Invalid JSON format: " + std::string(e.what()) + "\", \"code\": 8931}");
-                    });
-                }
-            }
-        });
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!", "code": 5000})");
+            });
+        }
 	}).post("/api/v1/broadcast", [this](auto *res, auto *req) {
         /** broadcast a message to everyone connected to the server */
         auto isAborted = std::make_shared<bool>(false);
