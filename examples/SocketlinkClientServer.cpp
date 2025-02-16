@@ -2565,7 +2565,7 @@ void worker_t::work()
             std::string(req->getHeader("sec-websocket-protocol")),
             std::string(req->getHeader("sec-websocket-extensions")),
             std::string(req->getHeader("api-key")),
-            std::string(req->getHeader("uid").empty() ? req->getHeader("sec-websocket-key") : req->getHeader("uid")),
+            std::string(req->getHeader("uid").empty() ? "" : req->getHeader("uid")),
             context,
             res
         };
@@ -2574,7 +2574,7 @@ void worker_t::work()
             upgradeData->aborted = true;
         });
 
-        if(upgradeData->uid == upgradeData->secWebSocketKey){
+        if(upgradeData->uid.length() <= 0 || upgradeData->uid.length() > 4096){
             /** check if the connection is banned */
             if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
                 res->writeStatus("400 Bad Request");
@@ -2586,7 +2586,7 @@ void worker_t::work()
                         << "\"trigger\":\"EMPTY_UID\", "
                         << "\"code\":3291, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"message\":\"uid cannot be empty!\"}";
+                        << "\"message\":\"uid length should be between 1 and 4096 characters!\"}";
 
                 std::string body = payload.str();
 
