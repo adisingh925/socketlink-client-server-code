@@ -2449,6 +2449,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
  ***************** SUCCESS *********************** 
  *
  * ON_ROOM_SUCCESSFULLY_UPDATED - 7481
+ * ON_METRICS_SUCCESSFULLY_FETCHED - 7598
  * 
  ***************** ERROR_CODES ******************
  *
@@ -3180,10 +3181,6 @@ void worker_t::work()
             /** connection aborted */
             *isAborted = true;
         });
-         
-        if(UserData::getInstance().clientApiKey.empty()){
-            fetchAndPopulateUserData();
-        }
 
         if (req->getHeader("api-key") != UserData::getInstance().adminApiKey) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
@@ -3192,7 +3189,7 @@ void worker_t::work()
                 res->cork([res]() {
                     res->writeStatus("401 Unauthorized");
                     res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+                    res->end(R"({"message": "Unauthorized access. Invalid API key!", "code": 3203})");
                 });
             }
 
@@ -3201,9 +3198,9 @@ void worker_t::work()
 
         if(!*isAborted){
             res->cork([res]() {
-                res->writeStatus("200 OK");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"connections": )" 
+            res->writeStatus("200 OK");
+            res->writeHeader("Content-Type", "application/json");
+            res->end(R"({"connections": )" 
                 + std::to_string(globalConnectionCounter.load(std::memory_order_relaxed)) 
                 + R"(,"messages_sent": )" 
                 + std::to_string(globalMessagesSent.load(std::memory_order_relaxed)) 
@@ -3217,8 +3214,8 @@ void worker_t::work()
                 + std::to_string(averageLatency.load(std::memory_order_relaxed)) 
                 + R"(,"dropped_messages": )" 
                 + std::to_string(droppedMessages.load(std::memory_order_relaxed)) 
-                + R"(})");
-            });
+                + R"(,"code": 7598})");
+            });            
         }
 	}).post("/api/v1/invalidate", [](auto *res, auto *req) {
         /** update the metadata used by the server */
