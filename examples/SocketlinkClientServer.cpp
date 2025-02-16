@@ -2565,7 +2565,7 @@ void worker_t::work()
             std::string(req->getHeader("sec-websocket-protocol")),
             std::string(req->getHeader("sec-websocket-extensions")),
             std::string(req->getHeader("api-key")),
-            std::string(req->getHeader("uid").empty() ? "" : req->getHeader("uid")),
+            std::string(req->getHeader("uid").data() ? req->getHeader("uid") : ""),
             context,
             res
         };
