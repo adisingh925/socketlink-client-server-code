@@ -2429,7 +2429,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
  * MAX_CONNECTION_LIMIT_REACHED - 3982
  * INVALID_API_KEY - 3203
  * UID_ALREADY_EXIST - 3780
- * EMPTY_UID - 3291
+ * INVALID_UID - 3291
  * 
  ********************** ON_ROOM_UPDATE **************************************
  * 
@@ -2574,16 +2574,15 @@ void worker_t::work()
             upgradeData->aborted = true;
         });
 
-        if(upgradeData->uid.length() <= 0 || upgradeData->uid.length() > 4096){
-            /** check if the connection is banned */
-            if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
-                res->writeStatus("400 Bad Request");
-                res->writeHeader("Content-Type", "application/json");
-                res->end("EMPTY_UID");
+        if(upgradeData->uid.empty() || upgradeData->uid.length() > 4096){
+            res->writeStatus("400 Bad Request");
+            res->writeHeader("Content-Type", "application/json");
+            res->end("INVALID_UID");
 
+            if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                        << "\"trigger\":\"EMPTY_UID\", "
+                        << "\"trigger\":\"INVALID_UID\", "
                         << "\"code\":3291, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"message\":\"uid length should be between 1 and 4096 characters!\"}";
