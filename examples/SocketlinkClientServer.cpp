@@ -2577,7 +2577,7 @@ void worker_t::work()
         if(upgradeData->uid == upgradeData->secWebSocketKey){
             /** check if the connection is banned */
             if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
-                res->writeStatus("403 Forbidden");
+                res->writeStatus("400 Bad Request");
                 res->writeHeader("Content-Type", "application/json");
                 res->end("EMPTY_UID");
 
@@ -2642,7 +2642,7 @@ void worker_t::work()
         tbb::concurrent_hash_map<std::string, bool>::const_accessor accessor;
         if(uid.find(accessor, upgradeData->uid)){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end("UID_ALREADY_EXIST");
+            res->writeStatus("409 Conflict")->end("UID_ALREADY_EXIST");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
@@ -2668,7 +2668,7 @@ void worker_t::work()
         /** Check if the connection limit has been exceeded */
         if (globalConnectionCounter.load(std::memory_order_relaxed) >= UserData::getInstance().connections) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end("MAX_CONNECTION_LIMIT_REACHED");
+            res->writeStatus("503 Service Unavailable")->end("MAX_CONNECTION_LIMIT_REACHED");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
@@ -2694,7 +2694,7 @@ void worker_t::work()
         /** Check if API key is valid or not */
         if(UserData::getInstance().clientApiKey != upgradeData->key){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("403 Forbidden")->end("INVALID_API_KEY");
+            res->writeStatus("401 Unauthorized")->end("INVALID_API_KEY");
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
@@ -3150,7 +3150,7 @@ void worker_t::work()
         {
             tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
             if (connections.find(conn_accessor, userId)) {
-                connections.erase(conn_accessor);  // Correct usage
+                connections.erase(conn_accessor);  
             }
         }
 
@@ -3161,7 +3161,7 @@ void worker_t::work()
         {
             tbb::concurrent_hash_map<std::string, bool>::accessor uid_accessor;
             if (uid.find(uid_accessor, userId)) {
-                uid.erase(uid_accessor);  // Correct usage
+                uid.erase(uid_accessor);  
             }
         }
 
