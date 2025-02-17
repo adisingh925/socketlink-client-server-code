@@ -2450,11 +2450,13 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
  *
  * ON_ROOM_SUCCESSFULLY_UPDATED - 7481
  * ON_METRICS_SUCCESSFULLY_FETCHED - 7598
+ * MYSQL_DATA_SUCCESSFULLY_SYNCED - 7892
  * 
  ***************** ERROR_CODES ******************
  *
  * INVALID_JSON - 8931
  * INTERNAL_SERVER_ERROR - 5000
+ * MYSQL_INTEGRATION_IS_DISABLED - 8234
  * 
  ************************* VERIFICATION_CODES ***************************
  * 
@@ -3182,40 +3184,50 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        if (req->getHeader("api-key") != UserData::getInstance().adminApiKey) {
+        try {
+            if (req->getHeader("api-key") != UserData::getInstance().adminApiKey) {
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+    
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("401 Unauthorized");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access. Invalid API key!"})");
+                    });
+                }
+    
+                return;
+            }
+    
+            if (!*isAborted) {
+                res->cork([res]() {
+                res->writeStatus("200 OK");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"connections": )" 
+                    + std::to_string(globalConnectionCounter.load(std::memory_order_relaxed)) 
+                    + R"(,"messages_sent": )" 
+                    + std::to_string(globalMessagesSent.load(std::memory_order_relaxed)) 
+                    + R"(,"average_payload_size": )" 
+                    + std::to_string(averagePayloadSize.load(std::memory_order_relaxed)) 
+                    + R"(,"total_payload_sent": )" 
+                    + std::to_string(totalPayloadSent.load(std::memory_order_relaxed)) 
+                    + R"(,"total_rejected_requests": )" 
+                    + std::to_string(totalRejectedRquests.load(std::memory_order_relaxed))
+                    + R"(,"average_latency": )" 
+                    + std::to_string(averageLatency.load(std::memory_order_relaxed)) 
+                    + R"(,"dropped_messages": )" 
+                    + std::to_string(droppedMessages.load(std::memory_order_relaxed)) 
+                    + R"(})");
+                });
+            }            
+        } catch (std::exception &e) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("401 Unauthorized");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"message": "Unauthorized access. Invalid API key!", "code": 3203})");
-                });
-            }
-
-            return;
-        }
-
-        if(!*isAborted){
             res->cork([res]() {
-            res->writeStatus("200 OK");
-            res->writeHeader("Content-Type", "application/json");
-            res->end(R"({"connections": )" 
-                + std::to_string(globalConnectionCounter.load(std::memory_order_relaxed)) 
-                + R"(,"messages_sent": )" 
-                + std::to_string(globalMessagesSent.load(std::memory_order_relaxed)) 
-                + R"(,"average_payload_size": )" 
-                + std::to_string(averagePayloadSize.load(std::memory_order_relaxed)) 
-                + R"(,"total_payload_sent": )" 
-                + std::to_string(totalPayloadSent.load(std::memory_order_relaxed)) 
-                + R"(,"total_rejected_requests": )" 
-                + std::to_string(totalRejectedRquests.load(std::memory_order_relaxed))
-                + R"(,"average_latency": )" 
-                + std::to_string(averageLatency.load(std::memory_order_relaxed)) 
-                + R"(,"dropped_messages": )" 
-                + std::to_string(droppedMessages.load(std::memory_order_relaxed)) 
-                + R"(,"code": 7598})");
-            });            
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
         }
 	}).post("/api/v1/invalidate", [](auto *res, auto *req) {
         /** update the metadata used by the server */
@@ -3227,102 +3239,108 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        if(UserData::getInstance().adminApiKey.empty()){
-            fetchAndPopulateUserData();
-        }
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
+            std::string_view secret = req->getHeader("secret");
 
-        std::string_view apiKey = req->getHeader("api-key");
-        std::string_view secret = req->getHeader("secret");
+            /** check if the API key is valid or not */
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-        /** check if the API key is valid or not */
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
 
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-                });
+                return;
             }
 
-            return;
-        }
+            std::string body;
+        
+            body.reserve(1024);
 
-        std::string body;
-    
-        body.reserve(1024);
+            res->onData([res, req, body = std::move(body), secret, isAborted](std::string_view data, bool last) mutable {
+                body.append(data.data(), data.length());
 
-        res->onData([res, req, body = std::move(body), secret, isAborted](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
+                if (last) { 
+                    try {
+                        /** generate the secret and compare */
+                        unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
+                        hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
 
-            if (last) { 
-                try {
-                    /** generate the secret and compare */
-                    unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
-                    hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
+                        /** compare HMAC and respond accordingly */
+                        if(secret != to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)){
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-                    /** compare HMAC and respond accordingly */
-                    if(secret != to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)){
-                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                            if(!*isAborted){
+                                res->cork([res]() {
+                                    res->writeStatus("403");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "Unauthorized access, Invalid signature!"})");
+                                });
+                            }
 
-                        if(!*isAborted){
-                            res->cork([res]() {
-                                res->writeStatus("403");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"error": "Unauthorized access. Invalid signature!"})");
+                            return;
+                        }
+
+                        /** Parse the JSON response */ 
+                        int action = populateUserData(body);
+                        
+                        if(action == 1){
+                            /** check if the connection parameters are changed */
+                            std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
+                                /** Defer the message publishing to the worker's loop */ 
+                                w.loop_->defer([&w]() {
+                                    w.db_handler->manualCreateConnection();
+                                });
+                            });
+                        } else if(action == -1) {
+                            std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
+                                /** Defer the message publishing to the worker's loop */ 
+                                w.loop_->defer([&w]() {
+                                    w.db_handler->flushRemainingData();
+                                    w.db_handler->disconnect();
+                                });
                             });
                         }
 
-                        return;
-                    }
-
-                    /** Parse the JSON response */ 
-                    int action = populateUserData(body);
-                    
-                    if(action == 1){
-                        /** check if the connection parameters are changed */
-                        std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
-                            /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w]() {
-                                w.db_handler->manualCreateConnection();
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("200 OK");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Metadata invalidated successfully!"})");
                             });
-                        });
-                    } else if(action == -1) {
-                        std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
-                            /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w]() {
-                                w.db_handler->flushRemainingData();
-                                w.db_handler->disconnect();
+                        }
+
+                        if(action == 2){
+                            std::thread([]() {
+                                std::this_thread::sleep_for(std::chrono::seconds(1)); 
+                                std::exit(0);
+                            }).detach();
+                        }
+                    } catch (std::exception &e) {
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid JSON format!"})");
                             });
-                        });
-                    }
-
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Metadata invalidated successfully."})");
-                        });
-                    }
-
-                    if(action == 2){
-                        std::thread([]() {
-                            std::this_thread::sleep_for(std::chrono::seconds(1)); 
-                            std::exit(0);
-                        }).detach();
-                    }
-                } catch (std::exception &e) {
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Invalid JSON format!"})");
-                        });
+                        }
                     }
                 }
-            }
-        });
+            });
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
 	}).post("/api/v1/mysql/sync", [](auto *res, auto *req) {
         /** sync all the data in the buffers to integrated mysql server */
 
@@ -3333,46 +3351,56 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 0){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "MySQL integration is disabled!"})");
-                });
+        try {
+            if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 0){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+    
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403 Forbidden");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "MySQL integration is disabled!"})");
+                    });
+                }
+    
+                return;
             }
-
-            return;
-        }
-
-        if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-                });
+    
+            if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+    
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("401 Unauthorized");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access. Invalid API key!"})");
+                    });
+                }
+    
+                return;
             }
-
-            return;
-        }
-
-        std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
-            /** Defer the message publishing to the worker's loop */ 
-            w.loop_->defer([&w]() {
-                w.db_handler->flushRemainingData();
+    
+            std::for_each(::workers.begin(), ::workers.end(), [](worker_t &w) {
+                /** Defer the message publishing to the worker's loop */ 
+                w.loop_->defer([&w]() {
+                    w.db_handler->flushRemainingData();
+                });
             });
-        });
+    
+            if(!*isAborted){
+                res->cork([res]() {
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "MySQL data synced successfully!"})");
+                });
+            }
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-        if(!*isAborted){
             res->cork([res]() {
-                res->writeStatus("200 OK");
+                res->writeStatus("500 Internal Server Error");
                 res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "MySQL data synced successfully."})");
+                res->end(R"({"message": "Internal server error!"})");
             });
         }
 	}).get("/api/v1/rooms", [this](auto *res, auto *req) {
@@ -3385,46 +3413,56 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
+        try {
+            if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+    
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("401 Unauthorized");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+    
+                return;
+            }
+    
+            nlohmann::json data = nlohmann::json::array(); 
+    
+            for (const auto& [rid, users] : topics) {  
+                /** Create a JSON object for the room */
+                nlohmann::json roomData;
+                roomData["rid"] = rid;
+    
+                /** Store only the keys from the inner map */
+                std::vector<std::string> userKeys;
+                
+                for (const auto& [uid, _] : users) {  
+                    userKeys.push_back(uid);
+                }
+    
+                /** Convert vector to JSON array */
+                roomData["uid"] = std::move(userKeys);
+    
+                /** Store the room data in the final list */
+                data.push_back(std::move(roomData));
+            }
+            
             if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403 Forbidden");
+                res->cork([res, data]() {
+                    res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
-                    res->end("{\"error\": \"Unauthorized access. Invalid API key!\"}");
+                    res->end(data.dump());  
                 });
             }
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            return;
-        }
-
-        nlohmann::json data = nlohmann::json::array(); 
-
-        for (const auto& [rid, users] : topics) {  
-            /** Create a JSON object for the room */
-            nlohmann::json roomData;
-            roomData["rid"] = rid;
-
-            /** Store only the keys from the inner map */
-            std::vector<std::string> userKeys;
-            
-            for (const auto& [uid, _] : users) {  
-                userKeys.push_back(uid);
-            }
-
-            /** Convert vector to JSON array */
-            roomData["uid"] = std::move(userKeys);
-
-            /** Store the room data in the final list */
-            data.push_back(std::move(roomData));
-        }
-        
-        if(!*isAborted){
-            res->cork([res, data]() {
-                res->writeStatus("200 OK");
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
                 res->writeHeader("Content-Type", "application/json");
-                res->end(data.dump());  
+                res->end(R"({"message": "Internal server error!"})");
             });
         }
 	}).post("/api/v1/rooms/connections", [this](auto *res, auto *req) {
@@ -3437,81 +3475,91 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view apiKey = req->getHeader("api-key");
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
 
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403 Forbidden");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end("{\"error\": \"Unauthorized access. Invalid API key!\"}");
-                });
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("401 Unauthorized");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
             }
 
-            return;
-        }
+            std::string body;
+        
+            body.reserve(1024);
 
-        std::string body;
-    
-        body.reserve(1024);
+            res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
+                body.append(data.data(), data.length());
 
-        res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
+                if (last) { 
+                    try {
+                        nlohmann::json parsedJson = nlohmann::json::parse(body);
 
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+                        /** get rid from the request body */
+                        std::vector<std::string> rids = parsedJson["rid"].get<std::vector<std::string>>();
 
-                    /** get rid from the request body */
-                    std::vector<std::string> rids = parsedJson["rid"].get<std::vector<std::string>>();
+                        /** Prepare the response JSON array */
+                        nlohmann::json data = nlohmann::json::array();
 
-                    /** Prepare the response JSON array */
-                    nlohmann::json data = nlohmann::json::array();
+                        /** Iterate over each `rid` and collect responses */
+                        for (const auto& rid : rids) {
+                            nlohmann::json roomData;
+                            roomData["rid"] = rid;
 
-                    /** Iterate over each `rid` and collect responses */
-                    for (const auto& rid : rids) {
-                        nlohmann::json roomData;
-                        roomData["rid"] = rid;
+                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
 
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
-
-                        if (topics.find(outer_accessor, rid)) {
-                            /** Convert the inner map to a JSON array */
-                            nlohmann::json uidArray = nlohmann::json::array();
-                            
-                            /** Iterate over the inner map and add the uids to the JSON array */
-                            for (const auto& entry : outer_accessor->second) {
-                                uidArray.push_back(entry.first);  /** entry.first is the uid */ 
+                            if (topics.find(outer_accessor, rid)) {
+                                /** Convert the inner map to a JSON array */
+                                nlohmann::json uidArray = nlohmann::json::array();
+                                
+                                /** Iterate over the inner map and add the uids to the JSON array */
+                                for (const auto& entry : outer_accessor->second) {
+                                    uidArray.push_back(entry.first);  /** entry.first is the uid */ 
+                                }
+                                
+                                roomData["uid"] = uidArray;
+                            } else {
+                                roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
                             }
-                            
-                            roomData["uid"] = uidArray;
-                        } else {
-                            roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
+
+                            data.push_back(roomData);
                         }
 
-                        data.push_back(roomData);
-                    }
-
-                    if(!*isAborted){
-                        res->cork([res, data]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(data.dump()); 
-                        });
-                    }
-                } catch (std::exception &e) {
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Invalid JSON format!"})");
-                        });
+                        if(!*isAborted){
+                            res->cork([res, data]() {
+                                res->writeStatus("200 OK");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(data.dump()); 
+                            });
+                        }
+                    } catch (std::exception &e) {
+                        if(!*isAborted){
+                            res->cork([res, e]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid JSON format!"})");
+                            });
+                        }
                     }
                 }
-            }
-        }); 
+            }); 
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
 	}).post("/api/v1/connections/update/room", [this](auto *res, auto *req) {
         auto isAborted = std::make_shared<bool>(false);
         res->onAborted([isAborted]() { *isAborted = true; });
@@ -3523,7 +3571,7 @@ void worker_t::work()
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"message": "Unauthorized access. Invalid API key!", "code": 3203})");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                     });
                 }
 
@@ -3548,7 +3596,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "The room id length should be between 1 to 160 characters!", "code": 3484})");
+                                res->end(R"({"message": "The room id length should be between 1 to 160 characters!"})");
                             });
                         }
 
@@ -3598,7 +3646,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"message\": \"The provided room type is invalid!\", \"code\": 3925}");
+                                res->end("{\"message\": \"The provided room type is invalid!\"}");
                             });
                         }
     
@@ -3612,7 +3660,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("404 Not Found");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Connection not found for the given uid!", "code": 3910})");
+                                res->end(R"({"message": "Connection not found for the given uid!"})");
                             });
                         }
                         return;
@@ -3627,7 +3675,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "You are already in the same room!", "code": 3780})");
+                                res->end(R"({"message": "You are already in the same room!"})");
                             });
                         }
 
@@ -3641,7 +3689,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("403 Forbidden");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "You have been banned from this room!", "code": 3371})");
+                                res->end(R"({"message": "You have been banned from this room!"})");
                             });
                         }
                         return;
@@ -3718,7 +3766,7 @@ void worker_t::work()
                                     res->cork([res]() {
                                         res->writeStatus("403 Forbidden");
                                         res->writeHeader("Content-Type", "application/json");
-                                        res->end("{\"message\": \"You are not allowed to access this private room!\", \"code\": 3511}");
+                                        res->end("{\"message\": \"You are not allowed to access this private room!\"}");
                                     });
                                 }
     
@@ -3750,7 +3798,7 @@ void worker_t::work()
                                 res->cork([res]() {
                                     res->writeStatus("403 Forbidden");
                                     res->writeHeader("Content-Type", "application/json");
-                                    res->end("{\"message\": \"The ON_VERIFICATION_REQUEST webhook must be enabled to activate private rooms!\", \"code\": 3376}");
+                                    res->end("{\"message\": \"The ON_VERIFICATION_REQUEST webhook must be enabled to activate private rooms!\"}");
                                 });
                             }
     
@@ -3767,7 +3815,7 @@ void worker_t::work()
                         res->cork([res]() {
                             res->writeStatus("200 OK");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Successfully updated the room for the uid!", "code": 7481})");
+                            res->end(R"({"message": "Successfully updated the room for the uid!"})");
                         });
                     }
                 } catch (const std::exception &e) {
@@ -3775,7 +3823,7 @@ void worker_t::work()
                         res->cork([res, e]() {
                             res->writeStatus("400 Bad Request");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end("{\"message\": \"Invalid JSON format : " + std::string(e.what()) + "\", \"code\": 8931}");
+                            res->end(R"({"message": "Invalid JSON format!"})");
                         });
                     }
                 }
@@ -3786,7 +3834,7 @@ void worker_t::work()
             res->cork([res]() {
                 res->writeStatus("500 Internal Server Error");
                 res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!", "code": 5000})");
+                res->end(R"({"message": "Internal server error!"})");
             });
         }
 	}).post("/api/v1/broadcast", [this](auto *res, auto *req) {
@@ -3798,59 +3846,69 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-                });
-            }
-
-            return;
-        }
-
-        std::string body;
+        try {
+            if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
     
-        body.reserve(1024);
-
-        res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
-
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
-
-                    std::string message = parsedJson["message"].get<std::string>();
-
-                    /** broadcast a message to all the rooms */
-                    std::for_each(::workers.begin(), ::workers.end(), [message](worker_t &w) {
-                        /** Defer the message publishing to the worker's loop */ 
-                        w.loop_->defer([&w, message]() {
-                            w.app_->publish(BROADCAST, message, uWS::OpCode::TEXT, true);
-                        });
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                     });
-
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Successfully broadcasted the message to everyone on the server!"})");
+                }
+    
+                return;
+            }
+    
+            std::string body;
+        
+            body.reserve(1024);
+    
+            res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
+                body.append(data.data(), data.length());
+    
+                if (last) { 
+                    try {
+                        nlohmann::json parsedJson = nlohmann::json::parse(body);
+    
+                        std::string message = parsedJson["message"].get<std::string>();
+    
+                        /** broadcast a message to all the rooms */
+                        std::for_each(::workers.begin(), ::workers.end(), [message](worker_t &w) {
+                            /** Defer the message publishing to the worker's loop */ 
+                            w.loop_->defer([&w, message]() {
+                                w.app_->publish(BROADCAST, message, uWS::OpCode::TEXT, true);
+                            });
                         });
-                    }
-                } catch (std::exception &e) {
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Invalid JSON format!"})");
-                        });
+    
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("200 OK");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Successfully broadcasted the message to everyone on the server!"})");
+                            });
+                        }
+                    } catch (std::exception &e) {
+                        if(!*isAborted){
+                            res->cork([res, e]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid JSON format!"})");
+                            });
+                        }
                     }
                 }
-            }
-        });
+            });
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
 	}).post("/api/v1/rooms/broadcast", [this](auto *res, auto *req) {
         /** broadcast a message to a particular room */
 
@@ -3861,64 +3919,74 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view apiKey = req->getHeader("api-key");
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
 
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-                });
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
             }
 
-            return;
-        }
+            std::string body;
+        
+            body.reserve(1024);
 
-        std::string body;
-    
-        body.reserve(1024);
+            res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
+                body.append(data.data(), data.length());
 
-        res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
+                if (last) { 
+                    try {
+                        nlohmann::json parsedJson = nlohmann::json::parse(body);
 
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+                        std::string message = parsedJson["message"].get<std::string>();
+                        std::vector<std::string> rids = parsedJson["rid"].get<std::vector<std::string>>();
 
-                    std::string message = parsedJson["message"].get<std::string>();
-                    std::vector<std::string> rids = parsedJson["rid"].get<std::vector<std::string>>();
-
-                    for (const auto& rid : rids) {
-                        /** broadcast a message to a specific room */
-                        std::for_each(::workers.begin(), ::workers.end(), [message, rid](worker_t &w) {
-                            /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w, message, rid]() {
-                                w.app_->publish(rid, message, uWS::OpCode::TEXT, true);
+                        for (const auto& rid : rids) {
+                            /** broadcast a message to a specific room */
+                            std::for_each(::workers.begin(), ::workers.end(), [message, rid](worker_t &w) {
+                                /** Defer the message publishing to the worker's loop */ 
+                                w.loop_->defer([&w, message, rid]() {
+                                    w.app_->publish(rid, message, uWS::OpCode::TEXT, true);
+                                });
                             });
-                        });
-                    }
+                        }
 
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Successfully broadcasted the message to the given room!"})");
-                        });
-                    }
-                } catch (std::exception &e) {
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Invalid JSON format."})");
-                        });
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("200 OK");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Successfully broadcasted the message to the given room!"})");
+                            });
+                        }
+                    } catch (std::exception &e) {
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid JSON format!"})");
+                            });
+                        }
                     }
                 }
-            }
-        });
+            });
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
 	}).post("/api/v1/connections/broadcast", [this](auto *res, auto *req) {
         /** broadcast a message to a particular connection */
 
@@ -3929,64 +3997,74 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view apiKey = req->getHeader("api-key");
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
 
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-                });
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
             }
 
-            return;
-        }
+            std::string body;
+        
+            body.reserve(1024);
 
-        std::string body;
-    
-        body.reserve(1024);
+            res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
+                body.append(data.data(), data.length());
 
-        res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
+                if (last) { 
+                    try {
+                        nlohmann::json parsedJson = nlohmann::json::parse(body);
 
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+                        std::string message = parsedJson["message"].get<std::string>();
+                        std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
 
-                    std::string message = parsedJson["message"].get<std::string>();
-                    std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
-
-                    for (const auto& uid : uids) {
-                        /** broadcast a message to a specific member of a room */
-                        std::for_each(::workers.begin(), ::workers.end(), [message, uid](worker_t &w) {
-                            /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w, message, uid]() {
-                                w.app_->publish(uid, message, uWS::OpCode::TEXT, true);
+                        for (const auto& uid : uids) {
+                            /** broadcast a message to a specific member of a room */
+                            std::for_each(::workers.begin(), ::workers.end(), [message, uid](worker_t &w) {
+                                /** Defer the message publishing to the worker's loop */ 
+                                w.loop_->defer([&w, message, uid]() {
+                                    w.app_->publish(uid, message, uWS::OpCode::TEXT, true);
+                                });
                             });
-                        });
-                    }
+                        }
 
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Successfully broadcasted the message to the given connection!"})");
-                        });
-                    }
-                } catch (std::exception &e) {
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Invalid JSON format!"})");
-                        });
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("200 OK");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Successfully broadcasted the message to the given connection!"})");
+                            });
+                        }
+                    } catch (std::exception &e) {
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid JSON format!"})");
+                            });
+                        }
                     }
                 }
-            }
-        });
+            });
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
 	}).post("/api/v1/rooms/ban", [this](auto *res, auto *req) {
         /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
 
@@ -3997,87 +4075,97 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view apiKey = req->getHeader("api-key");
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
 
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key."})");
-                });
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
             }
 
-            return;
-        }
+            std::string body;
+        
+            body.reserve(1024);
 
-        std::string body;
-    
-        body.reserve(1024);
+            res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
+                body.append(data.data(), data.length());
 
-        res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
+                if (last) { 
+                    try {
+                        nlohmann::json parsedJson = nlohmann::json::parse(body);
 
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
+                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                        tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
-                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
-                    tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
+                        /** saving all the banned connections in a map */
 
-                    /** saving all the banned connections in a map */
+                        for (const auto& item : parsedJson) {
+                            /** Extract `rid` and `uid` from each item in the request */ 
+                            std::string rid = item["rid"];
+                            std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                    for (const auto& item : parsedJson) {
-                        /** Extract `rid` and `uid` from each item in the request */ 
-                        std::string rid = item["rid"];
-                        std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
+                            /** Try to find or insert the outer map entry */
+                            if (!bannedConnections.find(global_accessor, rid)) {
+                                bannedConnections.insert(global_accessor, rid);
+                            }
 
-                        /** Try to find or insert the outer map entry */
-                        if (!bannedConnections.find(global_accessor, rid)) {
-                            bannedConnections.insert(global_accessor, rid);
-                        }
+                            for (const auto& uid : uids) {                            
+                                /** Check if uid already exists before inserting */
+                                if (!global_accessor->second.find(user_accessor, uid)) {
+                                    global_accessor->second.insert(user_accessor, uid);
+                                    user_accessor->second = true;
 
-                        for (const auto& uid : uids) {                            
-                            /** Check if uid already exists before inserting */
-                            if (!global_accessor->second.find(user_accessor, uid)) {
-                                global_accessor->second.insert(user_accessor, uid);
-                                user_accessor->second = true;
+                                    /** Fetch the connection for the given uid from the connections map */
+                                    tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
+                                    if (connections.find(conn_accessor, uid)) {
+                                        uWS::WebSocket<true, true, PerSocketData>* ws = conn_accessor->second.ws; 
+                                        worker_t* worker = conn_accessor->second.worker; 
 
-                                /** Fetch the connection for the given uid from the connections map */
-                                tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
-                                if (connections.find(conn_accessor, uid)) {
-                                    uWS::WebSocket<true, true, PerSocketData>* ws = conn_accessor->second.ws; 
-                                    worker_t* worker = conn_accessor->second.worker; 
-
-                                    /** Disconnect the WebSocket or perform any other disconnection logic */
-                                    worker->loop_->defer([ws]() {
-                                        ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
-                                    });
+                                        /** Disconnect the WebSocket or perform any other disconnection logic */
+                                        worker->loop_->defer([ws]() {
+                                            ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
+                                        });
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Given members are successfully banned from the given rooms!"})");
-                        });
-                    }
-                } catch (std::exception &e) {
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Invalid JSON format!"})");
-                        });
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("200 OK");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Given members are successfully banned from the given rooms!"})");
+                            });
+                        }
+                    } catch (std::exception &e) {
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid JSON format!"})");
+                            });
+                        }
                     }
                 }
-            }
-        });
+            });
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
 	}).post("/api/v1/rooms/unban", [this](auto *res, auto *req) {
         /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
 
@@ -4088,74 +4176,84 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view apiKey = req->getHeader("api-key");
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
 
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-                });
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
             }
 
-            return;
-        }
+            std::string body;
+        
+            body.reserve(1024);
 
-        std::string body;
-    
-        body.reserve(1024);
+            res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
+                body.append(data.data(), data.length());
 
-        res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
+                if (last) { 
+                    try {
+                        nlohmann::json parsedJson = nlohmann::json::parse(body);
+                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                        tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
-                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
-                    tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
+                        for (const auto& item : parsedJson) {
+                            /** Extract `rid` and `uid` from each item in the request */ 
+                            std::string rid = item["rid"];
+                            std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                    for (const auto& item : parsedJson) {
-                        /** Extract `rid` and `uid` from each item in the request */ 
-                        std::string rid = item["rid"];
-                        std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
+                            /** Check if the room exists before trying to erase */
+                            if (bannedConnections.find(global_accessor, rid)) {
+                                for (const auto& uid : uids) {
+                                    /** Check if the user exists before erasing */
+                                    if (global_accessor->second.find(user_accessor, uid)) {
+                                        global_accessor->second.erase(user_accessor);
+                                    }
+                                }
 
-                        /** Check if the room exists before trying to erase */
-                        if (bannedConnections.find(global_accessor, rid)) {
-                            for (const auto& uid : uids) {
-                                /** Check if the user exists before erasing */
-                                if (global_accessor->second.find(user_accessor, uid)) {
-                                    global_accessor->second.erase(user_accessor);
+                                /** If the inner map becomes empty, erase the entire entry */
+                                if (global_accessor->second.empty()) {
+                                    bannedConnections.erase(global_accessor);
                                 }
                             }
+                        }
 
-                            /** If the inner map becomes empty, erase the entire entry */
-                            if (global_accessor->second.empty()) {
-                                bannedConnections.erase(global_accessor);
-                            }
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("200 OK");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Members are successfully unbanned from the given rooms!"})");
+                            });
+                        }
+                    } catch (std::exception &e) {
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid JSON format!"})");
+                            });
                         }
                     }
-
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Members are successfully unbanned from the given rooms!"})");
-                        });
-                    }
-                } catch (std::exception &e) {
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Invalid JSON format!"})");
-                        });
-                    }
                 }
-            }
-        });
+            });
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
 	}).put("/api/v1/server/messaging/:action", [this](auto *res, auto *req) {
         /** enable or disable message sending at the server level (for everyone) */
 
@@ -4166,52 +4264,62 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view apiKey = req->getHeader("api-key");
-        std::string_view action = req->getParameter("action");
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
+            std::string_view action = req->getParameter("action");
 
-        if(apiKey != UserData::getInstance().adminApiKey){
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
+            }
+
+            if (action == "enable")
+            {
+                isMessagingDisabled.store(false, std::memory_order_relaxed);
+            }
+            else if (action == "disable")
+            {
+                isMessagingDisabled.store(true, std::memory_order_relaxed);
+            }
+            else
+            {
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("400 Bad Request");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Invalid action!"})");
+                    });
+                }
+                return;
+            }
+
+            if(!*isAborted){
+                res->cork([res, action]() {
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+
+                    if(action == "enable")
+                        res->end(R"({"message": "Messaging successfully enabled for everyone!"})");
+                    else
+                        res->end(R"({"message": "Messaging successfully disabled for everyone!"})");
+                });
+            }
+        } catch (std::exception &e) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-                });
-            }
-
-            return;
-        }
-
-        if (action == "enable")
-        {
-            isMessagingDisabled.store(false, std::memory_order_relaxed);
-        }
-        else if (action == "disable")
-        {
-            isMessagingDisabled.store(true, std::memory_order_relaxed);
-        }
-        else
-        {
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("400 Bad Request");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Invalid action!"})");
-                });
-            }
-            return;
-        }
-
-        if(!*isAborted){
-            res->cork([res, action]() {
-                res->writeStatus("200 OK");
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
                 res->writeHeader("Content-Type", "application/json");
-
-                if(action == "enable")
-                    res->end(R"({"message": "Messaging successfully enabled for everyone!"})");
-                else
-                    res->end(R"({"message": "Messaging successfully disabled for everyone!"})");
+                res->end(R"({"message": "Internal server error!"})");
             });
         }
 	}).post("/api/v1/rooms/messaging/:action", [this](auto *res, auto *req) {
@@ -4224,109 +4332,119 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view apiKey = req->getHeader("api-key");
-        std::string_view action = req->getParameter("action");
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
+            std::string_view action = req->getParameter("action");
 
-        if(apiKey != UserData::getInstance().adminApiKey){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-                });
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
             }
 
-            return;
-        }
+            std::string body;
+        
+            body.reserve(1024);
 
-        std::string body;
-    
-        body.reserve(1024);
+            res->onData([res, req, body = std::move(body), action, isAborted](std::string_view data, bool last) mutable {
+                body.append(data.data(), data.length());
 
-        res->onData([res, req, body = std::move(body), action, isAborted](std::string_view data, bool last) mutable {
-            body.append(data.data(), data.length());
+                if (last) { 
+                    try {
+                        nlohmann::json parsedJson = nlohmann::json::parse(body);
+                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                        tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
-            if (last) { 
-                try {
-                    nlohmann::json parsedJson = nlohmann::json::parse(body);
-                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
-                    tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
+                        for (const auto& item : parsedJson) {
+                            /** Extract `rid` and `uid` from each item in the request */ 
+                            std::string rid = item["rid"];
+                            std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                    for (const auto& item : parsedJson) {
-                        /** Extract `rid` and `uid` from each item in the request */ 
-                        std::string rid = item["rid"];
-                        std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
+                            if (action == "enable")
+                            {
+                                /** Check if the room exists before trying to erase */
+                                if (disabledConnections.find(global_accessor, rid)) {
+                                    for (const auto& uid : uids) {
+                                        /** Check if the user exists before erasing */
+                                        if (global_accessor->second.find(user_accessor, uid)) {
+                                            global_accessor->second.erase(user_accessor);
+                                        }
+                                    }
 
-                        if (action == "enable")
-                        {
-                            /** Check if the room exists before trying to erase */
-                            if (disabledConnections.find(global_accessor, rid)) {
-                                for (const auto& uid : uids) {
-                                    /** Check if the user exists before erasing */
-                                    if (global_accessor->second.find(user_accessor, uid)) {
-                                        global_accessor->second.erase(user_accessor);
+                                    /** If the inner map becomes empty, erase the entire entry */
+                                    if (global_accessor->second.empty()) {
+                                        disabledConnections.erase(global_accessor);
                                     }
                                 }
+                            }
+                            else if (action == "disable")
+                            {
+                                /** Try to find or insert the outer map entry */
+                                if (!disabledConnections.find(global_accessor, rid)) {
+                                    disabledConnections.insert(global_accessor, rid);
+                                }
 
-                                /** If the inner map becomes empty, erase the entire entry */
-                                if (global_accessor->second.empty()) {
-                                    disabledConnections.erase(global_accessor);
+                                for (const auto& uid : uids) {                            
+                                    /** Check if uid already exists before inserting */
+                                    if (!global_accessor->second.find(user_accessor, uid)) {
+                                        global_accessor->second.insert(user_accessor, uid);
+                                        user_accessor->second = true;
+                                    }
                                 }
                             }
-                        }
-                        else if (action == "disable")
-                        {
-                            /** Try to find or insert the outer map entry */
-                            if (!disabledConnections.find(global_accessor, rid)) {
-                                disabledConnections.insert(global_accessor, rid);
-                            }
-
-                            for (const auto& uid : uids) {                            
-                                /** Check if uid already exists before inserting */
-                                if (!global_accessor->second.find(user_accessor, uid)) {
-                                    global_accessor->second.insert(user_accessor, uid);
-                                    user_accessor->second = true;
-                                }
-                            }
-                        }
-                        else
-                        {
-                            if(!*isAborted){
-                                res->cork([res]() {
-                                    res->writeStatus("400 Bad Request");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"error": "Invalid action!"})");
-                                });
-                            }
-
-                            return;
-                        }
-                    }
-
-                    if(!*isAborted){
-                        res->cork([res, action]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-
-                            if(action == "enable")
-                                res->end(R"({"message": "Messaging successfully enabled for the members of the given rooms!"})");
                             else
-                                res->end(R"({"message": "Messaging successfully disabled for the members of the given rooms!"})");
-                        });
-                    }
-                } catch (std::exception &e) {
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Invalid JSON format!"})");
-                        });
+                            {
+                                if(!*isAborted){
+                                    res->cork([res]() {
+                                        res->writeStatus("400 Bad Request");
+                                        res->writeHeader("Content-Type", "application/json");
+                                        res->end(R"({"message": "Invalid action!"})");
+                                    });
+                                }
+
+                                return;
+                            }
+                        }
+
+                        if(!*isAborted){
+                            res->cork([res, action]() {
+                                res->writeStatus("200 OK");
+                                res->writeHeader("Content-Type", "application/json");
+
+                                if(action == "enable")
+                                    res->end(R"({"message": "Messaging successfully enabled for the members of the given rooms!"})");
+                                else
+                                    res->end(R"({"message": "Messaging successfully disabled for the members of the given rooms!"})");
+                            });
+                        }
+                    } catch (std::exception &e) {
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid JSON format!"})");
+                            });
+                        }
                     }
                 }
-            }
-        });
+            });
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
 	}).get("/api/v1/connections/banned", [this](auto *res, auto *req) {
         /** Handle the request to fetch all banned connections */
 
@@ -4337,52 +4455,62 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view apiKey = req->getHeader("api-key");
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
 
-        /** Check if the API key is valid */
-        if (apiKey != UserData::getInstance().adminApiKey) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            /** Check if the API key is valid */
+            if (apiKey != UserData::getInstance().adminApiKey) {
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            /** Respond with 403 Unauthorized if the API key is invalid */
+                /** Respond with 403 Unauthorized if the API key is invalid */
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
+            }
+
+            /** Create and reserve space for the JSON response */
+            nlohmann::json data = nlohmann::json::array(); 
+
+            for (const auto& [rid, users] : bannedConnections) {  
+                /** Create a JSON object for the room */
+                nlohmann::json roomData;
+                roomData["rid"] = rid;
+
+                /** Store only the keys from the inner map */
+                std::vector<std::string> userKeys;
+                
+                for (const auto& [uid, _] : users) {  
+                    userKeys.push_back(uid);
+                }
+
+                /** Convert vector to JSON array */
+                roomData["uid"] = std::move(userKeys);
+
+                /** Store the room data in the final list */
+                data.push_back(std::move(roomData));
+            }
+
+            /** Send the successful response with all banned connections */
             if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
+                res->cork([res, data]() {
+                    res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+                    res->end(data.dump());  /** Serialize the JSON response and send it */ 
                 });
             }
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            return;
-        }
-
-        /** Create and reserve space for the JSON response */
-        nlohmann::json data = nlohmann::json::array(); 
-
-        for (const auto& [rid, users] : bannedConnections) {  
-            /** Create a JSON object for the room */
-            nlohmann::json roomData;
-            roomData["rid"] = rid;
-
-            /** Store only the keys from the inner map */
-            std::vector<std::string> userKeys;
-            
-            for (const auto& [uid, _] : users) {  
-                userKeys.push_back(uid);
-            }
-
-            /** Convert vector to JSON array */
-            roomData["uid"] = std::move(userKeys);
-
-            /** Store the room data in the final list */
-            data.push_back(std::move(roomData));
-        }
-
-        /** Send the successful response with all banned connections */
-        if(!*isAborted){
-            res->cork([res, data]() {
-                res->writeStatus("200 OK");
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
                 res->writeHeader("Content-Type", "application/json");
-                res->end(data.dump());  /** Serialize the JSON response and send it */ 
+                res->end(R"({"message": "Internal server error!"})");
             });
         }
 	}).get("/api/v1/connections/messaging/disabled", [this](auto *res, auto *req) {
@@ -4395,52 +4523,62 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view apiKey = req->getHeader("api-key");
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
 
-        /** Check if the API key is valid */
-        if (apiKey != UserData::getInstance().adminApiKey) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            /** Check if the API key is valid */
+            if (apiKey != UserData::getInstance().adminApiKey) {
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            /** Respond with 403 Unauthorized if the API key is invalid */
+                /** Respond with 403 Unauthorized if the API key is invalid */
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
+            }
+
+            /** Create and reserve space for the JSON response */
+            nlohmann::json json_response = nlohmann::json::array();
+
+            for (const auto& [rid, users] : disabledConnections) {  
+                /** Create a JSON object for the room */
+                nlohmann::json roomData;
+                roomData["rid"] = rid;
+
+                /** Store only the keys from the inner map */
+                std::vector<std::string> userKeys;
+                
+                for (const auto& [uid, _] : users) {  
+                    userKeys.push_back(uid);
+                }
+
+                /** Convert vector to JSON array */
+                roomData["uid"] = std::move(userKeys);
+
+                /** Store the room data in the final list */
+                json_response.push_back(std::move(roomData));
+            }
+            
+            /** Send the successful response with all banned connections */
             if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
+                res->cork([res, json_response]() {
+                    res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
+                    res->end(json_response.dump());  /** Serialize the JSON response and send it */ 
                 });
             }
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            return;
-        }
-
-        /** Create and reserve space for the JSON response */
-        nlohmann::json json_response = nlohmann::json::array();
-
-        for (const auto& [rid, users] : disabledConnections) {  
-            /** Create a JSON object for the room */
-            nlohmann::json roomData;
-            roomData["rid"] = rid;
-
-            /** Store only the keys from the inner map */
-            std::vector<std::string> userKeys;
-            
-            for (const auto& [uid, _] : users) {  
-                userKeys.push_back(uid);
-            }
-
-            /** Convert vector to JSON array */
-            roomData["uid"] = std::move(userKeys);
-
-            /** Store the room data in the final list */
-            json_response.push_back(std::move(roomData));
-        }
-        
-        /** Send the successful response with all banned connections */
-        if(!*isAborted){
-            res->cork([res, json_response]() {
-                res->writeStatus("200 OK");
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
                 res->writeHeader("Content-Type", "application/json");
-                res->end(json_response.dump());  /** Serialize the JSON response and send it */ 
+                res->end(R"({"message": "Internal server error!"})");
             });
         }
 	}).get("/api/v1/messages/room/:rid", [this](auto *res, auto *req) {
@@ -4453,87 +4591,97 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        std::string_view rid = req->getParameter("rid");
-        std::string_view apiKey = req->getHeader("api-key");
-        std::string_view uid = req->getHeader("uid");
+        try {
+            std::string_view rid = req->getParameter("rid");
+            std::string_view apiKey = req->getHeader("api-key");
+            std::string_view uid = req->getHeader("uid");
 
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
 
-        if (topics.find(outer_accessor, std::string(rid))) {
-            /** Access the inner map corresponding to 'rid' */
-            tbb::concurrent_hash_map<std::string, bool>& inner_map = outer_accessor->second;
+            if (topics.find(outer_accessor, std::string(rid))) {
+                /** Access the inner map corresponding to 'rid' */
+                tbb::concurrent_hash_map<std::string, bool>& inner_map = outer_accessor->second;
 
-            /** Create an accessor for the inner map */
-            tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+                /** Create an accessor for the inner map */
+                tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
 
-            /** Check if value exists in the inner map (uid) */
-            if (inner_map.find(inner_accessor, std::string(uid))) {
-                int limit, offset;
+                /** Check if value exists in the inner map (uid) */
+                if (inner_map.find(inner_accessor, std::string(uid))) {
+                    int limit, offset;
 
-                try {
-                    limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
-                } catch (const std::exception& e) {
-                    limit = 10; /** Default value if conversion fails */
-                }
-
-                if (limit > 10) {
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Limit cannot be greater than 10!"})");
-                        });
+                    try {
+                        limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
+                    } catch (const std::exception& e) {
+                        limit = 10; /** Default value if conversion fails */
                     }
 
-                    return;
-                }
+                    if (limit > 10) {
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Limit cannot be greater than 10!"})");
+                            });
+                        }
 
-                try {
-                    offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
-                } catch (const std::exception& e) {
-                    offset = 0; /** Default value if conversion fails */
-                }
-
-                write_worker(std::string(rid), "", "", true);
-
-                if (apiKey != UserData::getInstance().clientApiKey) {
-                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-                    if(!*isAborted){
-                        res->cork([res]() {
-                            res->writeStatus("403");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-                        });
+                        return;
                     }
 
-                    return;
-                }
+                    try {
+                        offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
+                    } catch (const std::exception& e) {
+                        offset = 0; /** Default value if conversion fails */
+                    }
 
-                if(!*isAborted){
-                    res->cork([res, rid, limit, offset]() {
-                        res->writeStatus("200 OK");
-                        res->writeHeader("Content-Type", "application/json");
-                        res->end(read_worker(std::string(rid), limit, offset));
-                    });
+                    write_worker(std::string(rid), "", "", true);
+
+                    if (apiKey != UserData::getInstance().clientApiKey) {
+                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("403");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                            });
+                        }
+
+                        return;
+                    }
+
+                    if(!*isAborted){
+                        res->cork([res, rid, limit, offset]() {
+                            res->writeStatus("200 OK");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(read_worker(std::string(rid), limit, offset));
+                        });
+                    }
+                } else {
+                    if(!*isAborted){
+                        res->cork([res]() {
+                            res->writeStatus("403 Forbidden");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"message": "Access denied!"})");
+                        });
+                    }
                 }
             } else {
                 if(!*isAborted){
                     res->cork([res]() {
                         res->writeStatus("403 Forbidden");
                         res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"error": "Access denied!"})");
+                        res->end(R"({"message": "Access denied!"})");
                     });
                 }
             }
-        } else {
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403 Forbidden");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Access denied!"})");
-                });
-            }
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
         }
 	}).del("/api/v1/database", [this](auto *res, auto *req) {
         /** delete all the data present in the LMDB database */
@@ -4545,74 +4693,84 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        /** Extract the API key from the request header */
-        std::string_view apiKey = req->getHeader("api-key");
+        try {
+            /** Extract the API key from the request header */
+            std::string_view apiKey = req->getHeader("api-key");
 
-        /** Check if the provided API key is valid */
-        if (apiKey != UserData::getInstance().adminApiKey) {
-            /** Increment the rejected request counter to track unauthorized access */
+            /** Check if the provided API key is valid */
+            if (apiKey != UserData::getInstance().adminApiKey) {
+                /** Increment the rejected request counter to track unauthorized access */
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                /** Respond with 403 Forbidden if the API key is invalid */
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
+            }
+
+            MDB_txn* txn = nullptr;  /** Pointer for LMDB transaction */
+            MDB_dbi dbi;  /** Handle for LMDB database */
+
+            try {
+                /** Begin a write transaction, avoid creating a new txn each time for efficiency */
+                if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
+                    throw std::runtime_error("Failed to begin transaction.");
+                }
+
+                /** Open the database only once and reuse the handle */
+                if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
+                    mdb_txn_abort(txn);  /** Abort transaction if database fails to open */
+                    throw std::runtime_error("Failed to open database.");
+                }
+
+                /** Drop all keys in the database while keeping its structure */
+                if (mdb_drop(txn, dbi, 0) != 0) {  /** Pass `0` to truncate the database */
+                    mdb_txn_abort(txn);  /** Abort transaction if drop operation fails */
+                    throw std::runtime_error("Failed to drop database.");
+                }
+
+                /** Commit the transaction to apply changes, keeping memory use low */
+                if (mdb_txn_commit(txn) != 0) {
+                    throw std::runtime_error("Failed to commit transaction.");
+                }
+
+                /** Respond with a success message */
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("200 OK");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Database truncated successfully!"})");
+                    });
+                }
+            } catch (const std::exception& e) {
+                /** Handle any errors efficiently without leaking resources */
+
+                /** If an error occurs, make sure the transaction is aborted to free resources */
+                if (txn) mdb_txn_abort(txn);
+
+                /** Respond with the error message */
+                if(!*isAborted){
+                    res->cork([res, e]() {
+                        res->writeStatus("500 Internal Server Error");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Internal server error!"})");
+                    });
+                }
+            }
+        } catch (std::exception &e) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            /** Respond with 403 Forbidden if the API key is invalid */
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("403");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": "Unauthorized access. Invalid API key!"})");
-                });
-            }
-
-            return;
-        }
-
-        MDB_txn* txn = nullptr;  /** Pointer for LMDB transaction */
-        MDB_dbi dbi;  /** Handle for LMDB database */
-
-        try {
-            /** Begin a write transaction, avoid creating a new txn each time for efficiency */
-            if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-                throw std::runtime_error("Failed to begin transaction.");
-            }
-
-            /** Open the database only once and reuse the handle */
-            if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
-                mdb_txn_abort(txn);  /** Abort transaction if database fails to open */
-                throw std::runtime_error("Failed to open database.");
-            }
-
-            /** Drop all keys in the database while keeping its structure */
-            if (mdb_drop(txn, dbi, 0) != 0) {  /** Pass `0` to truncate the database */
-                mdb_txn_abort(txn);  /** Abort transaction if drop operation fails */
-                throw std::runtime_error("Failed to drop database.");
-            }
-
-            /** Commit the transaction to apply changes, keeping memory use low */
-            if (mdb_txn_commit(txn) != 0) {
-                throw std::runtime_error("Failed to commit transaction.");
-            }
-
-            /** Respond with a success message */
-            if(!*isAborted){
-                res->cork([res]() {
-                    res->writeStatus("200 OK");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"message": "Database truncated successfully!"})");
-                });
-            }
-        } catch (const std::exception& e) {
-            /** Handle any errors efficiently without leaking resources */
-
-            /** If an error occurs, make sure the transaction is aborted to free resources */
-            if (txn) mdb_txn_abort(txn);
-
-            /** Respond with the error message */
-            if(!*isAborted){
-                res->cork([res, e]() {
-                    res->writeStatus("500 Internal Server Error");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(R"({"error": ")" + std::string(e.what()) + R"("})");
-                });
-            }
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
         }
 	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
         /** send pong as a response for ping */
@@ -4623,10 +4781,20 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        if(!*isAborted){
+        try {
+            if(!*isAborted){
+                res->cork([res]() {
+                    res->writeStatus("200 OK");
+                    res->end("pong!");
+                });
+            }
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
             res->cork([res]() {
-                res->writeStatus("200 OK");
-                res->end("pong!");
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
             });
         }
 	}).any("/*", [](auto *res, auto */*req*/) {
@@ -4638,13 +4806,23 @@ void worker_t::work()
             *isAborted = true;
         });
 
-        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+        try {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-        if(!*isAborted){
+            if(!*isAborted){
+                res->cork([res]() {
+                    res->writeStatus("404 Not Found");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "The requested resource is not found!"})");
+                });
+            }
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
             res->cork([res]() {
-                res->writeStatus("404 Not Found");
+                res->writeStatus("500 Internal Server Error");
                 res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"error": "The requested resource is not found!"})");
+                res->end(R"({"message": "Internal server error!"})");
             });
         }
 	}).listen(PORT, [this](auto *token) {
