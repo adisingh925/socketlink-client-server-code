@@ -3852,7 +3852,7 @@ void worker_t::work()
     
                 if(!*isAborted){
                     res->cork([res]() {
-                        res->writeStatus("403");
+                        res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
                         res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                     });
@@ -4042,7 +4042,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Successfully broadcasted the message to the given connection!"})");
+                                res->end(R"({"message": "Successfully broadcasted the message to the given connections!"})");
                             });
                         }
                     } catch (std::exception &e) {
@@ -4420,9 +4420,9 @@ void worker_t::work()
                                 res->writeHeader("Content-Type", "application/json");
 
                                 if(action == "enable")
-                                    res->end(R"({"message": "Messaging successfully enabled for the members of the given rooms!"})");
+                                    res->end(R"({"message": "Messaging successfully enabled for the given members in the given rooms!"})");
                                 else
-                                    res->end(R"({"message": "Messaging successfully disabled for the members of the given rooms!"})");
+                                    res->end(R"({"message": "Messaging successfully disabled for the given members in the given rooms!"})");
                             });
                         }
                     } catch (std::exception &e) {
@@ -4640,7 +4640,7 @@ void worker_t::work()
 
                         if(!*isAborted){
                             res->cork([res]() {
-                                res->writeStatus("403");
+                                res->writeStatus("403 Forbidden");
                                 res->writeHeader("Content-Type", "application/json");
                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                             });
