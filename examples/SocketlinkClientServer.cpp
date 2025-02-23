@@ -1617,7 +1617,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
         };
 
         if (validRoomTypes.count(ws->getUserData()->roomType)) {
-            std::string result = R"({"event":"SOMEONE_LEFT_THE_ROOM", "uid":")" + ws->getUserData()->uid + R"("})";
+            std::string result = R"({"data":"SOMEONE_LEFT_THE_ROOM", "uid":")" + ws->getUserData()->uid + R"(", "source":"server"})";
 
             /** Publish message to all workers */
             for (auto& w : ::workers) {
@@ -2013,7 +2013,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
     }
 
     /** Send a message to self */
-    std::string selfMessage = "{\"event\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\"}";
+    std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
 
     if (workerThreadId == currentThreadId) {
         ws->send(selfMessage, uWS::OpCode::TEXT, true);
@@ -2029,7 +2029,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
         ws->getUserData()->roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
         
-            std::string broadcastMessage = "{\"event\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\"}";
+            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
 
             for (auto& w : ::workers) {
                 if (workerThreadId == w.thread_->get_id()) {
@@ -2646,13 +2646,13 @@ void worker_t::work()
             (disabledConnections.find(outer_accessor, rid) &&
             outer_accessor->second.find(inner_accessor, uid))) {
             
-            ws->send("{\"event\":\"MESSAGING_DISABLED\"}", uWS::OpCode::TEXT, true);
+            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
         } else {
             if(static_cast<int>(message.size()) > UserData::getInstance().msgSizeAllowedInBytes){
                 droppedMessages.fetch_add(1, std::memory_order_relaxed);
 
                 /** alert the client about the issue */
-                ws->send("{\"event\":\"MESSAGE_SIZE_EXCEEDED\"}", uWS::OpCode::TEXT, true);
+                ws->send("{\"data\":\"MESSAGE_SIZE_EXCEEDED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
 
                 if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
                     std::ostringstream payload;
@@ -2673,7 +2673,7 @@ void worker_t::work()
             else if (ws->getUserData()->sendingAllowed)
             {
                 if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes){
-                    ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
+                    ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
                     ws->getUserData()->sendingAllowed = false;
 
@@ -2902,11 +2902,11 @@ void worker_t::work()
                         else
                         {
                             droppedMessages.fetch_add(1, std::memory_order_relaxed);
-                            ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
+                            ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
                         }
                     } else {
                         droppedMessages.fetch_add(1, std::memory_order_relaxed);
-                        ws->send("{\"event\":\"MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\"}", uWS::OpCode::TEXT, true);
+                        ws->send("{\"data\":\"MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
 
                         if(webhookStatus[Webhooks::ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED] == 1){
                             std::ostringstream payload;
@@ -2926,7 +2926,7 @@ void worker_t::work()
                     }
                 }
             } else {
-                ws->send("{\"event\":\"YOU_ARE_RATE_LIMITED\"}", uWS::OpCode::TEXT, true);
+                ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
                 droppedMessages.fetch_add(1, std::memory_order_relaxed);
 
                 if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
@@ -2969,7 +2969,7 @@ void worker_t::work()
     .drain = [](auto *ws) {
         if(ws->getBufferedAmount() < (UserData::getInstance().maxBackpressureInBytes / 2)){
             ws->getUserData()->sendingAllowed = true;
-            ws->send("{\"event\":\"RATE_LIMIT_LIFTED\"}", uWS::OpCode::TEXT, true);
+            ws->send("{\"data\":\"RATE_LIMIT_LIFTED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
 
             if(webhookStatus[Webhooks::ON_RATE_LIMIT_LIFTED] == 1){
                 std::ostringstream payload;
@@ -3716,12 +3716,13 @@ void worker_t::work()
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
     
                         std::string message = parsedJson["message"].get<std::string>();
-    
+                        std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\"}";
+
                         /** broadcast a message to all the rooms */
-                        std::for_each(::workers.begin(), ::workers.end(), [message](worker_t &w) {
+                        std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast](worker_t &w) {
                             /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w, message]() {
-                                w.app_->publish(BROADCAST, message, uWS::OpCode::TEXT, true);
+                            w.loop_->defer([&w, messageToBroadcast]() {
+                                w.app_->publish(BROADCAST, messageToBroadcast, uWS::OpCode::TEXT, true);
                             });
                         });
     
@@ -3791,14 +3792,15 @@ void worker_t::work()
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
 
                         std::string message = parsedJson["message"].get<std::string>();
+                        std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\"}";
                         std::vector<std::string> rids = parsedJson["rid"].get<std::vector<std::string>>();
 
                         for (const auto& rid : rids) {
                             /** broadcast a message to a specific room */
-                            std::for_each(::workers.begin(), ::workers.end(), [message, rid](worker_t &w) {
+                            std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast, rid](worker_t &w) {
                                 /** Defer the message publishing to the worker's loop */ 
-                                w.loop_->defer([&w, message, rid]() {
-                                    w.app_->publish(rid, message, uWS::OpCode::TEXT, true);
+                                w.loop_->defer([&w, messageToBroadcast, rid]() {
+                                    w.app_->publish(rid, messageToBroadcast, uWS::OpCode::TEXT, true);
                                 });
                             });
                         }
@@ -3869,14 +3871,15 @@ void worker_t::work()
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
 
                         std::string message = parsedJson["message"].get<std::string>();
+                        std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\"}";
                         std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
 
                         for (const auto& uid : uids) {
                             /** broadcast a message to a specific member of a room */
-                            std::for_each(::workers.begin(), ::workers.end(), [message, uid](worker_t &w) {
+                            std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast, uid](worker_t &w) {
                                 /** Defer the message publishing to the worker's loop */ 
-                                w.loop_->defer([&w, message, uid]() {
-                                    w.app_->publish(uid, message, uWS::OpCode::TEXT, true);
+                                w.loop_->defer([&w, messageToBroadcast, uid]() {
+                                    w.app_->publish(uid, messageToBroadcast, uWS::OpCode::TEXT, true);
                                 });
                             });
                         }
@@ -3975,7 +3978,7 @@ void worker_t::work()
 
                                         /** Disconnect the WebSocket or perform any other disconnection logic */
                                         worker->loop_->defer([ws]() {
-                                            ws->end(1008, "{\"event\":\"YOU_HAVE_BEEN_BANNED\"}");
+                                            ws->end(1008, "{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"server\"}");
                                         });
                                     }
                                 }
