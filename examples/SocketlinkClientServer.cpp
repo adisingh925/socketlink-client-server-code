@@ -1617,7 +1617,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
         };
 
         if (validRoomTypes.count(ws->getUserData()->roomType)) {
-            std::string result = R"({"data":"SOMEONE_LEFT_THE_ROOM", "uid":")" + ws->getUserData()->uid + R"(", "source":"server"})";
+            std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"uid\":\"" + ws->getUserData()->uid + "\", \"source\":\"server\"}";
 
             /** Publish message to all workers */
             for (auto& w : ::workers) {
@@ -2648,29 +2648,7 @@ void worker_t::work()
             
             ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
         } else {
-            if(static_cast<int>(message.size()) > UserData::getInstance().msgSizeAllowedInBytes){
-                droppedMessages.fetch_add(1, std::memory_order_relaxed);
-
-                /** alert the client about the issue */
-                ws->send("{\"data\":\"MESSAGE_SIZE_EXCEEDED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-
-                if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
-                    std::ostringstream payload;
-                    payload << "{\"event\":\"ON_MESSAGE_SIZE_EXCEEDED\", "
-                            << "\"uid\":\"" << uid << "\", "
-                            << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msgSizeAllowedInBytes << "\"}";            
-                    
-                    std::string body = payload.str(); 
-                    
-                    sendHTTPSPOSTRequestFireAndForget(
-                        UserData::getInstance().webHookBaseUrl,
-                        UserData::getInstance().webhookPath,
-                        body,
-                        {}
-                    );
-                }
-            }
-            else if (ws->getUserData()->sendingAllowed)
+            if (ws->getUserData()->sendingAllowed)
             {
                 if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes){
                     ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
