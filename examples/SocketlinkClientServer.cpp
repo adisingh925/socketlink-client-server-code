@@ -3978,7 +3978,7 @@ void worker_t::work()
 
                                         /** Disconnect the WebSocket or perform any other disconnection logic */
                                         worker->loop_->defer([ws]() {
-                                            ws->end(1008, "{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"server\"}");
+                                            ws->end(1008, "{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\"}");
                                         });
                                     }
                                 }
