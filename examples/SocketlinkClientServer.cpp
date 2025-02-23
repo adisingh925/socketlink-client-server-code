@@ -1633,7 +1633,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_ROOM\", "
-                            << "\"code\":5025, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -1655,7 +1654,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_ROOM\", "
-                            << "\"code\":5026, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -1677,7 +1675,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM\", "
-                            << "\"code\":5027, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -1699,7 +1696,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM\", "
-                            << "\"code\":5028, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -1721,7 +1717,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_CACHE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_CACHE_ROOM\", "
-                            << "\"code\":5029, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -1743,7 +1738,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_CACHE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_CACHE_ROOM\", "
-                            << "\"code\":5030, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -1765,7 +1759,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PUBLIC_STATE_CACHE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_CLOSE_PUBLIC_STATE_CACHE_ROOM\", "
-                            << "\"code\":5031, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -1787,7 +1780,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE_PRIVATE_STATE_CACHE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_CLOSE_PRIVATE_STATE_CACHE_ROOM\", "
-                            << "\"code\":5032, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -1813,7 +1805,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                     if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_ROOM\", "
-                                << "\"code\":5033, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -1835,7 +1826,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                     if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_ROOM\", "
-                                << "\"code\":5034, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -1857,7 +1847,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                     if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_STATE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_STATE_ROOM\", "
-                                << "\"code\":5035, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -1879,7 +1868,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                     if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_STATE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_STATE_ROOM\", "
-                                << "\"code\":5036, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -1901,7 +1889,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                     if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_CACHE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_CACHE_ROOM\", "
-                                << "\"code\":5037, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -1923,7 +1910,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                     if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_CACHE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_CACHE_ROOM\", "
-                                << "\"code\":5038, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -1945,7 +1931,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                     if(webhookStatus[Webhooks::ON_ROOM_VACATED_PUBLIC_STATE_CACHE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_VACATED_PUBLIC_STATE_CACHE_ROOM\", "
-                                << "\"code\":5039, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -1967,7 +1952,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                     if(webhookStatus[Webhooks::ON_ROOM_VACATED_PRIVATE_STATE_CACHE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_VACATED_PRIVATE_STATE_CACHE_ROOM\", "
-                                << "\"code\":5040, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -2064,7 +2048,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_ROOM\", "
-                            << "\"code\":5001, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -2086,7 +2069,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_ROOM\", "
-                            << "\"code\":5002, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -2108,7 +2090,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM\", "
-                            << "\"code\":5003, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -2130,7 +2111,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM\", "
-                            << "\"code\":5004, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -2152,7 +2132,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM\", "
-                            << "\"code\":5005, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -2174,7 +2153,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_CACHE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_CACHE_ROOM\", "
-                            << "\"code\":5006, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -2196,7 +2174,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_STATE_CACHE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_STATE_CACHE_ROOM\", "
-                            << "\"code\":5007, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -2218,7 +2195,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PRIVATE_STATE_CACHE_ROOM] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PRIVATE_STATE_CACHE_ROOM\", "
-                            << "\"code\":5008, "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                             << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                             << "\"connections_in_room\":\"" << size << "\", "
@@ -2244,7 +2220,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                     if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_ROOM\", "
-                                << "\"code\":5009, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -2266,7 +2241,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                     if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_ROOM\", "
-                                << "\"code\":5010, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -2288,7 +2262,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                     if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM\", "
-                                << "\"code\":5011, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -2310,7 +2283,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                     if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM\", "
-                                << "\"code\":5012, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -2332,7 +2304,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                     if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_CACHE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_CACHE_ROOM\", "
-                                << "\"code\":5013, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -2354,7 +2325,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                     if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_CACHE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_CACHE_ROOM\", "
-                                << "\"code\":5014, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -2376,7 +2346,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                     if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PUBLIC_STATE_CACHE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_OCCUPIED_PUBLIC_STATE_CACHE_ROOM\", "
-                                << "\"code\":5015, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -2398,7 +2367,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                     if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED_PRIVATE_STATE_CACHE_ROOM] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_ROOM_OCCUPIED_PRIVATE_STATE_CACHE_ROOM\", "
-                                << "\"code\":5016, "
                                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                                 << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                                 << "\"connections_in_room\":\"" << size << "\", "
@@ -2419,107 +2387,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
     }
 }
-
-/**
- * HTTP Webhook Error Codes
- * 
- *************** ON_CONNECTION_UPGRADE_REJECTED ****************************
- * 
- * UID_BANNED_GLOBALLY - 3580
- * MAX_CONNECTION_LIMIT_REACHED - 3982
- * INVALID_API_KEY - 3203
- * UID_ALREADY_EXIST - 3780
- * INVALID_UID - 3291
- * 
- ********************** ON_ROOM_UPDATE **************************************
- * 
- * UID_BANNED_ON_ROOM - 3371
- * INVALID_ROOM_ID_LENGTH - 3484
- * INVALID_ROOM_TYPE - 3925
- * ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED - 3376
- * UID_NOT_FOUND - 3910
- * ROOM_ACCESS_DENIED - 3511
- * 
- ****************** LIMITS_EXCEEDED *************************
-
- * ON_RATE_LIMIT_EXCEEDED - 3237
- * ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED - 3758
- * ON_MESSAGE_SIZE_EXCEEDED - 3349
- * 
- ***************** SUCCESS *********************** 
- *
- * ON_ROOM_SUCCESSFULLY_UPDATED - 7481
- * ON_METRICS_SUCCESSFULLY_FETCHED - 7598
- * MYSQL_DATA_SUCCESSFULLY_SYNCED - 7892
- * 
- ***************** ERROR_CODES ******************
- *
- * INVALID_JSON - 8931
- * INTERNAL_SERVER_ERROR - 5000
- * MYSQL_INTEGRATION_IS_DISABLED - 8234
- * 
- ************************* VERIFICATION_CODES ***************************
- * 
- * INIT
- * 
- * INIT_PRIVATE_ROOM_VERIFICATION - 4001
- * INIT_PRIVATE_STATE_ROOM_VERIFICATION - 4002
- * INIT_PRIVATE_CACHE_ROOM_VERIFICATION - 4003
- * INIT_PRIVATE_STATE_CACHE_ROOM_VERIFICATION - 4004
- * 
- * Connection / Disconnection Codes
- * 
- * ON_CONNECTION_OPEN_PUBLIC_ROOM - 5001
- * ON_CONNECTION_OPEN_PRIVATE_ROOM - 5002
- * ON_CONNECTION_OPEN_PUBLIC_STATE_ROOM - 5003
- * ON_CONNECTION_OPEN_PRIVATE_STATE_ROOM - 5004
- * ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM - 5005
- * ON_CONNECTION_OPEN_PRIVATE_CACHE_ROOM - 5006
- * ON_CONNECTION_OPEN_PUBLIC_STATE_CACHE_ROOM - 5007
- * ON_CONNECTION_OPEN_PRIVATE_STATE_CACHE_ROOM - 5008
- * 
- * ON_ROOM_OCCUPIED_PUBLIC_ROOM - 5009
- * ON_ROOM_OCCUPIED_PRIVATE_ROOM - 5010
- * ON_ROOM_OCCUPIED_PUBLIC_STATE_ROOM - 5011
- * ON_ROOM_OCCUPIED_PRIVATE_STATE_ROOM - 5012
- * ON_ROOM_OCCUPIED_PUBLIC_CACHE_ROOM - 5013
- * ON_ROOM_OCCUPIED_PRIVATE_CACHE_ROOM - 5014
- * ON_ROOM_OCCUPIED_PUBLIC_STATE_CACHE_ROOM - 5015
- * ON_ROOM_OCCUPIED_PRIVATE_STATE_CACHE_ROOM - 5016
- * 
- * ON_MESSAGE_PUBLIC_ROOM - 5017
- * ON_MESSAGE_PRIVATE_ROOM - 5018
- * ON_MESSAGE_PUBLIC_STATE_ROOM - 5019
- * ON_MESSAGE_PRIVATE_STATE_ROOM - 5020
- * ON_MESSAGE_PUBLIC_CACHE_ROOM - 5021
- * ON_MESSAGE_PRIVATE_CACHE_ROOM - 5022
- * ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM - 5023
- * ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM - 5024
- * 
- * ON_CONNECTION_CLOSE_PUBLIC_ROOM - 5025
- * ON_CONNECTION_CLOSE_PRIVATE_ROOM - 5026
- * ON_CONNECTION_CLOSE_PUBLIC_STATE_ROOM - 5027
- * ON_CONNECTION_CLOSE_PRIVATE_STATE_ROOM - 5028
- * ON_CONNECTION_CLOSE_PUBLIC_CACHE_ROOM - 5029
- * ON_CONNECTION_CLOSE_PRIVATE_CACHE_ROOM - 5030
- * ON_CONNECTION_CLOSE_PUBLIC_STATE_CACHE_ROOM - 5031
- * ON_CONNECTION_CLOSE_PRIVATE_STATE_CACHE_ROOM - 5032
- * 
- * ON_ROOM_VACATED_PUBLIC_ROOM - 5033
- * ON_ROOM_VACATED_PRIVATE_ROOM - 5034
- * ON_ROOM_VACATED_PUBLIC_STATE_ROOM - 5035
- * ON_ROOM_VACATED_PRIVATE_STATE_ROOM - 5036
- * ON_ROOM_VACATED_PUBLIC_CACHE_ROOM - 5037
- * ON_ROOM_VACATED_PRIVATE_CACHE_ROOM - 5038
- * ON_ROOM_VACATED_PUBLIC_STATE_CACHE_ROOM - 5039
- * ON_ROOM_VACATED_PRIVATE_STATE_CACHE_ROOM - 5040
- * 
- ********************** INFO *******************************
- * 
- * ON_RATE_LIMIT_LIFTED - 6001
- * ON_MESSAGE_DROPPED - 6002
- * 
- */
 
 /* uWebSocket worker thread function. */
 void worker_t::work()
@@ -2586,7 +2453,6 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"INVALID_UID\", "
-                        << "\"code\":3291, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"message\":\"uid length should be between 1 and 4096 characters!\"}";
 
@@ -2622,7 +2488,6 @@ void worker_t::work()
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                             << "\"trigger\":\"UID_BANNED_GLOBALLY\", "
-                            << "\"code\":3580, "
                             << "\"uid\":\"" << upgradeData->uid << "\", "
                             << "\"message\":\"This connection is globally banned by the admin!\"}";
 
@@ -2650,7 +2515,6 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"UID_ALREADY_EXIST\", "  
-                        << "\"code\":3780, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"message\":\"There is already a connection using this UID!\"}";
 
@@ -2676,7 +2540,6 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"MAX_CONNECTION_LIMIT_REACHED\", "  
-                        << "\"code\":3982, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"message\":\"You have reached the max limit of allowed connections!\"}";
 
@@ -2702,7 +2565,6 @@ void worker_t::work()
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"INVALID_API_KEY\", "  
-                        << "\"code\":3203, "
                         << "\"uid\":\"" << upgradeData->uid << "\", "
                         << "\"message\":\"The API key is invalid!\"}";
 
@@ -2795,7 +2657,6 @@ void worker_t::work()
                 if(webhookStatus[Webhooks::ON_MESSAGE_SIZE_EXCEEDED] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_MESSAGE_SIZE_EXCEEDED\", "
-                            << "\"code\":3349, "
                             << "\"uid\":\"" << uid << "\", "
                             << "\"msg_size_allowed_in_bytes\":\"" << UserData::getInstance().msgSizeAllowedInBytes << "\"}";            
                     
@@ -2819,7 +2680,6 @@ void worker_t::work()
                     if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
-                                << "\"code\":3237, "
                                 << "\"uid\":\"" << uid << "\"}";
 
                         std::string body = payload.str(); 
@@ -2882,7 +2742,6 @@ void worker_t::work()
                                     if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1){
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
-                                                << "\"code\":5017, "
                                                 << "\"uid\":\"" << uid << "\", "
                                                 << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}"; 
@@ -2903,7 +2762,6 @@ void worker_t::work()
                                     if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1){
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
-                                                << "\"code\":5018, "
                                                 << "\"uid\":\"" << uid << "\", "
                                                 << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";  
@@ -2924,7 +2782,6 @@ void worker_t::work()
                                     if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1){
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
-                                                << "\"code\":5019, "
                                                 << "\"uid\":\"" << uid << "\", "
                                                 << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}"; 
@@ -2945,7 +2802,6 @@ void worker_t::work()
                                     if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1){
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
-                                                << "\"code\":5020, "
                                                 << "\"uid\":\"" << uid << "\", "
                                                 << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
@@ -2966,7 +2822,6 @@ void worker_t::work()
                                     if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_CACHE_ROOM] == 1){
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
-                                                << "\"code\":5021, "
                                                 << "\"uid\":\"" << uid << "\", "
                                                 << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
@@ -2987,7 +2842,6 @@ void worker_t::work()
                                     if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_CACHE_ROOM] == 1){
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
-                                                << "\"code\":5022, "
                                                 << "\"uid\":\"" << uid << "\", "
                                                 << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
@@ -3008,7 +2862,6 @@ void worker_t::work()
                                     if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM] == 1){
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
-                                                << "\"code\":5023, "
                                                 << "\"uid\":\"" << uid << "\", "
                                                 << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
@@ -3029,7 +2882,6 @@ void worker_t::work()
                                     if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM] == 1){
                                         std::ostringstream payload;
                                         payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
-                                                << "\"code\":5024, "
                                                 << "\"uid\":\"" << uid << "\", "
                                                 << "\"rid\":\"" << rid << "\", "
                                                 << "\"message\":\"" << message << "\"}";
@@ -3059,7 +2911,6 @@ void worker_t::work()
                         if(webhookStatus[Webhooks::ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED] == 1){
                             std::ostringstream payload;
                             payload << "{\"event\":\"ON_MONTHLY_DATA_TRANSFER_LIMIT_EXHAUSTED\", "
-                                    << "\"code\":3758, "
                                     << "\"uid\":\"" << uid << "\", "
                                     << "\"rid\":\"" << rid << "\", "
                                     << "\"max_monthly_payload_in_bytes\":\"" << UserData::getInstance().maxMonthlyPayloadInBytes << "\"}";              
@@ -3081,7 +2932,6 @@ void worker_t::work()
                 if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
-                            << "\"code\":3237, "
                             << "\"uid\":\"" << uid << "\"}";
 
                     std::string body = payload.str(); 
@@ -3102,7 +2952,6 @@ void worker_t::work()
         if(webhookStatus[Webhooks::ON_MESSAGE_DROPPED] == 1){
             std::ostringstream payload;
             payload << "{\"event\":\"ON_MESSAGE_DROPPED\", "
-                    << "\"code\":6002, "
                     << "\"uid\":\"" << ws->getUserData()->uid << "\", "
                     << "\"rid\":\"" << ws->getUserData()->rid << "\", "
                     << "\"message\":\"" << message << "\"}";          
@@ -3125,7 +2974,6 @@ void worker_t::work()
             if(webhookStatus[Webhooks::ON_RATE_LIMIT_LIFTED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_RATE_LIMIT_LIFTED\", "
-                        << "\"code\":6001, "
                         << "\"uid\":\"" << ws->getUserData()->uid << "\"}";
 
                 std::string body = payload.str(); 
@@ -3708,7 +3556,6 @@ void worker_t::work()
                                 case static_cast<uint8_t>(Rooms::PRIVATE) : {
                                     payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
                                     << "\"trigger\":\"INIT_PRIVATE_ROOM_VERIFICATION\", "
-                                    << "\"code\":4001, "
                                     << "\"uid\":\"" << uid << "\", "
                                     << "\"rid\":\"" << rid << "\"}";
                                     break;
@@ -3717,7 +3564,6 @@ void worker_t::work()
                                 case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
                                     payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
                                     << "\"trigger\":\"INIT_PRIVATE_STATE_ROOM_VERIFICATION\", "
-                                    << "\"code\":4002, "
                                     << "\"uid\":\"" << uid << "\", "
                                     << "\"rid\":\"" << rid << "\"}";
                                     break;
@@ -3726,7 +3572,6 @@ void worker_t::work()
                                 case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
                                     payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
                                     << "\"trigger\":\"INIT_PRIVATE_CACHE_ROOM_VERIFICATION\", "
-                                    << "\"code\":4003, "
                                     << "\"uid\":\"" << uid << "\", "
                                     << "\"rid\":\"" << rid << "\"}";
                                     break;
@@ -3735,7 +3580,6 @@ void worker_t::work()
                                 case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
                                     payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
                                     << "\"trigger\":\"INIT_PRIVATE_STATE_CACHE_ROOM_VERIFICATION\", "
-                                    << "\"code\":4004, "
                                     << "\"uid\":\"" << uid << "\", "
                                     << "\"rid\":\"" << rid << "\"}";
                                     break;
@@ -3779,7 +3623,6 @@ void worker_t::work()
                                 std::ostringstream payload;
                                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                                         << "\"trigger\":\"ON_VERIFICATION_REQUEST_WEBHOOK_DISABLED\", "  
-                                        << "\"code\":3376, "
                                         << "\"uid\":\"" << uid << "\", "
                                         << "\"rid\":\"" << rid << "\", "
                                         << "\"message\":\"Please enable ON_VERIFICATION_REQUEST webhook to use private rooms!\"}";
@@ -3964,7 +3807,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Successfully broadcasted the message to the given room!"})");
+                                res->end(R"({"message": "Successfully broadcasted the message to the given rooms!"})");
                             });
                         }
                     } catch (std::exception &e) {
@@ -4143,7 +3986,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Given members are successfully banned from the given rooms!"})");
+                                res->end(R"({"message": "Given users are successfully banned from the given rooms!"})");
                             });
                         }
                     } catch (std::exception &e) {
@@ -4231,7 +4074,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Members are successfully unbanned from the given rooms!"})");
+                                res->end(R"({"message": "Given users are successfully unbanned from the given rooms!"})");
                             });
                         }
                     } catch (std::exception &e) {
@@ -4705,7 +4548,7 @@ void worker_t::work()
                 /** Respond with 403 Forbidden if the API key is invalid */
                 if(!*isAborted){
                     res->cork([res]() {
-                        res->writeStatus("403");
+                        res->writeStatus("403 Forbidden");
                         res->writeHeader("Content-Type", "application/json");
                         res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                     });
