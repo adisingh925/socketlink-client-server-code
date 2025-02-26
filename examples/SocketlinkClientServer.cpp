@@ -12,6 +12,7 @@
 #include <openssl/evp.h>
 #include <tbb/concurrent_hash_map.h>
 #include <filesystem>
+#include "simdjson.h"
 
 /******************************************************************************************************************************************************************************/
 
@@ -2701,7 +2702,9 @@ void worker_t::work()
 
                             /** publishing message */
                             /* ws->publish(rid, message, opCode, true); */
-                            std::string data = "{\"data\":\"" + std::string(message) + "\",\"source\":\"user\"}";
+                            simdjson::ondemand::parser parser;
+                            auto parsedData = parser.iterate(std::string(message));
+                            std::string data = "{\"data\":\"" + std::string(std::string_view(parsedData["message"])) + "\",\"source\":\"user\"}";
                             ws->publish(rid, data, opCode, true);
 
                             std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
