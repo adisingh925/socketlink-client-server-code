@@ -2702,11 +2702,9 @@ void worker_t::work()
 
                             /** publishing message */
                             /* ws->publish(rid, message, opCode, true); */
-                            std::string jsonMessage(message); // Copy message if needed
-                            jsonMessage.resize(jsonMessage.size() + simdjson::SIMDJSON_PADDING, 0);
+                            simdjson::padded_string jsonMessage(message.data(), message.size());
                             simdjson::ondemand::parser parser;
-                            simdjson::padded_string_view padded_view(jsonMessage.data(), jsonMessage.size() - simdjson::SIMDJSON_PADDING);
-                            auto parsedData = parser.iterate(padded_view);
+                            auto parsedData = parser.iterate(jsonMessage);
                             
                             std::string data = "{\"data\":\"" + std::string(std::string_view(parsedData["message"])) + "\",\"source\":\"user\"}";
                             ws->publish(rid, data, opCode, true);
