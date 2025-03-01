@@ -1996,11 +1996,16 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
     
             /** Acquire an accessor for the inner map */
             tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
-            
-            /** Insert UID into the inner map if not already present */
-            if (innerMap.insert(innerAccessor, uid)) {
-                /** Set the value to true, indicating user presence */
+    
+            /** Check if the user already exists */
+            if (innerMap.find(innerAccessor, uid)) {
+                /** UID is already present, ensure value is true */
                 innerAccessor->second = true;
+            } else {
+                /** Insert UID into the inner map */
+                if (innerMap.insert(innerAccessor, uid)) {
+                    innerAccessor->second = true;
+                }
             }
     
             /** Update the size variable with the total number of users in the room */
@@ -2021,7 +2026,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             /** Since this is a new room, its size is 1 (only the current user) */
             size = 1;
         }
-    }    
+    }      
 
     {
         /** Acquire an accessor for the outer map */ 
