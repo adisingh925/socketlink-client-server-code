@@ -3063,19 +3063,26 @@ void worker_t::work()
 
         /** fetching all the RID for the UID and removing the UID from the map */
         {
-            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-    
-            if (uidToRoomMapping.find(uid_to_rid_outer_accessor, userId)) {
-                auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
-
-                for (auto it = inner_uid_to_rid_map.begin(); it != inner_uid_to_rid_map.end(); ++it) {
-                    rids.emplace_back(it->first, it->second);
+            /** Acquire access to the outer concurrent map */
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outer_accessor;
+        
+            /** Check if the user ID exists in the map */
+            if (uidToRoomMapping.find(outer_accessor, userId)) {
+                /** Reference to the inner map (rooms associated with the user ID) */
+                auto& inner_map = outer_accessor->second;
+        
+                /** Reserve space in `rids` to minimize memory reallocations */
+                rids.reserve(rids.size() + inner_map.size());
+        
+                /** Iterate through the inner map and move data into `rids` */
+                for (auto& entry : inner_map) {
+                    rids.emplace_back(std::move(entry.first), entry.second);
                 }
-
-                /** remove the key (UID) from the map */
-                uidToRoomMapping.erase(uid_to_rid_outer_accessor);
+        
+                /** Remove the user ID entry from the outer map */
+                uidToRoomMapping.erase(outer_accessor);
             }
-        }
+        }        
 
         /** Close connection */
         closeConnection(ws, this, rids);
@@ -3580,30 +3587,33 @@ void worker_t::work()
                     }
 
                     /** checking if the user is already subscribed to the given room */
-                    {
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-                        if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                            auto& inner_map = uid_to_rid_outer_accessor->second;
+                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
 
-                            /** check if the room is already present under the UID */
-                            {
-                                tbb::concurrent_hash_map<std::string, uint8_t>::accessor inner_accessor;
-                                if (inner_map.find(inner_accessor, rid)) {
-                                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                                    if (!res->hasResponded()) {
-                                        res->cork([res]() {
-                                            res->writeStatus("400 Bad Request");
-                                            res->writeHeader("Content-Type", "application/json");
-                                            res->end(R"({"message": "You are already subscribed to the given room!"})");
-                                        });
-                                    }
+                    /** Check if the UID is present in the mapping */
+                    if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                        /** Retrieve reference to the inner map containing room IDs */
+                        auto& inner_map = uid_to_rid_outer_accessor->second;
 
-                                    return;
-                                } 
+                        /** Check if the room is already associated with the UID */
+                        tbb::concurrent_hash_map<std::string, uint8_t>::accessor inner_accessor;
+                        if (inner_map.find(inner_accessor, rid)) {
+                            /** Increment rejected request counter in a relaxed memory order for efficiency */
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                            /** Ensure response is not sent multiple times */
+                            if (!res->hasResponded()) {
+                                /** Use `cork` to optimize response writing */
+                                res->cork([res]() {
+                                    res->writeStatus("400 Bad Request"); /** Set HTTP status */
+                                    res->writeHeader("Content-Type", "application/json"); /** Set response type */
+                                    res->end(R"({"message": "You are already subscribed to the given room!"})"); /** Send error message */
+                                });
                             }
+
+                            return; /** Exit early since user is already subscribed */
                         }
                     }
-                    
+
                     /** checking if the user is banned from the given room */
                     {
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
