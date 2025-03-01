@@ -742,7 +742,7 @@ constexpr const char* BROADCAST = "SOCKETLINK_BROADCAST";
 constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 
 /** is logs enabled */
-constexpr bool LOGS_ENABLED = false;
+constexpr bool LOGS_ENABLED = true;
 
 /** HMAC-SHA256 Constants */
 constexpr int HMAC_SHA256_DIGEST_LENGTH = 32;  /**< SHA-256 produces a 32-byte (256-bit) output */
@@ -1970,117 +1970,119 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 /** subscribe to a new room */
 void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, uint8_t roomType) {
     if (!rid.empty()) {
-    const auto& uid = ws->getUserData()->uid;
-    auto currentThreadId = std::this_thread::get_id();
-    auto workerThreadId = worker->thread_->get_id();
+        log("Opening connection to room: " + rid);
+        
+        const auto& uid = ws->getUserData()->uid;
+        auto currentThreadId = std::this_thread::get_id();
+        auto workerThreadId = worker->thread_->get_id();
 
-    /** Subscribe to the room in the same thread where the ws instance was created */
-    if (workerThreadId == currentThreadId) {
-        ws->subscribe(rid);
-    } else {
-        worker->loop_->defer([ws, rid]() {
+        /** Subscribe to the room in the same thread where the ws instance was created */
+        if (workerThreadId == currentThreadId) {
             ws->subscribe(rid);
-        });
-    }
+        } else {
+            worker->loop_->defer([ws, rid]() {
+                ws->subscribe(rid);
+            });
+        }
 
-    int size = 0;
+        int size = 0;
 
-    {
-        /** Acquire an accessor for the outer map (topics) */
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
-    
-        /** Check if the room ID (rid) already exists in the topics map */
-        if (topics.find(topicsAccessor, rid)) {
-            /** Room exists, retrieve the inner map containing user IDs */
-            auto& innerMap = topicsAccessor->second;
-    
-            /** Acquire an accessor for the inner map */
-            tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
-    
-            /** Check if the user already exists */
-            if (innerMap.find(innerAccessor, uid)) {
-                /** UID is already present, ensure value is true */
-                innerAccessor->second = true;
-            } else {
-                /** Insert UID into the inner map */
-                if (innerMap.insert(innerAccessor, uid)) {
+        {
+            /** Acquire an accessor for the outer map (topics) */
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
+        
+            /** Check if the room ID (rid) already exists in the topics map */
+            if (topics.find(topicsAccessor, rid)) {
+                /** Room exists, retrieve the inner map containing user IDs */
+                auto& innerMap = topicsAccessor->second;
+        
+                /** Acquire an accessor for the inner map */
+                tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
+        
+                /** Check if the user already exists */
+                if (innerMap.find(innerAccessor, uid)) {
+                    /** UID is already present, ensure value is true */
                     innerAccessor->second = true;
-                }
-            }
-    
-            /** Update the size variable with the total number of users in the room */
-            size = innerMap.size();
-        } else {
-            /** Room does not exist, create a new inner map */
-            tbb::concurrent_hash_map<std::string, bool> newInnerMap;
-    
-            /** Insert the UID into the newly created inner map */
-            newInnerMap.emplace(uid, true);
-    
-            /** Insert the new inner map into the topics map */
-            if (topics.insert(topicsAccessor, rid)) {
-                /** Move the newly created inner map to avoid unnecessary copies */
-                topicsAccessor->second = std::move(newInnerMap);
-            }
-    
-            /** Since this is a new room, its size is 1 (only the current user) */
-            size = 1;
-        }
-    }      
-
-    {
-        /** Acquire an accessor for the outer map */ 
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-    
-        /** Check if UID exists */ 
-        if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-            auto& innerMap = uid_to_rid_outer_accessor->second;
-    
-            /** Acquire an accessor for the inner map */ 
-            tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-            if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
-                /** Only set roomType if insertion was successful */ 
-                uid_to_rid_inner_accessor->second = roomType;
-            }
-        } else {
-            /** Create and insert a new inner map directly */ 
-            tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
-            newInnerMap.emplace(rid, roomType);
-    
-            if (uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
-                uid_to_rid_outer_accessor->second = std::move(newInnerMap);
-            }
-        }
-    }   
-    
-    /** Send a message to self */
-    std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
-
-    if (workerThreadId == currentThreadId) {
-        ws->send(selfMessage, uWS::OpCode::TEXT, true);
-    } else {
-        worker->loop_->defer([ws, selfMessage]() {
-            ws->send(selfMessage, uWS::OpCode::TEXT, true);
-        });
-    }
-
-    /** Broadcast the message to others if the room is public/private */
-    if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
-        roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
-        roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-        roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
-            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
-
-            for (auto& w : ::workers) {
-                if (workerThreadId == w.thread_->get_id()) {
-                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
                 } else {
-                    w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
-                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                    });
+                    /** Insert UID into the inner map */
+                    if (innerMap.insert(innerAccessor, uid)) {
+                        innerAccessor->second = true;
+                    }
+                }
+        
+                /** Update the size variable with the total number of users in the room */
+                size = innerMap.size();
+            } else {
+                /** Room does not exist, create a new inner map */
+                tbb::concurrent_hash_map<std::string, bool> newInnerMap;
+        
+                /** Insert the UID into the newly created inner map */
+                newInnerMap.emplace(uid, true);
+        
+                /** Insert the new inner map into the topics map */
+                if (topics.insert(topicsAccessor, rid)) {
+                    /** Move the newly created inner map to avoid unnecessary copies */
+                    topicsAccessor->second = std::move(newInnerMap);
+                }
+        
+                /** Since this is a new room, its size is 1 (only the current user) */
+                size = 1;
+            }
+        }      
+
+        {
+            /** Acquire an accessor for the outer map */ 
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+        
+            /** Check if UID exists */ 
+            if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                auto& innerMap = uid_to_rid_outer_accessor->second;
+        
+                /** Acquire an accessor for the inner map */ 
+                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
+                    /** Only set roomType if insertion was successful */ 
+                    uid_to_rid_inner_accessor->second = roomType;
+                }
+            } else {
+                /** Create and insert a new inner map directly */ 
+                tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
+                newInnerMap.emplace(rid, roomType);
+        
+                if (uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
+                    uid_to_rid_outer_accessor->second = std::move(newInnerMap);
                 }
             }
+        }   
+    
+        /** Send a message to self */
+        std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
+
+        if (workerThreadId == currentThreadId) {
+            ws->send(selfMessage, uWS::OpCode::TEXT, true);
+        } else {
+            worker->loop_->defer([ws, selfMessage]() {
+                ws->send(selfMessage, uWS::OpCode::TEXT, true);
+            });
         }
+
+        /** Broadcast the message to others if the room is public/private */
+        if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
+            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
+            roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
+            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
+                std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
+
+                for (auto& w : ::workers) {
+                    if (workerThreadId == w.thread_->get_id()) {
+                        ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                    } else {
+                        w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
+                            w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                        });
+                    }
+                }
+            }
 
         /** fire connection open webhook */
         switch(roomType) {
