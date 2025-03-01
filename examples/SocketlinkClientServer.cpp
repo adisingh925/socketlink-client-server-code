@@ -2744,7 +2744,7 @@ void worker_t::work()
                             || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
                             || roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
                             || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-                            ){
+                            ) {
                                 /** write the data in the local storage */
                                 write_worker(rid, uid, std::string(message));
 
