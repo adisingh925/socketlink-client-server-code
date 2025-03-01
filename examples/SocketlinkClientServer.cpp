@@ -2707,28 +2707,28 @@ void worker_t::work()
                         std::string message = std::string(std::string_view(parsedData["message"]));
                         uint8_t roomType = 255;
 
-                        {
-                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-                            if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                                auto& inner_map = uid_to_rid_outer_accessor->second;
+                        // {
+                        //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+                        //     if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                        //         auto& inner_map = uid_to_rid_outer_accessor->second;
 
-                                /** check if the room is already present under the UID */
-                                {
-                                    tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                                    if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
-                                        ws->send("{\"data\":\"ROOM_NOT_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+                        //         /** check if the room is already present under the UID */
+                        //         {
+                        //             tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                        //             if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
+                        //                 ws->send("{\"data\":\"ROOM_NOT_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
 
-                                        return;
-                                    } else {
-                                        roomType = uid_to_rid_inner_accessor->second;
-                                    }
-                                }
-                            } else {
-                                ws->send("{\"data\":\"NO_SUBSCRIPTION_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+                        //                 return;
+                        //             } else {
+                        //                 roomType = uid_to_rid_inner_accessor->second;
+                        //             }
+                        //         }
+                        //     } else {
+                        //         ws->send("{\"data\":\"NO_SUBSCRIPTION_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
 
-                                return;
-                            }
-                        }
+                        //         return;
+                        //     }
+                        // }
 
                         if((disabledConnections.find(outer_accessor, rid) &&
                             outer_accessor->second.find(inner_accessor, uid))){
