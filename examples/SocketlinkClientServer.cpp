@@ -2711,6 +2711,7 @@ void worker_t::work()
                             log("received");
                             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
                             if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                                log("uid found");
                                 auto& inner_map = uid_to_rid_outer_accessor->second;
 
                                 /** check if the room is already present under the UID */
