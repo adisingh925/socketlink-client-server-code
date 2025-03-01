@@ -742,7 +742,7 @@ constexpr const char* BROADCAST = "SOCKETLINK_BROADCAST";
 constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 
 /** is logs enabled */
-constexpr bool LOGS_ENABLED = true;
+constexpr bool LOGS_ENABLED = false;
 
 /** HMAC-SHA256 Constants */
 constexpr int HMAC_SHA256_DIGEST_LENGTH = 32;  /**< SHA-256 produces a 32-byte (256-bit) output */
@@ -2708,28 +2708,23 @@ void worker_t::work()
                         uint8_t roomType = 255;
 
                         {
-                            log("received");
                             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
                             if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                                log("uid found");
                                 auto& inner_map = uid_to_rid_outer_accessor->second;
 
                                 /** check if the room is already present under the UID */
                                 {
                                     tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
                                     if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
-                                        log("room not found");
                                         ws->send("{\"data\":\"ROOM_NOT_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
 
                                         return;
                                     } else {
-                                        log("room found");
                                         roomType = uid_to_rid_inner_accessor->second;
                                     }
                                 }
                             } else {
-                                log("uid not found");
-                                ws->send("{\"data\":\"UID_NOT_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+                                ws->send("{\"data\":\"NO_SUBSCRIPTION_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
 
                                 return;
                             }
