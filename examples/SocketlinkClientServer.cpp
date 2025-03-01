@@ -3482,7 +3482,7 @@ void worker_t::work()
                             res->cork([res]() {
                                 res->writeStatus("404 Not Found");
                                 res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Connection not found for the given uid!"})");
+                                res->end(R"({"message": "Invalid uid!"})");
                             });
                         }
 
