@@ -2727,6 +2727,11 @@ void worker_t::work()
                                         roomType = uid_to_rid_inner_accessor->second;
                                     }
                                 }
+                            } else {
+                                log("uid not found");
+                                ws->send("{\"data\":\"UID_NOT_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+
+                                return;
                             }
                         }
 
