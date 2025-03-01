@@ -2702,38 +2702,61 @@ void worker_t::work()
                     }
                 } else {
                     try {
-                        /** parsing the message */
+                        /** Parsing the message */
                         simdjson::padded_string jsonMessage(message.data(), message.size());
                         simdjson::ondemand::parser parser;
-                        auto parsedData = parser.iterate(jsonMessage);
+                        simdjson::ondemand::document parsedData;
 
-                        /** retrieving the data */
-                        std::string rid = std::string(std::string_view(parsedData["rid"]));
-                        std::string message = std::string(std::string_view(parsedData["message"]));
+                        /** Parse JSON and handle potential errors */
+                        if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
+                            ws->send(R"({"error":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                            return;
+                        }
+
+                        /** Retrieve 'rid' */
+                        std::string rid;
+                        if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
+                            rid = std::string(ridField.get_string().value());  // Convert only once
+                        } else {
+                            ws->send(R"({"error":"MISSING_RID","source":"server"})", uWS::OpCode::TEXT, true);
+                            return;
+                        }
+
+                        /** Retrieve 'message' */
+                        std::string message;
+                        if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
+                            message = std::string(msgField.get_string().value());  // Convert only once
+                        } else {
+                            ws->send(R"({"error":"MISSING_MESSAGE","source":"server"})", uWS::OpCode::TEXT, true);
+                            return;
+                        }
+
                         uint8_t roomType = 255;
 
-                        // {
-                        //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-                        //     if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                        //         auto& inner_map = uid_to_rid_outer_accessor->second;
-
-                        //         /** check if the room is already present under the UID */
-                        //         {
-                        //             tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                        //             if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
-                        //                 ws->send("{\"data\":\"ROOM_NOT_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-
-                        //                 return;
-                        //             } else {
-                        //                 roomType = uid_to_rid_inner_accessor->second;
-                        //             }
-                        //         }
-                        //     } else {
-                        //         ws->send("{\"data\":\"NO_SUBSCRIPTION_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-
-                        //         return;
-                        //     }
-                        // }
+                        {
+                            /** Acquire an accessor for the outer map (UID to Room Mapping) */
+                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+                        
+                            /** Check if the user (UID) exists in the mapping */
+                            if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                                auto& inner_map = uid_to_rid_outer_accessor->second;
+                        
+                                /** Check if the room (RID) exists under the given UID */
+                                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                                if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
+                                    /** Room not found under this UID, send response and return */
+                                    ws->send(R"({"data":"ROOM_NOT_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                                    return;
+                                }
+                        
+                                /** Room exists, retrieve the room type */
+                                roomType = uid_to_rid_inner_accessor->second;
+                            } else {
+                                /** No subscription found for the given UID, send response */
+                                ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                                return;
+                            }
+                        }                        
 
                         if((disabledConnections.find(outer_accessor, rid) &&
                             outer_accessor->second.find(inner_accessor, uid))){
