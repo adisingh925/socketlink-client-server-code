@@ -2717,216 +2717,215 @@ void worker_t::work()
                                     tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
                                     if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                         ws->send("{\"data\":\"ROOM_NOT_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                                        return;
                                     } else {
                                         roomType = uid_to_rid_inner_accessor->second;
+
+                                        if((disabledConnections.find(outer_accessor, rid) &&
+                                            outer_accessor->second.find(inner_accessor, uid))){
+                                            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+                                        } else {
+                                            unsigned int subscribers = app_->numSubscribers(rid);
+                
+                                            globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
+                                            totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
+                
+                                            /** Writing data to the LMDB */
+                                            if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
+                                            || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
+                                            || roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
+                                            || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+                                            ){
+                                                /** write the data in the local storage */
+                                                write_worker(rid, uid, std::string(message));
+                
+                                                /** SQL integration works in cache channels only */
+                                                if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
+                                                    db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid, rid);
+                                                }
+                                            }
+                
+                                            /** publishing message */
+                                            /* ws->publish(rid, message, opCode, true); */
+                                            
+                                            std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\"}";
+                                            ws->publish(rid, data, opCode, true);
+                
+                                            std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
+                                                /** Check if the current thread ID matches the worker's thread ID */ 
+                                                if (std::this_thread::get_id() != w.thread_->get_id()) {
+                                                    /** Defer the message publishing to the worker's loop */ 
+                                                    w.loop_->defer([&w, data, opCode, rid]() {
+                                                        w.app_->publish(rid, data, opCode, true);
+                                                    });
+                                                }
+                                            });
+                
+                                            /** this is a dangerous and can cause performance degrade */
+                                            switch(roomType) {
+                                                case static_cast<uint8_t>(Rooms::PUBLIC) : {
+                                                    if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1){
+                                                        std::ostringstream payload;
+                                                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
+                                                                << "\"uid\":\"" << uid << "\", "
+                                                                << "\"rid\":\"" << rid << "\", "
+                                                                << "\"message\":\"" << message << "\"}"; 
+            
+                                                        std::string body = payload.str(); 
+                                                        
+                                                        sendHTTPSPOSTRequestFireAndForget(
+                                                            UserData::getInstance().webHookBaseUrl,
+                                                            UserData::getInstance().webhookPath,
+                                                            body,
+                                                            {}
+                                                        );
+                                                    }
+                                                    break;
+                                                }  
+            
+                                                case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                                                    if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1){
+                                                        std::ostringstream payload;
+                                                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
+                                                                << "\"uid\":\"" << uid << "\", "
+                                                                << "\"rid\":\"" << rid << "\", "
+                                                                << "\"message\":\"" << message << "\"}";  
+            
+                                                        std::string body = payload.str(); 
+                                                        
+                                                        sendHTTPSPOSTRequestFireAndForget(
+                                                            UserData::getInstance().webHookBaseUrl,
+                                                            UserData::getInstance().webhookPath,
+                                                            body,
+                                                            {}
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+            
+                                                case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
+                                                    if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1){
+                                                        std::ostringstream payload;
+                                                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
+                                                                << "\"uid\":\"" << uid << "\", "
+                                                                << "\"rid\":\"" << rid << "\", "
+                                                                << "\"message\":\"" << message << "\"}"; 
+            
+                                                        std::string body = payload.str();
+            
+                                                        sendHTTPSPOSTRequestFireAndForget(
+                                                            UserData::getInstance().webHookBaseUrl,
+                                                            UserData::getInstance().webhookPath,
+                                                            body,
+                                                            {}
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+            
+                                                case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                                                    if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1){
+                                                        std::ostringstream payload;
+                                                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
+                                                                << "\"uid\":\"" << uid << "\", "
+                                                                << "\"rid\":\"" << rid << "\", "
+                                                                << "\"message\":\"" << message << "\"}";
+            
+                                                        std::string body = payload.str(); 
+                                                        
+                                                        sendHTTPSPOSTRequestFireAndForget(
+                                                            UserData::getInstance().webHookBaseUrl,
+                                                            UserData::getInstance().webhookPath,
+                                                            body,
+                                                            {}
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+            
+                                                case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
+                                                    if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_CACHE_ROOM] == 1){
+                                                        std::ostringstream payload;
+                                                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
+                                                                << "\"uid\":\"" << uid << "\", "
+                                                                << "\"rid\":\"" << rid << "\", "
+                                                                << "\"message\":\"" << message << "\"}";
+            
+                                                        std::string body = payload.str(); 
+                                                        
+                                                        sendHTTPSPOSTRequestFireAndForget(
+                                                            UserData::getInstance().webHookBaseUrl,
+                                                            UserData::getInstance().webhookPath,
+                                                            body,
+                                                            {}
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+            
+                                                case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                                                    if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_CACHE_ROOM] == 1){
+                                                        std::ostringstream payload;
+                                                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
+                                                                << "\"uid\":\"" << uid << "\", "
+                                                                << "\"rid\":\"" << rid << "\", "
+                                                                << "\"message\":\"" << message << "\"}";
+            
+                                                        std::string body = payload.str(); 
+                                                        
+                                                        sendHTTPSPOSTRequestFireAndForget(
+                                                            UserData::getInstance().webHookBaseUrl,
+                                                            UserData::getInstance().webhookPath,
+                                                            body,
+                                                            {}
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+            
+                                                case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
+                                                    if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM] == 1){
+                                                        std::ostringstream payload;
+                                                        payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
+                                                                << "\"uid\":\"" << uid << "\", "
+                                                                << "\"rid\":\"" << rid << "\", "
+                                                                << "\"message\":\"" << message << "\"}";
+            
+                                                        std::string body = payload.str(); 
+                                                        
+                                                        sendHTTPSPOSTRequestFireAndForget(
+                                                            UserData::getInstance().webHookBaseUrl,
+                                                            UserData::getInstance().webhookPath,
+                                                            body,
+                                                            {}
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+            
+                                                case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                                                    if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM] == 1){
+                                                        std::ostringstream payload;
+                                                        payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
+                                                                << "\"uid\":\"" << uid << "\", "
+                                                                << "\"rid\":\"" << rid << "\", "
+                                                                << "\"message\":\"" << message << "\"}";
+            
+                                                        std::string body = payload.str(); 
+                                                        
+                                                        sendHTTPSPOSTRequestFireAndForget(
+                                                            UserData::getInstance().webHookBaseUrl,
+                                                            UserData::getInstance().webhookPath,
+                                                            body,
+                                                            {}
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
-
-                        if((disabledConnections.find(outer_accessor, rid) &&
-                            outer_accessor->second.find(inner_accessor, uid))){
-                            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                        } else {
-                            unsigned int subscribers = app_->numSubscribers(rid);
-
-                            globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
-                            totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
-
-                            /** Writing data to the LMDB */
-                            if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
-                            || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
-                            || roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
-                            || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-                            ){
-                                /** write the data in the local storage */
-                                write_worker(rid, uid, std::string(message));
-
-                                /** SQL integration works in cache channels only */
-                                if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
-                                    db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid, rid);
-                                }
-                            }
-
-                            /** publishing message */
-                            /* ws->publish(rid, message, opCode, true); */
-                            
-                            std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\"}";
-                            ws->publish(rid, data, opCode, true);
-
-                            std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
-                                /** Check if the current thread ID matches the worker's thread ID */ 
-                                if (std::this_thread::get_id() != w.thread_->get_id()) {
-                                    /** Defer the message publishing to the worker's loop */ 
-                                    w.loop_->defer([&w, data, opCode, rid]() {
-                                        w.app_->publish(rid, data, opCode, true);
-                                    });
-                                }
-                            });
-
-                            /** this is a dangerous and can cause performance degrade */
-                            switch(roomType) {
-                                    case static_cast<uint8_t>(Rooms::PUBLIC) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}"; 
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }  
-
-                                    case static_cast<uint8_t>(Rooms::PRIVATE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";  
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}"; 
-
-                                            std::string body = payload.str();
-
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_CACHE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_CACHE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-                                }
                         }
                     } catch (const simdjson::simdjson_error &e) {
                         ws->send("{\"data\":\"INVALID_JSON\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
