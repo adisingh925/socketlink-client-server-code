@@ -1983,7 +1983,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         });
     }
 
-
     int size = 0;
 
     {
@@ -2017,31 +2016,31 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
     }
 
-    {
-        /** inserting the data in the uidToRoomMapping */
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+    // {
+    //     /** inserting the data in the uidToRoomMapping */
+    //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
 
-        /** Insert user into topics map */
-        if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-            /** UID exists, add UID if not present */
-            auto& innerMap = uid_to_rid_outer_accessor->second;
+    //     /** Insert user into topics map */
+    //     if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+    //         /** UID exists, add UID if not present */
+    //         auto& innerMap = uid_to_rid_outer_accessor->second;
 
-            {
-                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                if (!innerMap.find(uid_to_rid_inner_accessor, rid)) {
-                    innerMap.insert(uid_to_rid_inner_accessor, rid);
-                    uid_to_rid_inner_accessor->second = roomType;
-                }
-            }
+    //         {
+    //             tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+    //             if (!innerMap.find(uid_to_rid_inner_accessor, rid)) {
+    //                 innerMap.insert(uid_to_rid_inner_accessor, rid);
+    //                 uid_to_rid_inner_accessor->second = roomType;
+    //             }
+    //         }
             
-        } else {
-            /** UID does not exist, creating a new entry */
-            tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
-            newInnerMap.insert({rid, roomType});
-            uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid);
-            uid_to_rid_outer_accessor->second = std::move(newInnerMap);
-        }
-    }
+    //     } else {
+    //         /** UID does not exist, creating a new entry */
+    //         tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
+    //         newInnerMap.insert({rid, roomType});
+    //         uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid);
+    //         uid_to_rid_outer_accessor->second = std::move(newInnerMap);
+    //     }
+    // }
     
     /** Send a message to self */
     std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
