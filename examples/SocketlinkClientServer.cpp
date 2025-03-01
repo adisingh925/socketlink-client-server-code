@@ -2714,12 +2714,12 @@ void worker_t::work()
 
                                 /** check if the room is already present under the UID */
                                 {
-                                    tbb::concurrent_hash_map<std::string, uint8_t>::accessor inner_accessor;
-                                    if (!inner_map.find(inner_accessor, rid)) {
+                                    tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                                    if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                         ws->send("{\"data\":\"ROOM_NOT_FOUND\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
                                         return;
                                     } else {
-                                        roomType = inner_accessor->second;
+                                        roomType = uid_to_rid_inner_accessor->second;
                                     }
                                 }
                             }
