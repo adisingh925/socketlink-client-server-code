@@ -3503,39 +3503,48 @@ void worker_t::work()
                     std::string rid = parsedJson["rid"];
                     std::string uid = parsedJson["uid"];
     
-                    /** checking if there even is a connection with the provided UID */
+                    /** Checking if a connection exists for the provided UID */
                     tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
+                    /** Attempt to find the connection */
                     if (!connections.find(accessor, uid)) {
+                        /** Atomically increment the rejected request counter */
                         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                        /** Ensure the response is sent only once */
                         if (!res->hasResponded()) {
+                            /** Batch write operations for improved performance */
                             res->cork([res]() {
-                                res->writeStatus("404 Not Found");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Invalid uid!"})");
+                                res->writeStatus("404 Not Found");  /** Set HTTP status */
+                                res->writeHeader("Content-Type", "application/json");  /** Define response type */
+                                res->end(R"({"message": "Invalid uid!"})");  /** Send error message */
                             });
                         }
 
-                        return;
+                        return;  /** Exit early since the UID is invalid */
                     }
 
                     auto *ws = accessor->second.ws;
                     auto *worker = accessor->second.worker;
 
-                    /** checking if the room length is valid */
-                    if (rid.empty() || rid.length() > 160) {
+                    /** Validate the room ID (rid) length constraints */
+                    if (rid.empty() || rid.size() > 160) {
+                        /** Atomically increment the rejected request counter */
                         totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                        /** Ensure the response is sent only once */
                         if (!res->hasResponded()) {
+                            /** Batch response writes for efficiency */
                             res->cork([res]() {
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "The room id length should be between 1 to 160 characters!"})");
+                                res->writeStatus("400 Bad Request");  /** Set HTTP status */
+                                res->writeHeader("Content-Type", "application/json");  /** Define response type */
+                                res->end(R"({"message": "The room ID length should be between 1 to 160 characters!"})");  /** Send error message */
                             });
                         }
 
-                        return;
+                        return;  /** Exit early since rid is invalid */
                     }
-    
+
                     uint8_t roomType = 255;
     
                     /** checking if the correct room type is received */
