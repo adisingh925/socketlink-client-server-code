@@ -2035,15 +2035,21 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         
             /** Check if UID exists */ 
             if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                log("User already subscribed to room: ");
+
                 auto& innerMap = uid_to_rid_outer_accessor->second;
         
                 /** Acquire an accessor for the inner map */ 
                 tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+
+                log("inserting");
                 if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
+                    log("inserted");
                     /** Only set roomType if insertion was successful */ 
                     uid_to_rid_inner_accessor->second = roomType;
                 }
             } else {
+                log("new");
                 /** Create and insert a new inner map directly */ 
                 tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
                 newInnerMap.emplace(rid, roomType);
