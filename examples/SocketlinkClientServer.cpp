@@ -2029,6 +2029,12 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         log("User count in room: " + uid);
 
+        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor test_accessor;
+        if (uidToRoomMapping.find(test_accessor, uid)) {
+            log("Find is working without deadlock");
+        }
+
+
         {
             /** Acquire an accessor for the outer map */ 
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
