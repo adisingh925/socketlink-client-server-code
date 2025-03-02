@@ -3379,7 +3379,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).post("/api/v1/rooms/connections", [this](auto *res, auto *req) {
+	}).post("/api/v1/rooms/users", [this](auto *res, auto *req) {
         /** get all the connectiond for a room */
 
         auto isAborted = std::make_shared<bool>(false);
@@ -3778,7 +3778,72 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).post("/api/v1/connections/subscriptions", [this](auto *res, auto *req) {
+	}).get("/api/v1/subscriptions", [this](auto *res, auto *req) {
+        /** get all the subscribed rooms from the given UIDs */
+
+        auto isAborted = std::make_shared<bool>(false);
+
+        res->onAborted([isAborted]() {
+            /** connection aborted */
+            *isAborted = true;
+        });
+
+        try {
+            std::string_view apiKey = req->getHeader("api-key");
+
+            if(apiKey != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("401 Unauthorized");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+
+                return;
+            }
+
+            /** Prepare the response JSON array */
+            nlohmann::json data = nlohmann::json::array();
+
+            for (const auto& [uid, rids] : uidToRoomMapping) {  
+                /** Create a JSON object for the room */
+                nlohmann::json roomData;
+                roomData["uid"] = uid;
+    
+                /** Store only the keys from the inner map */
+                std::vector<std::string> roomIDs;
+                
+                for (const auto& [uid, _] : rids) {  
+                    roomIDs.push_back(uid);
+                }
+    
+                /** Convert vector to JSON array */
+                roomData["rid"] = std::move(roomIDs);
+    
+                /** Store the room data in the final list */
+                data.push_back(std::move(roomData));
+            }
+
+            if(!*isAborted){
+                res->cork([res, data]() {
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(data.dump()); 
+                });
+            }
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
+	}).post("/api/v1/subscriptions/connections", [this](auto *res, auto *req) {
         /** get all the subscribed rooms from the given UIDs */
 
         auto isAborted = std::make_shared<bool>(false);
