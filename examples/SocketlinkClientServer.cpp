@@ -2027,7 +2027,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             }
         }    
 
-        log("User count in room: " + std::to_string(size));
+        log("User count in room: " + uid);
 
         {
             /** Acquire an accessor for the outer map */ 
