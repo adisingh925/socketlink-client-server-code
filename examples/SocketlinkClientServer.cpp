@@ -695,7 +695,7 @@ std::atomic<unsigned int> messageCount(0);
 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> topics;
 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> bannedConnections;
 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> disabledConnections;
-tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, int>> uidToRoomMapping;
+tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>> uidToRoomMapping;
 
 tbb::concurrent_hash_map<std::string, bool> uid;
 std::atomic<bool> isMessagingDisabled(false);
@@ -2025,14 +2025,14 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         {
             /** Acquire an accessor for the outer map */ 
-            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, int>>::accessor uid_to_rid_outer_accessor;
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
         
             /** Check if UID exists */ 
             if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
                 auto& innerMap = uid_to_rid_outer_accessor->second;
                 
                 /** Acquire an accessor for the inner map */ 
-                tbb::concurrent_hash_map<std::string, int>::accessor uid_to_rid_inner_accessor;
+                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
 
                 if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
                     /** Only set roomType if insertion was successful */ 
@@ -2040,7 +2040,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 }
             } else {
                 /** Create and insert a new inner map directly */ 
-                tbb::concurrent_hash_map<std::string, int> newInnerMap;
+                tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
                 newInnerMap.emplace(rid, roomType);
         
                 if (uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
@@ -2736,14 +2736,14 @@ void worker_t::work()
 
                         {
                             /** Acquire an accessor for the outer map (UID to Room Mapping) */
-                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, int>>::accessor uid_to_rid_outer_accessor;
+                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
                         
                             /** Check if the user (UID) exists in the mapping */
                             if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
                                 auto& inner_map = uid_to_rid_outer_accessor->second;
                         
                                 /** Check if the room (RID) exists under the given UID */
-                                tbb::concurrent_hash_map<std::string, int>::accessor uid_to_rid_inner_accessor;
+                                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
                                 if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                     /** Room not found under this UID, send response and return */
                                     ws->send(R"({"data":"ROOM_NOT_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
@@ -3065,7 +3065,7 @@ void worker_t::work()
         /** fetching all the RID for the UID and removing the UID from the map */
         {
             /** Acquire access to the outer concurrent map */
-            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, int>>::accessor outer_accessor;
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outer_accessor;
         
             /** Check if the user ID exists in the map */
             if (uidToRoomMapping.find(outer_accessor, userId)) {
@@ -3597,7 +3597,7 @@ void worker_t::work()
                     }
 
                     /** checking if the user is already subscribed to the given room */
-                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, int>>::accessor uid_to_rid_outer_accessor;
+                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
 
                     /** Check if the UID is present in the mapping */
                     if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
@@ -3605,7 +3605,7 @@ void worker_t::work()
                         auto& inner_map = uid_to_rid_outer_accessor->second;
 
                         /** Check if the room is already associated with the UID */
-                        tbb::concurrent_hash_map<std::string, int>::accessor inner_accessor;
+                        tbb::concurrent_hash_map<std::string, uint8_t>::accessor inner_accessor;
                         if (inner_map.find(inner_accessor, rid)) {
                             /** Increment rejected request counter in a relaxed memory order for efficiency */
                             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
@@ -3825,7 +3825,7 @@ void worker_t::work()
                             nlohmann::json roomData;
                             roomData["uid"] = uid;
 
-                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, int>>::accessor outer_accessor;
+                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outer_accessor;
 
                             if (uidToRoomMapping.find(outer_accessor, uid)) {
                                 /** Convert the inner map to a JSON array */
@@ -3988,13 +3988,13 @@ void worker_t::work()
 
                     /** checking if the user is already unsubscribed to the given room */
                     {
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, int>>::accessor uid_to_rid_outer_accessor;
+                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
                         if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
                             auto& inner_map = uid_to_rid_outer_accessor->second;
 
                             /** check if the room is already present under the UID */
                             {
-                                tbb::concurrent_hash_map<std::string, int>::accessor inner_accessor;
+                                tbb::concurrent_hash_map<std::string, uint8_t>::accessor inner_accessor;
                                 if (!inner_map.find(inner_accessor, rid)) {
                                     totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
@@ -4014,13 +4014,13 @@ void worker_t::work()
 
                     /** removing the RID from the uid_to_rid mapping */
                     {
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, int>>::accessor uid_to_rid_outer_accessor;
+                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
                         if (uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
                             auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
 
                             /** Remove the rid from the inner map */
                             {
-                                tbb::concurrent_hash_map<std::string, int>::accessor uid_to_rid_inner_accessor;
+                                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
                                 if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
                                     inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
                                 }
