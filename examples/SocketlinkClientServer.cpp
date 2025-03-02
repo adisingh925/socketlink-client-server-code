@@ -2736,14 +2736,14 @@ void worker_t::work()
 
                         {
                             /** Acquire an accessor for the outer map (UID to Room Mapping) */
-                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
                         
                             /** Check if the user (UID) exists in the mapping */
                             if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
                                 auto& inner_map = uid_to_rid_outer_accessor->second;
                         
                                 /** Check if the room (RID) exists under the given UID */
-                                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                                tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
                                 if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                     /** Room not found under this UID, send response and return */
                                     ws->send(R"({"data":"ROOM_NOT_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
