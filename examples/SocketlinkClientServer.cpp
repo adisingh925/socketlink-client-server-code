@@ -2054,7 +2054,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             }
         }   
 
-        log("User subscribed to room: " + rid);
+        log("User subscribed to room: ");
     
         /** Send a message to self */
         std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
