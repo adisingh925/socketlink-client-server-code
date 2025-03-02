@@ -1971,7 +1971,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, uint8_t roomType) {
     if (!rid.empty()) {
         log("Opening connection to room: " + rid);
-        
+
         const auto& uid = ws->getUserData()->uid;
         auto currentThreadId = std::this_thread::get_id();
         auto workerThreadId = worker->thread_->get_id();
@@ -1987,6 +1987,8 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         int size = 0;
 
+        log("Subscribed to room: " + rid);
+
         {
             /** Acquire an accessor for the outer map (topics) */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
@@ -1998,16 +2000,11 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         
                 /** Acquire an accessor for the inner map */
                 tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
-        
-                /** Check if the user already exists */
-                if (innerMap.find(innerAccessor, uid)) {
-                    /** UID is already present, ensure value is true */
+                
+                /** Insert UID into the inner map if not already present */
+                if (innerMap.insert(innerAccessor, uid)) {
+                    /** Set the value to true, indicating user presence */
                     innerAccessor->second = true;
-                } else {
-                    /** Insert UID into the inner map */
-                    if (innerMap.insert(innerAccessor, uid)) {
-                        innerAccessor->second = true;
-                    }
                 }
         
                 /** Update the size variable with the total number of users in the room */
@@ -2028,7 +2025,9 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 /** Since this is a new room, its size is 1 (only the current user) */
                 size = 1;
             }
-        }      
+        }    
+
+        log("User count in room: " + std::to_string(size));
 
         {
             /** Acquire an accessor for the outer map */ 
@@ -2054,6 +2053,8 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 }
             }
         }   
+
+        log("User subscribed to room: " + rid);
     
         /** Send a message to self */
         std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
