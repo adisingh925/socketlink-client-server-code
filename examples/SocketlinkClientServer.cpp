@@ -690,15 +690,14 @@ std::atomic<double> averagePayloadSize{0.0};
 std::atomic<double> averageLatency{0.0};
 std::atomic<unsigned long long> droppedMessages{0};
 std::atomic<unsigned int> messageCount(0);
+std::atomic<bool> isMessagingDisabled(false);
 
 /** these variables stores some userdata */
 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> topics;
 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> bannedConnections;
 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> disabledConnections;
 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>> uidToRoomMapping;
-
 tbb::concurrent_hash_map<std::string, bool> uid;
-std::atomic<bool> isMessagingDisabled(false);
 tbb::concurrent_hash_map<std::string, WebSocketData> connections;
 
 /** map to store enabled webhooks and features (no need to make it thread safe) */
@@ -3317,7 +3316,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).get("/api/v1/rooms", [this](auto *res, auto *req) {
+	}).get("/api/v1/rooms/users/all", [this](auto *res, auto *req) {
         /** fetch all the rooms present on the server */
 
         auto isAborted = std::make_shared<bool>(false);
@@ -3474,7 +3473,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).post("/api/v1/connections/subscribe/room", [this](auto *res, auto *req) {
+	}).post("/api/v1/users/subscribe/room", [this](auto *res, auto *req) {
         auto isAborted = std::make_shared<bool>(false);
         res->onAborted([isAborted]() { *isAborted = true; });
 
@@ -3778,7 +3777,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).get("/api/v1/subscriptions", [this](auto *res, auto *req) {
+	}).get("/api/v1/users/subscriptions/all", [this](auto *res, auto *req) {
         /** get all the subscribed rooms from the given UIDs */
 
         auto isAborted = std::make_shared<bool>(false);
@@ -3843,7 +3842,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).post("/api/v1/subscriptions/connections", [this](auto *res, auto *req) {
+	}).post("/api/v1/users/subscriptions", [this](auto *res, auto *req) {
         /** get all the subscribed rooms from the given UIDs */
 
         auto isAborted = std::make_shared<bool>(false);
@@ -3938,7 +3937,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).post("/api/v1/connections/unsubscribe/room", [this](auto *res, auto *req) {
+	}).post("/api/v1/users/unsubscribe/room", [this](auto *res, auto *req) {
         auto isAborted = std::make_shared<bool>(false);
         res->onAborted([isAborted]() { *isAborted = true; });
 
@@ -4276,7 +4275,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).post("/api/v1/connections/broadcast", [this](auto *res, auto *req) {
+	}).post("/api/v1/users/broadcast", [this](auto *res, auto *req) {
         /** broadcast a message to a particular connection */
 
         auto isAborted = std::make_shared<bool>(false);
@@ -4355,7 +4354,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).post("/api/v1/rooms/ban", [this](auto *res, auto *req) {
+	}).post("/api/v1/rooms/users/ban", [this](auto *res, auto *req) {
         /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
 
         auto isAborted = std::make_shared<bool>(false);
@@ -4456,7 +4455,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).post("/api/v1/rooms/unban", [this](auto *res, auto *req) {
+	}).post("/api/v1/rooms/users/unban", [this](auto *res, auto *req) {
         /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
 
         auto isAborted = std::make_shared<bool>(false);
@@ -4735,7 +4734,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).get("/api/v1/connections/banned", [this](auto *res, auto *req) {
+	}).get("/api/v1/users/banned", [this](auto *res, auto *req) {
         /** Handle the request to fetch all banned connections */
 
         auto isAborted = std::make_shared<bool>(false);
@@ -4803,7 +4802,7 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
-	}).get("/api/v1/connections/messaging/disabled", [this](auto *res, auto *req) {
+	}).get("/api/v1/users/messaging/disabled", [this](auto *res, auto *req) {
         /** Handle the request to fetch all disabled connections */
 
         auto isAborted = std::make_shared<bool>(false);
