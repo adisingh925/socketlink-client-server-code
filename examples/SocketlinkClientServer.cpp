@@ -2045,6 +2045,14 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if (uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
                     uid_to_rid_outer_accessor->second = std::move(newInnerMap);
                 }
+
+                /** Check if the uid map has the value true, make it false else ignore */
+                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                if (::uid.find(uid_outer_accessor, uid)) {
+                    if (uid_outer_accessor->second) { 
+                        uid_outer_accessor->second = false;
+                    }
+                }
             }
         }   
     
@@ -3378,6 +3386,58 @@ void worker_t::work()
                 res->end(R"({"message": "Internal server error!"})");
             });
         }
+	}).get("/api/v1/users/orphan", [this](auto *res, auto *req) {
+        /** fetch all the rooms present on the server */
+
+        auto isAborted = std::make_shared<bool>(false);
+
+        res->onAborted([isAborted]() {
+            /** connection aborted */
+            *isAborted = true;
+        });
+
+        try {
+            if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+    
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("401 Unauthorized");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                    });
+                }
+    
+                return;
+            }
+    
+            std::vector<std::string> orphanUids;
+
+            for (auto it = uid.begin(); it != uid.end(); ++it) {
+                if (it->second) {  
+                    orphanUids.push_back(it->first);
+                }
+            }
+
+            nlohmann::json data;
+            data["uid"] = orphanUids;
+            
+            if(!*isAborted){
+                res->cork([res, data]() {
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(data.dump());  
+                });
+            }
+        } catch (std::exception &e) {
+            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("500 Internal Server Error");
+                res->writeHeader("Content-Type", "application/json");
+                res->end(R"({"message": "Internal server error!"})");
+            });
+        }
 	}).post("/api/v1/rooms/users", [this](auto *res, auto *req) {
         /** get all the connectiond for a room */
 
@@ -4090,6 +4150,20 @@ void worker_t::work()
                                 if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
                                     inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
                                 }
+                            }
+
+                            /** Check if the inner map is now empty */
+                            if (inner_uid_to_rid_map.empty()) {
+
+                                /** Check if the uid map has the value false, make it true (orphan) else ignore */
+                                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                                if (::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
+                                    if (!uid_outer_accessor->second) { 
+                                        uid_outer_accessor->second = true;
+                                    }
+                                }
+
+                                uidToRoomMapping.erase(uid_to_rid_outer_accessor);
                             }
                         }
                     }
