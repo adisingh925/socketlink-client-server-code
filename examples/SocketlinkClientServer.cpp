@@ -2793,7 +2793,7 @@ void worker_t::work()
                             /** publishing message */
                             /* ws->publish(rid, message, opCode, true); */
                             
-                            std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\"}";
+                            std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
                             ws->publish(rid, data, opCode, true);
 
                             std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
@@ -4233,7 +4233,7 @@ void worker_t::work()
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
     
                         std::string message = parsedJson["message"].get<std::string>();
-                        std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\"}";
+                        std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"rid\":\"" + BROADCAST + "\"}";
 
                         /** broadcast a message to all the rooms */
                         std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast](worker_t &w) {
@@ -4309,10 +4309,11 @@ void worker_t::work()
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
 
                         std::string message = parsedJson["message"].get<std::string>();
-                        std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\"}";
                         std::vector<std::string> rids = parsedJson["rid"].get<std::vector<std::string>>();
 
                         for (const auto& rid : rids) {
+                            std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"rid\":\"" + rid + "\"}";
+
                             /** broadcast a message to a specific room */
                             std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast, rid](worker_t &w) {
                                 /** Defer the message publishing to the worker's loop */ 
@@ -4388,10 +4389,11 @@ void worker_t::work()
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
 
                         std::string message = parsedJson["message"].get<std::string>();
-                        std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\"}";
                         std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
 
                         for (const auto& uid : uids) {
+                            std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"rid\":\"" + uid + "\"}";
+
                             /** broadcast a message to a specific member of a room */
                             std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast, uid](worker_t &w) {
                                 /** Defer the message publishing to the worker's loop */ 
