@@ -3274,20 +3274,6 @@ void worker_t::work()
         });
 
         try {
-            if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 0){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-    
-                if(!*isAborted){
-                    res->cork([res]() {
-                        res->writeStatus("403 Forbidden");
-                        res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"message": "MySQL integration is disabled!"})");
-                    });
-                }
-    
-                return;
-            }
-    
             if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
                 totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
     
@@ -3296,6 +3282,20 @@ void worker_t::work()
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
                         res->end(R"({"message": "Unauthorized access. Invalid API key!"})");
+                    });
+                }
+    
+                return;
+            }
+
+            if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 0){
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+    
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("403 Forbidden");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "MySQL integration is disabled!"})");
                     });
                 }
     
