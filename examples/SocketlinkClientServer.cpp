@@ -1610,7 +1610,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
         };
 
         if (validRoomTypes.count(roomType)) {
-            std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"uid\":\"" + ws->getUserData()->uid + "\", \"source\":\"server\"}";
+            std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"uid\":\"" + ws->getUserData()->uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
             /** Publish message to all workers */
             for (auto& w : ::workers) {
@@ -2057,7 +2057,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }   
     
         /** Send a message to self */
-        std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
+        std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
         if (workerThreadId == currentThreadId) {
             ws->send(selfMessage, uWS::OpCode::TEXT, true);
@@ -2071,19 +2071,20 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
             roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
             roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
-                std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\"}";
+            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        ) {
+            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
-                for (auto& w : ::workers) {
-                    if (workerThreadId == w.thread_->get_id()) {
-                        ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                    } else {
-                        w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
-                            w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                        });
-                    }
+            for (auto& w : ::workers) {
+                if (workerThreadId == w.thread_->get_id()) {
+                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                } else {
+                    w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
+                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                    });
                 }
             }
+        }
 
         /** fire connection open webhook */
         switch(roomType) {
@@ -2767,7 +2768,7 @@ void worker_t::work()
                         }                        
 
                         if((disabledConnections.find(outer_accessor, rid) &&
-                            outer_accessor->second.find(inner_accessor, uid))){
+                            outer_accessor->second.find(inner_accessor, uid))) {
                             ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
                         } else {
                             unsigned int subscribers = app_->numSubscribers(rid);
