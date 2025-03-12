@@ -680,7 +680,6 @@ struct WebSocketData {
 };
 
 /** Global atomic variables and data structures (all thread safe) */
-
 /** these variables mainly stores the metrics */
 std::atomic<int> globalConnectionCounter(0);
 std::atomic<unsigned long long> globalMessagesSent{0}; 
@@ -692,13 +691,29 @@ std::atomic<unsigned long long> droppedMessages{0};
 std::atomic<unsigned int> messageCount(0);
 std::atomic<bool> isMessagingDisabled(false);
 
-/** these variables stores some userdata */
-tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> topics;
-tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> bannedConnections;
-tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> disabledConnections;
-tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>> uidToRoomMapping;
-tbb::concurrent_hash_map<std::string, bool> uid;
-tbb::concurrent_hash_map<std::string, WebSocketData> connections;
+bool isMultiThread = false;
+
+/** This will be used when the number of threads will be more than 1 */
+namespace ThreadSafe {
+    /** Thread-safe variables using TBB */
+    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> topics;
+    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> bannedConnections;
+    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> disabledConnections;
+    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>> uidToRoomMapping;
+    tbb::concurrent_hash_map<std::string, bool> uid;
+    tbb::concurrent_hash_map<std::string, WebSocketData> connections;
+}
+
+/** This will be used when the number of threads will be one */
+namespace SingleThreaded {
+    /** Non-thread-safe variables using std::unordered_map */
+    std::unordered_map<std::string, std::unordered_set<std::string>> topics;
+    std::unordered_map<std::string, std::unordered_set<std::string>> bannedConnections;
+    std::unordered_map<std::string, std::unordered_set<std::string>> disabledConnections;
+    std::unordered_map<std::string, std::unordered_map<std::string, uint8_t>> uidToRoomMapping;
+    std::unordered_map<std::string, bool> uid;
+    std::unordered_map<std::string, WebSocketData> connections;
+}
 
 /** map to store enabled webhooks and features (no need to make it thread safe) */
 std::unordered_map<Webhooks, int> webhookStatus;
@@ -1564,35 +1579,61 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
         int size = 0;
 
         /** Check if the room exists in the topics map */
-        if (topics.find(outer_accessor, rid)) {
-            auto& inner_map = outer_accessor->second;
-
-            /** Remove user from the inner map */
-            {
-                tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
-                if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
-                    inner_map.erase(inner_accessor);
+        if(isMultiThread){
+            if (ThreadSafe::topics.find(outer_accessor, rid)) {
+                auto& inner_map = outer_accessor->second;
+    
+                /** Remove user from the inner map */
+                {
+                    tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+                    if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
+                        inner_map.erase(inner_accessor);
+                    }
+                }
+    
+                size = inner_map.size();
+    
+                /** Remove room if empty */
+                if (size == 0) {
+                    /** Remove room from topics */
+                    ThreadSafe::topics.erase(outer_accessor);
+    
+                    /** Remove disabled and banned connections */
+                    for (auto& map : {&ThreadSafe::disabledConnections, &ThreadSafe::bannedConnections}) {
+                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor map_accessor;
+    
+                        if (map->find(map_accessor, rid)) {
+                            map->erase(map_accessor);
+                        }
+                    }
                 }
             }
+        } else {
+            auto it = SingleThreaded::topics.find(rid);
+            if (it != SingleThreaded::topics.end()) {
+                auto& inner_set = it->second; 
 
-            size = inner_map.size();
+                /** Removing the entry from the inner set */
+                inner_set.erase(ws->getUserData()->uid);
 
-            /** Remove room if empty */
-            if (size == 0) {
-                /** Remove room from topics */
-                topics.erase(outer_accessor);
+                /** Store the new size */
+                size_t size = inner_set.size();
 
-                /** Remove disabled and banned connections */
-                for (auto& map : {&disabledConnections, &bannedConnections}) {
-                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor map_accessor;
+                /** Remove the room if empty */
+                if (size == 0) {
+                    SingleThreaded::topics.erase(it); 
 
-                    if (map->find(map_accessor, rid)) {
-                        map->erase(map_accessor);
+                    /** Remove disabled and banned connections */
+                    for (auto& map : {&SingleThreaded::disabledConnections, &SingleThreaded::bannedConnections}) {
+                        auto it = map->find(rid);
+                        if (it != map->end()) {
+                            map->erase(it); 
+                        }
                     }
                 }
             }
         }
-
+        
         /** Unsubscribe on the correct thread */
         auto unsubscribe_fn = [ws, rid]() { ws->unsubscribe(rid); };
         if (worker->thread_->get_id() != std::this_thread::get_id()) {
@@ -1984,77 +2025,94 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         int size = 0;
 
-        // {
-        //     /** Acquire an accessor for the outer map (topics) */
-        //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
+        if(isMultiThread) {
+            /** Acquire an accessor for the outer map (topics) */
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
         
-        //     /** Check if the room ID (rid) already exists in the topics map */
-        //     if (topics.find(topicsAccessor, rid)) {
-        //         /** Room exists, retrieve the inner map containing user IDs */
-        //         auto& innerMap = topicsAccessor->second;
+            /** Check if the room ID (rid) already exists in the topics map */
+            if (ThreadSafe::topics.find(topicsAccessor, rid)) {
+                /** Room exists, retrieve the inner map containing user IDs */
+                auto& innerMap = topicsAccessor->second;
         
-        //         /** Acquire an accessor for the inner map */
-        //         tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
+                /** Acquire an accessor for the inner map */
+                tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
                 
-        //         /** Insert UID into the inner map if not already present */
-        //         if (innerMap.insert(innerAccessor, uid)) {
-        //             /** Set the value to true, indicating user presence */
-        //             innerAccessor->second = true;
-        //         }
+                /** Insert UID into the inner map if not already present */
+                if (innerMap.insert(innerAccessor, uid)) {
+                    /** Set the value to true, indicating user presence */
+                    innerAccessor->second = true;
+                }
         
-        //         /** Update the size variable with the total number of users in the room */
-        //         size = innerMap.size();
-        //     } else {
-        //         /** Room does not exist, create a new inner map */
-        //         tbb::concurrent_hash_map<std::string, bool> newInnerMap;
+                /** Update the size variable with the total number of users in the room */
+                size = innerMap.size();
+            } else {
+                /** Room does not exist, create a new inner map */
+                tbb::concurrent_hash_map<std::string, bool> newInnerMap;
         
-        //         /** Insert the UID into the newly created inner map */
-        //         newInnerMap.emplace(uid, true);
+                /** Insert the UID into the newly created inner map */
+                newInnerMap.emplace(uid, true);
         
-        //         /** Insert the new inner map into the topics map */
-        //         if (topics.insert(topicsAccessor, rid)) {
-        //             /** Move the newly created inner map to avoid unnecessary copies */
-        //             topicsAccessor->second = std::move(newInnerMap);
-        //         }
+                /** Insert the new inner map into the topics map */
+                if (ThreadSafe::topics.insert(topicsAccessor, rid)) {
+                    /** Move the newly created inner map to avoid unnecessary copies */
+                    topicsAccessor->second = std::move(newInnerMap);
+                }
         
-        //         /** Since this is a new room, its size is 1 (only the current user) */
-        //         size = 1;
-        //     }
-        // }    
+                /** Since this is a new room, its size is 1 (only the current user) */
+                size = 1;
+            }
+        } else {
+            auto [it, inserted] = SingleThreaded::topics.try_emplace(rid);
+            auto& inner_set = it->second; 
 
-        // {
-        //     /** Acquire an accessor for the outer map */ 
-        //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+            /** Insert the user into the inner set */
+            inner_set.insert(uid);
+
+            /** Store the new size */
+            size = inner_set.size();
+        }   
+
+        if(isMultiThread) {
+            /** Acquire an accessor for the outer map */ 
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
         
-        //     /** Check if UID exists */ 
-        //     if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-        //         auto& innerMap = uid_to_rid_outer_accessor->second;
+            /** Check if UID exists */ 
+            if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                auto& innerMap = uid_to_rid_outer_accessor->second;
                 
-        //         /** Acquire an accessor for the inner map */ 
-        //         tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                /** Acquire an accessor for the inner map */ 
+                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
 
-        //         if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
-        //             /** Only set roomType if insertion was successful */ 
-        //             uid_to_rid_inner_accessor->second = roomType;
-        //         }
-        //     } else {
-        //         /** Create and insert a new inner map directly */ 
-        //         tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
-        //         newInnerMap.emplace(rid, roomType);
+                if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
+                    /** Only set roomType if insertion was successful */ 
+                    uid_to_rid_inner_accessor->second = roomType;
+                }
+            } else {
+                /** Create and insert a new inner map directly */ 
+                tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
+                newInnerMap.emplace(rid, roomType);
         
-        //         if (uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
-        //             uid_to_rid_outer_accessor->second = std::move(newInnerMap);
-        //         }
+                if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
+                    uid_to_rid_outer_accessor->second = std::move(newInnerMap);
+                }
 
-        //         /** Check if the uid map has the value true, make it false else ignore */
-        //         tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-        //         if (::uid.find(uid_outer_accessor, uid)) {
-        //             if (uid_outer_accessor->second) { 
-        //                 uid_outer_accessor->second = false;
-        //             }
-        //         }
-        //     }
-        // }   
+                /** Check if the uid map has the value true, make it false else ignore */
+                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
+                    if (uid_outer_accessor->second) { 
+                        uid_outer_accessor->second = false;
+                    }
+                }
+            }
+        } else {
+            auto [it, inserted] = SingleThreaded::uidToRoomMapping.try_emplace(uid);
+            it->second[rid] = roomType; 
+
+            /** Check if uid exists and is true, then set to false */
+            if (auto it2 = SingleThreaded::uid.find(uid); it2 != SingleThreaded::uid.end() && it2->second) {
+                it2->second = false;
+            }
+        }   
     
         /** Send a message to self */
         std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
@@ -2488,10 +2546,13 @@ void worker_t::work()
             upgradeData->aborted = true;
         });
 
-        if(upgradeData->uid.empty() || upgradeData->uid.length() > 4096){
-            res->writeStatus("400 Bad Request");
-            res->writeHeader("Content-Type", "application/json");
-            res->end("INVALID_UID");
+        if(upgradeData->uid.empty() || upgradeData->uid.length() > 4096) {
+
+            res->cork([res]() {
+                res->writeStatus("400 Bad Request");
+                res->writeHeader("Content-Type", "application/json");
+                res->end("INVALID_UID");
+            });
 
             if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
                 std::ostringstream payload;
@@ -2511,23 +2572,61 @@ void worker_t::work()
             }
         }
 
-        /** Check if the user is banned and reject the connection */
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedAccessor;
-        if (bannedConnections.find(bannedAccessor, "global")) {
-            /** Access the inner map */
-            tbb::concurrent_hash_map<std::string, bool>& inner_map = bannedAccessor->second;
+        if(isMultiThread) {
+            /** Check if the user is banned and reject the connection */
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedAccessor;
+            if (ThreadSafe::bannedConnections.find(bannedAccessor, "global")) {
+                /** Access the inner map */
+                tbb::concurrent_hash_map<std::string, bool>& inner_map = bannedAccessor->second;
 
-            /** Accessor for the inner map */
-            tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
-            
-            /** Check if the user UID is banned in the inner map */
-            if (inner_map.find(innerAccessor, upgradeData->uid)) {
+                /** Accessor for the inner map */
+                tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
+                
+                /** Check if the user UID is banned in the inner map */
+                if (inner_map.find(innerAccessor, upgradeData->uid)) {
+
+                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                    res->cork([res]() {
+                        res->writeStatus("403 Forbidden");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end("CONNECTION_BANNED");
+                    });
+
+                    /** check if the connection is banned */
+                    if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
+                        std::ostringstream payload;
+                        payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                                << "\"trigger\":\"UID_BANNED_GLOBALLY\", "
+                                << "\"uid\":\"" << upgradeData->uid << "\", "
+                                << "\"message\":\"This connection is globally banned by the admin!\"}";
+
+                        std::string body = payload.str();
+
+                        sendHTTPSPOSTRequestFireAndForget(
+                            UserData::getInstance().webHookBaseUrl,
+                            UserData::getInstance().webhookPath,
+                            body,
+                            {}
+                        );
+                    }
+
+                    return;
+                }
+            }
+        } else {
+            /** Check if the user is banned and reject the connection */
+            if (SingleThreaded::bannedConnections.find("global") != SingleThreaded::bannedConnections.end() 
+            && SingleThreaded::bannedConnections["global"].find(upgradeData->uid) != SingleThreaded::bannedConnections["global"].end()) {
+                
                 totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                res->writeStatus("403 Forbidden");
-                res->writeHeader("Content-Type", "application/json");
-                res->end("CONNECTION_BANNED");
+                
+                res->cork([res]() {
+                    res->writeStatus("403 Forbidden");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end("CONNECTION_BANNED");
+                });
 
-                /** check if the connection is banned */
                 if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
@@ -2549,36 +2648,74 @@ void worker_t::work()
             }
         }
 
-        /** check if a connection is already there with the same uid (thread safe) */
-        tbb::concurrent_hash_map<std::string, bool>::const_accessor accessor;
-        if(uid.find(accessor, upgradeData->uid)){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("409 Conflict")->end("UID_ALREADY_EXIST");
+        if(isMultiThread) {
+            /** check if a connection is already there with the same uid (thread safe) */
+            tbb::concurrent_hash_map<std::string, bool>::const_accessor accessor;
+            if(ThreadSafe::uid.find(accessor, upgradeData->uid)){
 
-            if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
-                        << "\"trigger\":\"UID_ALREADY_EXIST\", "  
-                        << "\"uid\":\"" << upgradeData->uid << "\", "
-                        << "\"message\":\"There is already a connection using this UID!\"}";
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
+                res->cork([res]() {
+                    res->writeStatus("409 Conflict")->end("UID_ALREADY_EXIST");
+                });
+
+                if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                            << "\"trigger\":\"UID_ALREADY_EXIST\", "  
+                            << "\"uid\":\"" << upgradeData->uid << "\", "
+                            << "\"message\":\"There is already a connection using this UID!\"}";
+
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+
+                return;
             }
+        } else {
+            /** check if a connection is already there with the same uid (thread safe) */
+            if(SingleThreaded::uid.find(upgradeData->uid) != SingleThreaded::uid.end()) {
+                
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-            return;
+                res->cork([res]() {
+                    res->writeStatus("409 Conflict")->end("UID_ALREADY_EXIST");
+                });
+
+                if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
+                    std::ostringstream payload;
+                    payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
+                            << "\"trigger\":\"UID_ALREADY_EXIST\", "  
+                            << "\"uid\":\"" << upgradeData->uid << "\", "
+                            << "\"message\":\"There is already a connection using this UID!\"}";
+
+                    std::string body = payload.str(); 
+                    
+                    sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {}
+                    );
+                }
+
+                return;
+            }
         }
 
         /** Check if the connection limit has been exceeded */
         if (globalConnectionCounter.load(std::memory_order_relaxed) >= UserData::getInstance().connections) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("503 Service Unavailable")->end("MAX_CONNECTION_LIMIT_REACHED");
+
+            res->cork([res]() {
+                res->writeStatus("503 Service Unavailable")->end("MAX_CONNECTION_LIMIT_REACHED");
+            });
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
@@ -2603,7 +2740,10 @@ void worker_t::work()
         /** Check if API key is valid or not */
         if(UserData::getInstance().clientApiKey != upgradeData->key){
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-            res->writeStatus("401 Unauthorized")->end("INVALID_API_KEY");
+
+            res->cork([res]() {
+                res->writeStatus("401 Unauthorized")->end("INVALID_API_KEY");
+            });
 
             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                 std::ostringstream payload;
@@ -2646,28 +2786,38 @@ void worker_t::work()
 
         std::string userId = ws->getUserData()->uid;
 
-        /** Thread-safe insertion into connections map */
-        tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
-        bool inserted = connections.insert(conn_accessor, userId);
-        if (inserted) {
-            conn_accessor->second = std::move(data);
+        if(isMultiThread) {
+            /** Thread-safe insertion into connections map */
+            tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
+            bool inserted = ThreadSafe::connections.insert(conn_accessor, userId);
+            if (inserted) {
+                conn_accessor->second = std::move(data);
+            } else {
+                /** UID already exists, something went wrong */
+                ws->end();
+                return;
+            }
         } else {
-            /** UID already exists, something went wrong */
-            ws->end();
-            return;
+            /** Single-threaded insertion into connections map */
+            SingleThreaded::connections[userId] = std::move(data);
         }
 
         /** Increment global connection counter */
         globalConnectionCounter.fetch_add(1, std::memory_order_relaxed);
 
-        /** Thread-safe insertion into uid map */
-        tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
-        if (uid.insert(user_accessor, userId)) {
-            user_accessor->second = true;
+        if(isMultiThread) {
+            /** Thread-safe insertion into uid map */
+            tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
+            if (ThreadSafe::uid.insert(user_accessor, userId)) {
+                user_accessor->second = true;
+            } else {
+                /** UID already exists, something went wrong */
+                ws->end();
+                return;
+            }
         } else {
-            /** UID already exists, something went wrong */
-            ws->end();
-            return;
+            /** Single-threaded insertion into uid map */
+            SingleThreaded::uid[userId] = true;
         }
 
         /** Subscribe to channels */
@@ -2678,305 +2828,43 @@ void worker_t::work()
         auto& userData = *ws->getUserData();
         auto uid = userData.uid;
 
-        /** Check if messaging is disabled for the user */
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
-        tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
-
-        if (isMessagingDisabled.load(std::memory_order_relaxed) ||
-            (disabledConnections.find(outer_accessor, "global") &&
-            outer_accessor->second.find(inner_accessor, uid))) {
-            
+        if(isMessagingDisabled.load(std::memory_order_relaxed)) {
             ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+            return;
+        }
+
+        if(isMultiThread) {
+            /** Check if messaging is disabled for the user */
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
+            tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
+
+            if (ThreadSafe::disabledConnections.find(outer_accessor, "global") &&
+                outer_accessor->second.find(inner_accessor, uid)) {
+                
+                ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+
+                return;
+            }
         } else {
-            if (ws->getUserData()->sendingAllowed)
-            {
-                if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes) {
-                    ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                    droppedMessages.fetch_add(1, std::memory_order_relaxed);
-                    ws->getUserData()->sendingAllowed = false;
+            /** Check if messaging is disabled for the user */
+            auto globalIt = SingleThreaded::disabledConnections.find("global");
 
-                    if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
-                        std::ostringstream payload;
-                        payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
-                                << "\"uid\":\"" << uid << "\"}";
+            if (globalIt != SingleThreaded::disabledConnections.end() && 
+                globalIt->second.find(uid) != globalIt->second.end()) {
 
-                        std::string body = payload.str(); 
-                        
-                        sendHTTPSPOSTRequestFireAndForget(
-                            UserData::getInstance().webHookBaseUrl,
-                            UserData::getInstance().webhookPath,
-                            body,
-                            {}
-                        );
-                    }
-                } else {
-                    try {
-                        /** Parsing the message */
-                        simdjson::padded_string jsonMessage(message.data(), message.size());
-                        simdjson::ondemand::parser parser;
-                        simdjson::ondemand::document parsedData;
+                /** Send a message to the user indicating messaging is disabled */
+                ws->send(R"({"data":"MESSAGING_DISABLED","source":"server"})", uWS::OpCode::TEXT, true);
 
-                        /** Parse JSON and handle potential errors */
-                        if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
-                            ws->send(R"({"error":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                            return;
-                        }
+                return;
+            }
+        }
 
-                        /** Retrieve 'rid' */
-                        std::string rid;
-                        if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
-                            rid = std::string(ridField.get_string().value());  // Convert only once
-                        } else {
-                            ws->send(R"({"error":"MISSING_RID","source":"server"})", uWS::OpCode::TEXT, true);
-                            return;
-                        }
-
-                        /** Retrieve 'message' */
-                        std::string message;
-                        if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
-                            message = std::string(msgField.get_string().value());  // Convert only once
-                        } else {
-                            ws->send(R"({"error":"MISSING_MESSAGE","source":"server"})", uWS::OpCode::TEXT, true);
-                            return;
-                        }
-
-                        uint8_t roomType = 255;
-
-                        {
-                            /** Acquire an accessor for the outer map (UID to Room Mapping) */
-                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
-                        
-                            /** Check if the user (UID) exists in the mapping */
-                            if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                                auto& inner_map = uid_to_rid_outer_accessor->second;
-                        
-                                /** Check if the room (RID) exists under the given UID */
-                                tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
-                                if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
-                                    /** Room not found under this UID, send response and return */
-                                    ws->send(R"({"data":"ROOM_NOT_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
-                                    return;
-                                }
-                        
-                                /** Room exists, retrieve the room type */
-                                roomType = uid_to_rid_inner_accessor->second;
-                            } else {
-                                /** No subscription found for the given UID, send response */
-                                ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
-                                return;
-                            }
-                        }                        
-
-                        if((disabledConnections.find(outer_accessor, rid) &&
-                            outer_accessor->second.find(inner_accessor, uid))) {
-                            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                        } else {
-                            unsigned int subscribers = app_->numSubscribers(rid);
-
-                            globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
-                            totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
-
-                            /** Writing data to the LMDB */
-                            if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
-                            || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
-                            || roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
-                            || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-                            ) {
-                                /** write the data in the local storage */
-                                write_worker(rid, uid, std::string(message));
-
-                                /** SQL integration works in cache channels only */
-                                if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
-                                    db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid, rid);
-                                }
-                            }
-
-                            /** publishing message */
-                            /* ws->publish(rid, message, opCode, true); */
-                            
-                            std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
-                            ws->publish(rid, data, opCode, true);
-
-                            std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
-                                /** Check if the current thread ID matches the worker's thread ID */ 
-                                if (std::this_thread::get_id() != w.thread_->get_id()) {
-                                    /** Defer the message publishing to the worker's loop */ 
-                                    w.loop_->defer([&w, data, opCode, rid]() {
-                                        w.app_->publish(rid, data, opCode, true);
-                                    });
-                                }
-                            });
-
-                            /** this is a dangerous and can cause performance degrade */
-                            switch(roomType) {
-                                    case static_cast<uint8_t>(Rooms::PUBLIC) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}"; 
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }  
-
-                                    case static_cast<uint8_t>(Rooms::PRIVATE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";  
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}"; 
-
-                                            std::string body = payload.str();
-
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_CACHE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_CACHE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-
-                                    case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
-                                        if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM] == 1){
-                                            std::ostringstream payload;
-                                            payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
-                                                    << "\"uid\":\"" << uid << "\", "
-                                                    << "\"rid\":\"" << rid << "\", "
-                                                    << "\"message\":\"" << message << "\"}";
-
-                                            std::string body = payload.str(); 
-                                            
-                                            sendHTTPSPOSTRequestFireAndForget(
-                                                UserData::getInstance().webHookBaseUrl,
-                                                UserData::getInstance().webhookPath,
-                                                body,
-                                                {}
-                                            );
-                                        }
-                                        break;
-                                    }
-                                }
-                        }
-                    } catch (const simdjson::simdjson_error &e) {
-                        ws->send("{\"data\":\"INVALID_JSON\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                    }
-                }
-            } else {
+        if (ws->getUserData()->sendingAllowed)
+        {
+            if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes) {
                 ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
                 droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                ws->getUserData()->sendingAllowed = false;
 
                 if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
                     std::ostringstream payload;
@@ -2992,8 +2880,334 @@ void worker_t::work()
                         {}
                     );
                 }
+            } else {
+                try {
+                    /** Parsing the message */
+                    simdjson::padded_string jsonMessage(message.data(), message.size());
+                    simdjson::ondemand::parser parser;
+                    simdjson::ondemand::document parsedData;
+
+                    /** Parse JSON and handle potential errors */
+                    if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
+                        ws->send(R"({"error":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                        return;
+                    }
+
+                    /** Retrieve 'rid' */
+                    std::string rid;
+                    if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
+                        rid = std::string(ridField.get_string().value());  // Convert only once
+                    } else {
+                        ws->send(R"({"error":"MISSING_RID","source":"server"})", uWS::OpCode::TEXT, true);
+                        return;
+                    }
+
+                    /** Retrieve 'message' */
+                    std::string message;
+                    if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
+                        message = std::string(msgField.get_string().value());  // Convert only once
+                    } else {
+                        ws->send(R"({"error":"MISSING_MESSAGE","source":"server"})", uWS::OpCode::TEXT, true);
+                        return;
+                    }
+
+                    uint8_t roomType = 255;
+
+                    if(isMultiThread) {
+                        /** Acquire an accessor for the outer map (UID to Room Mapping) */
+                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
+                    
+                        /** Check if the user (UID) exists in the mapping */
+                        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                            auto& inner_map = uid_to_rid_outer_accessor->second;
+                    
+                            /** Check if the room (RID) exists under the given UID */
+                            tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
+                            if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
+                                /** Room not found under this UID, send response and return */
+                                ws->send(R"({"data":"ROOM_NOT_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                                return;
+                            }
+                    
+                            /** Room exists, retrieve the room type */
+                            roomType = uid_to_rid_inner_accessor->second;
+                        } else {
+                            /** No subscription found for the given UID, send response */
+                            ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                            return;
+                        }
+                    } else {
+                        /** 
+                         * Attempt to find the user (UID) in the room mapping.
+                         * The map stores room associations for each user.
+                         */
+                        if (auto uidIt = SingleThreaded::uidToRoomMapping.find(uid); uidIt != SingleThreaded::uidToRoomMapping.end()) {
+                            /** Get reference to the inner map containing room associations for this UID */
+                            auto& roomMap = uidIt->second;
+
+                            /** Attempt to find the given room (RID) */
+                            if (auto ridIt = roomMap.find(rid); ridIt != roomMap.end()) {
+                                /** Room exists, retrieve the room type */
+                                roomType = ridIt->second;
+                            } else {
+                                /** Room not found under this UID, send error response */
+                                ws->send(R"({"data":"ROOM_NOT_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                                return;
+                            }
+                        } else {
+                            /** No subscription found for the given UID, send error response */
+                            ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                            return;
+                        }
+                    }                     
+
+                    if(isMultiThread) {
+                        /** Check if messaging is disabled for the user */
+                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
+                        tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
+
+                        if((ThreadSafe::disabledConnections.find(outer_accessor, rid) &&
+                            outer_accessor->second.find(inner_accessor, uid))) {
+                            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+                            return;
+                        } 
+                    } else {
+                        /** 
+                         * Check if messaging is disabled for the user.
+                         * The outer map stores disabled rooms (RID), and the inner set stores users (UIDs) who are blocked.
+                         */
+                        auto ridIt = SingleThreaded::disabledConnections.find(rid);
+
+                        /** If the room exists in the disabledConnections map */
+                        if (ridIt != SingleThreaded::disabledConnections.end() && 
+                            ridIt->second.find(uid) != ridIt->second.end()) {
+                            /** Messaging is disabled, send error response */
+                            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+                            return;
+                        }
+                    }
+
+                    unsigned int subscribers = app_->numSubscribers(rid);
+
+                    globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
+                    totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
+
+                    /** Writing data to the LMDB */
+                    if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
+                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
+                    || roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
+                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+                    ) {
+                        /** write the data in the local storage */
+                        write_worker(rid, uid, std::string(message));
+
+                        /** SQL integration works in cache channels only */
+                        if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
+                            db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid, rid);
+                        }
+                    }
+
+                    /** publishing message */
+                    /* ws->publish(rid, message, opCode, true); */
+                    
+                    std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
+                    ws->publish(rid, data, opCode, true);
+
+                    std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
+                        /** Check if the current thread ID matches the worker's thread ID */ 
+                        if (std::this_thread::get_id() != w.thread_->get_id()) {
+                            /** Defer the message publishing to the worker's loop */ 
+                            w.loop_->defer([&w, data, opCode, rid]() {
+                                w.app_->publish(rid, data, opCode, true);
+                            });
+                        }
+                    });
+
+                    /** this is a dangerous and can cause performance degrade */
+                    switch(roomType) {
+                        case static_cast<uint8_t>(Rooms::PUBLIC) : {
+                            if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_ROOM] == 1){
+                                std::ostringstream payload;
+                                payload << "{\"event\":\"ON_MESSAGE_PUBLIC_ROOM\", "
+                                        << "\"uid\":\"" << uid << "\", "
+                                        << "\"rid\":\"" << rid << "\", "
+                                        << "\"message\":\"" << message << "\"}"; 
+
+                                std::string body = payload.str(); 
+                                
+                                sendHTTPSPOSTRequestFireAndForget(
+                                    UserData::getInstance().webHookBaseUrl,
+                                    UserData::getInstance().webhookPath,
+                                    body,
+                                    {}
+                                );
+                            }
+                            break;
+                        }  
+
+                        case static_cast<uint8_t>(Rooms::PRIVATE) : {
+                            if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_ROOM] == 1){
+                                std::ostringstream payload;
+                                payload << "{\"event\":\"ON_MESSAGE_PRIVATE_ROOM\", "
+                                        << "\"uid\":\"" << uid << "\", "
+                                        << "\"rid\":\"" << rid << "\", "
+                                        << "\"message\":\"" << message << "\"}";  
+
+                                std::string body = payload.str(); 
+                                
+                                sendHTTPSPOSTRequestFireAndForget(
+                                    UserData::getInstance().webHookBaseUrl,
+                                    UserData::getInstance().webhookPath,
+                                    body,
+                                    {}
+                                );
+                            }
+                            break;
+                        }
+
+                        case static_cast<uint8_t>(Rooms::PUBLIC_STATE) : {
+                            if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_ROOM] == 1){
+                                std::ostringstream payload;
+                                payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_ROOM\", "
+                                        << "\"uid\":\"" << uid << "\", "
+                                        << "\"rid\":\"" << rid << "\", "
+                                        << "\"message\":\"" << message << "\"}"; 
+
+                                std::string body = payload.str();
+
+                                sendHTTPSPOSTRequestFireAndForget(
+                                    UserData::getInstance().webHookBaseUrl,
+                                    UserData::getInstance().webhookPath,
+                                    body,
+                                    {}
+                                );
+                            }
+                            break;
+                        }
+
+                        case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
+                            if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_ROOM] == 1){
+                                std::ostringstream payload;
+                                payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_ROOM\", "
+                                        << "\"uid\":\"" << uid << "\", "
+                                        << "\"rid\":\"" << rid << "\", "
+                                        << "\"message\":\"" << message << "\"}";
+
+                                std::string body = payload.str(); 
+                                
+                                sendHTTPSPOSTRequestFireAndForget(
+                                    UserData::getInstance().webHookBaseUrl,
+                                    UserData::getInstance().webhookPath,
+                                    body,
+                                    {}
+                                );
+                            }
+                            break;
+                        }
+
+                        case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
+                            if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_CACHE_ROOM] == 1){
+                                std::ostringstream payload;
+                                payload << "{\"event\":\"ON_MESSAGE_PUBLIC_CACHE_ROOM\", "
+                                        << "\"uid\":\"" << uid << "\", "
+                                        << "\"rid\":\"" << rid << "\", "
+                                        << "\"message\":\"" << message << "\"}";
+
+                                std::string body = payload.str(); 
+                                
+                                sendHTTPSPOSTRequestFireAndForget(
+                                    UserData::getInstance().webHookBaseUrl,
+                                    UserData::getInstance().webhookPath,
+                                    body,
+                                    {}
+                                );
+                            }
+                            break;
+                        }
+
+                        case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
+                            if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_CACHE_ROOM] == 1){
+                                std::ostringstream payload;
+                                payload << "{\"event\":\"ON_MESSAGE_PRIVATE_CACHE_ROOM\", "
+                                        << "\"uid\":\"" << uid << "\", "
+                                        << "\"rid\":\"" << rid << "\", "
+                                        << "\"message\":\"" << message << "\"}";
+
+                                std::string body = payload.str(); 
+                                
+                                sendHTTPSPOSTRequestFireAndForget(
+                                    UserData::getInstance().webHookBaseUrl,
+                                    UserData::getInstance().webhookPath,
+                                    body,
+                                    {}
+                                );
+                            }
+                            break;
+                        }
+
+                        case static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) : {
+                            if(webhookStatus[Webhooks::ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM] == 1){
+                                std::ostringstream payload;
+                                payload << "{\"event\":\"ON_MESSAGE_PUBLIC_STATE_CACHE_ROOM\", "
+                                        << "\"uid\":\"" << uid << "\", "
+                                        << "\"rid\":\"" << rid << "\", "
+                                        << "\"message\":\"" << message << "\"}";
+
+                                std::string body = payload.str(); 
+                                
+                                sendHTTPSPOSTRequestFireAndForget(
+                                    UserData::getInstance().webHookBaseUrl,
+                                    UserData::getInstance().webhookPath,
+                                    body,
+                                    {}
+                                );
+                            }
+                            break;
+                        }
+
+                        case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
+                            if(webhookStatus[Webhooks::ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM] == 1){
+                                std::ostringstream payload;
+                                payload << "{\"event\":\"ON_MESSAGE_PRIVATE_STATE_CACHE_ROOM\", "
+                                        << "\"uid\":\"" << uid << "\", "
+                                        << "\"rid\":\"" << rid << "\", "
+                                        << "\"message\":\"" << message << "\"}";
+
+                                std::string body = payload.str(); 
+                                
+                                sendHTTPSPOSTRequestFireAndForget(
+                                    UserData::getInstance().webHookBaseUrl,
+                                    UserData::getInstance().webhookPath,
+                                    body,
+                                    {}
+                                );
+                            }
+                            break;
+                        }
+                    }
+                } catch (const simdjson::simdjson_error &e) {
+                    ws->send("{\"data\":\"INVALID_JSON\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+                }
             }
-        }       
+        } else {
+            ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+            droppedMessages.fetch_add(1, std::memory_order_relaxed);
+
+            if(webhookStatus[Webhooks::ON_RATE_LIMIT_EXCEEDED] == 1){
+                std::ostringstream payload;
+                payload << "{\"event\":\"ON_RATE_LIMIT_EXCEEDED\", "
+                        << "\"uid\":\"" << uid << "\"}";
+
+                std::string body = payload.str(); 
+                
+                sendHTTPSPOSTRequestFireAndForget(
+                    UserData::getInstance().webHookBaseUrl,
+                    UserData::getInstance().webhookPath,
+                    body,
+                    {}
+                );
+            }
+        }    
     },
     .dropped = [](auto *ws, std::string_view message, uWS::OpCode /*opCode*/) {
         droppedMessages.fetch_add(1, std::memory_order_relaxed);
@@ -3045,22 +3259,26 @@ void worker_t::work()
         std::string userId = ws->getUserData()->uid;
 
         /** Thread-safe removal from connections map */
-        {
+        if(isMultiThread) {
             tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
-            if (connections.find(conn_accessor, userId)) {
-                connections.erase(conn_accessor);  
+            if (ThreadSafe::connections.find(conn_accessor, userId)) {
+                ThreadSafe::connections.erase(conn_accessor);  
             }
+        } else {
+            SingleThreaded::connections.erase(userId);
         }
 
         /** Decrement global connection counter */
         globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
 
         /** Thread-safe removal from uid map */
-        {
+        if(isMultiThread) {
             tbb::concurrent_hash_map<std::string, bool>::accessor uid_accessor;
-            if (uid.find(uid_accessor, userId)) {
-                uid.erase(uid_accessor);  
+            if (ThreadSafe::uid.find(uid_accessor, userId)) {
+                ThreadSafe::uid.erase(uid_accessor);  
             }
+        } else {
+            SingleThreaded::uid.erase(userId);
         }
 
         /** Manually unsubscribing */
@@ -3071,12 +3289,12 @@ void worker_t::work()
         std::vector<std::pair<std::string, uint8_t>> rids;
 
         /** fetching all the RID for the UID and removing the UID from the map */
-        {
+        if (isMultiThread) {
             /** Acquire access to the outer concurrent map */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outer_accessor;
         
             /** Check if the user ID exists in the map */
-            if (uidToRoomMapping.find(outer_accessor, userId)) {
+            if (ThreadSafe::uidToRoomMapping.find(outer_accessor, userId)) {
                 /** Reference to the inner map (rooms associated with the user ID) */
                 auto& inner_map = outer_accessor->second;
         
@@ -3089,7 +3307,23 @@ void worker_t::work()
                 }
         
                 /** Remove the user ID entry from the outer map */
-                uidToRoomMapping.erase(outer_accessor);
+                ThreadSafe::uidToRoomMapping.erase(outer_accessor);
+            }
+        } else {
+            /** Check if the user ID exists in the map */
+            auto it = SingleThreaded::uidToRoomMapping.find(userId);
+            if (it != SingleThreaded::uidToRoomMapping.end()) {
+                /** Move the inner set directly */
+                auto& inner_set = it->second;
+
+                /** Reserve space in `rids` before inserting */
+                rids.reserve(rids.size() + inner_set.size());
+
+                /** Move elements from the set to `rids` */
+                rids.insert(rids.end(), std::make_move_iterator(inner_set.begin()), std::make_move_iterator(inner_set.end()));
+
+                /** Erase the user ID entry from the outer map */
+                SingleThreaded::uidToRoomMapping.erase(it);
             }
         }        
 
@@ -3351,24 +3585,34 @@ void worker_t::work()
             }
     
             nlohmann::json data = nlohmann::json::array(); 
-    
-            for (const auto& [rid, users] : topics) {  
-                /** Create a JSON object for the room */
-                nlohmann::json roomData;
-                roomData["rid"] = rid;
-    
-                /** Store only the keys from the inner map */
-                std::vector<std::string> userKeys;
-                
-                for (const auto& [uid, _] : users) {  
-                    userKeys.push_back(uid);
+            
+            if(isMultiThread) {
+                for (const auto& [rid, users] : ThreadSafe::topics) {  
+                    /** Create a JSON object for the room */
+                    nlohmann::json roomData;
+                    roomData["rid"] = rid;
+        
+                    /** Store only the keys from the inner map */
+                    std::vector<std::string> userKeys;
+                    
+                    for (const auto& [uid, _] : users) {  
+                        userKeys.push_back(uid);
+                    }
+        
+                    /** Convert vector to JSON array */
+                    roomData["uid"] = std::move(userKeys);
+        
+                    /** Store the room data in the final list */
+                    data.push_back(std::move(roomData));
                 }
-    
-                /** Convert vector to JSON array */
-                roomData["uid"] = std::move(userKeys);
-    
-                /** Store the room data in the final list */
-                data.push_back(std::move(roomData));
+            } else {
+                for (const auto& [rid, users] : SingleThreaded::topics) {  
+                    /** Create a JSON object for the room */
+                    data.push_back({
+                        {"rid", rid},
+                        {"uid", nlohmann::json(users)}  
+                    });
+                }                
             }
             
             if(!*isAborted){
@@ -3414,12 +3658,20 @@ void worker_t::work()
     
             std::vector<std::string> orphanUids;
 
-            for (auto it = uid.begin(); it != uid.end(); ++it) {
-                if (it->second) {  
-                    orphanUids.push_back(it->first);
+            if(isMultiThread) {
+                for (auto it = ThreadSafe::uid.begin(); it != ThreadSafe::uid.end(); ++it) {
+                    if (it->second) {  
+                        orphanUids.push_back(it->first);
+                    }
+                }
+            } else {
+                for (const auto& [uid, isOrphan] : SingleThreaded::uid) {  
+                    if (isOrphan) {  
+                        orphanUids.emplace_back(uid);
+                    }
                 }
             }
-
+            
             nlohmann::json data;
             data["uid"] = orphanUids;
             
@@ -3488,22 +3740,31 @@ void worker_t::work()
                             nlohmann::json roomData;
                             roomData["rid"] = rid;
 
-                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
+                            if(isMultiThread) {
+                                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
 
-                            if (topics.find(outer_accessor, rid)) {
-                                /** Convert the inner map to a JSON array */
-                                nlohmann::json uidArray = nlohmann::json::array();
-                                
-                                /** Iterate over the inner map and add the uids to the JSON array */
-                                for (const auto& entry : outer_accessor->second) {
-                                    uidArray.push_back(entry.first);  /** entry.first is the uid */ 
+                                if (ThreadSafe::topics.find(outer_accessor, rid)) {
+                                    /** Convert the inner map to a JSON array */
+                                    nlohmann::json uidArray = nlohmann::json::array();
+                                    
+                                    /** Iterate over the inner map and add the uids to the JSON array */
+                                    for (const auto& entry : outer_accessor->second) {
+                                        uidArray.push_back(entry.first);  /** entry.first is the uid */ 
+                                    }
+                                    
+                                    roomData["uid"] = uidArray;
+                                } else {
+                                    roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
                                 }
-                                
-                                roomData["uid"] = uidArray;
                             } else {
-                                roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
+                                auto it = SingleThreaded::topics.find(rid);
+                                if (it != SingleThreaded::topics.end()) {
+                                    roomData["uid"] = nlohmann::json(it->second);
+                                } else {
+                                    roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
+                                }
                             }
-
+                            
                             data.push_back(roomData);
                         }
 
@@ -3563,30 +3824,50 @@ void worker_t::work()
                     auto parsedJson = nlohmann::json::parse(body);
                     std::string rid = parsedJson["rid"];
                     std::string uid = parsedJson["uid"];
+                    uWS::WebSocket<true, true, PerSocketData>* ws = nullptr;
+                    worker_t* worker = nullptr;
                     
-                    /** Checking if a connection exists for the provided UID */
-                    tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
+                    if(isMultiThread) {
+                        /** Checking if a connection exists for the provided UID */
+                        tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
-                    /** Attempt to find the connection */
-                    if (!connections.find(accessor, uid)) {
-                        /** Atomically increment the rejected request counter */
-                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                        /** Attempt to find the connection */
+                        if (!ThreadSafe::connections.find(accessor, uid)) {
+                            /** Atomically increment the rejected request counter */
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-                        /** Ensure the response is sent only once */
-                        if (!res->hasResponded()) {
-                            /** Batch write operations for improved performance */
-                            res->cork([res]() {
-                                res->writeStatus("404 Not Found");  /** Set HTTP status */
-                                res->writeHeader("Content-Type", "application/json");  /** Define response type */
-                                res->end(R"({"message": "Invalid uid!"})");  /** Send error message */
-                            });
+                            /** Ensure the response is sent only once */
+                            if (!res->hasResponded()) {
+                                /** Batch write operations for improved performance */
+                                res->cork([res]() {
+                                    res->writeStatus("404 Not Found");  /** Set HTTP status */
+                                    res->writeHeader("Content-Type", "application/json");  /** Define response type */
+                                    res->end(R"({"message": "Invalid uid!"})");  /** Send error message */
+                                });
+                            }
+
+                            return;  /** Exit early since the UID is invalid */
                         }
 
-                        return;  /** Exit early since the UID is invalid */
-                    }
+                        /** Retrieve the connection object */
+                        ws = accessor->second.ws;
+                        worker = accessor->second.worker;
+                    } else {
+                        if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                            if (!res->hasResponded()) {
+                                res->cork([res]() {
+                                    res->writeStatus("404 Not Found");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "Invalid uid!"})");
+                                });
+                            }
+                            return;
+                        }
 
-                    auto *ws = accessor->second.ws;
-                    auto *worker = accessor->second.worker;
+                        ws = SingleThreaded::connections[uid].ws;
+                        worker = SingleThreaded::connections[uid].worker;
+                    }
 
                     /** Validate the room ID (rid) length constraints */
                     if (rid.empty() || rid.size() > 160) {
@@ -3656,12 +3937,12 @@ void worker_t::work()
                         return;
                     }
 
-                    {
+                    if(isMultiThread) {
                         /** checking if the user is already subscribed to the given room */
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
 
                         /** Check if the UID is present in the mapping */
-                        if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
                             /** Retrieve reference to the inner map containing room IDs */
                             auto& inner_map = uid_to_rid_outer_accessor->second;
 
@@ -3684,13 +3965,27 @@ void worker_t::work()
                                 return; /** Exit early since user is already subscribed */
                             }
                         }
+                    } else {
+                        auto it = SingleThreaded::uidToRoomMapping.find(uid);
+                        if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) != it->second.end()) {
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                            if (!res->hasResponded()) {
+                                res->cork([res]() {
+                                    res->writeStatus("400 Bad Request");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "You are already subscribed to the given room!"})");
+                                });
+                            }
+                            return;
+                        }
                     }
                     
                     /** checking if the user is banned from the given room */
-                    {
+                    if(isMultiThread) {
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
                         
-                        if (bannedConnections.find(outer_accessor, rid) && outer_accessor->second.count(uid)) {
+                        if (ThreadSafe::bannedConnections.find(outer_accessor, rid) && outer_accessor->second.count(uid)) {
                             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                             if (!res->hasResponded()) {
                                 res->cork([res]() {
@@ -3700,6 +3995,19 @@ void worker_t::work()
                                 });
                             }
                             
+                            return;
+                        }
+                    } else {
+                        auto it = SingleThreaded::bannedConnections.find(rid);
+                        if (it != SingleThreaded::bannedConnections.end() && it->second.count(uid)) {
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                            if (!res->hasResponded()) {
+                                res->cork([res]() {
+                                    res->writeStatus("403 Forbidden");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "You have been banned from this room!"})");
+                                });
+                            }
                             return;
                         }
                     }
@@ -3867,24 +4175,34 @@ void worker_t::work()
 
             /** Prepare the response JSON array */
             nlohmann::json data = nlohmann::json::array();
-
-            for (const auto& [uid, rids] : uidToRoomMapping) {  
-                /** Create a JSON object for the room */
-                nlohmann::json roomData;
-                roomData["uid"] = uid;
-    
-                /** Store only the keys from the inner map */
-                std::vector<std::string> roomIDs;
-                
-                for (const auto& [uid, _] : rids) {  
-                    roomIDs.push_back(uid);
+            
+            if(isMultiThread) {
+                for (const auto& [uid, rids] : ThreadSafe::uidToRoomMapping) {  
+                    /** Create a JSON object for the room */
+                    nlohmann::json roomData;
+                    roomData["uid"] = uid;
+        
+                    /** Store only the keys from the inner map */
+                    std::vector<std::string> roomIDs;
+                    
+                    for (const auto& [uid, _] : rids) {  
+                        roomIDs.push_back(uid);
+                    }
+        
+                    /** Convert vector to JSON array */
+                    roomData["rid"] = std::move(roomIDs);
+        
+                    /** Store the room data in the final list */
+                    data.push_back(std::move(roomData));
                 }
-    
-                /** Convert vector to JSON array */
-                roomData["rid"] = std::move(roomIDs);
-    
-                /** Store the room data in the final list */
-                data.push_back(std::move(roomData));
+            } else {
+                for (const auto& [uid, rids] : SingleThreaded::uidToRoomMapping) {  
+                    /** Create a JSON object for the room */
+                    data.push_back({
+                        {"uid", uid},
+                        {"rid", nlohmann::json(rids)}  
+                    });
+                }
             }
 
             if(!*isAborted){
@@ -3952,22 +4270,31 @@ void worker_t::work()
                             nlohmann::json roomData;
                             roomData["uid"] = uid;
 
-                            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outer_accessor;
+                            if(isMultiThread) {
+                                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outer_accessor;
 
-                            if (uidToRoomMapping.find(outer_accessor, uid)) {
-                                /** Convert the inner map to a JSON array */
-                                nlohmann::json ridArray = nlohmann::json::array();
-                                
-                                /** Iterate over the inner map and add the uids to the JSON array */
-                                for (const auto& entry : outer_accessor->second) {
-                                    ridArray.push_back(entry.first);  /** entry.first is the uid */ 
+                                if (ThreadSafe::uidToRoomMapping.find(outer_accessor, uid)) {
+                                    /** Convert the inner map to a JSON array */
+                                    nlohmann::json ridArray = nlohmann::json::array();
+                                    
+                                    /** Iterate over the inner map and add the uids to the JSON array */
+                                    for (const auto& entry : outer_accessor->second) {
+                                        ridArray.push_back(entry.first);  /** entry.first is the uid */ 
+                                    }
+                                    
+                                    roomData["rid"] = ridArray;
+                                } else {
+                                    roomData["rid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
                                 }
-                                
-                                roomData["rid"] = ridArray;
                             } else {
-                                roomData["rid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
+                                auto it = SingleThreaded::uidToRoomMapping.find(uid);
+                                if (it != SingleThreaded::uidToRoomMapping.end()) {
+                                    roomData["rid"] = nlohmann::json(it->second);
+                                } else {
+                                    roomData["rid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
+                                }
                             }
-
+                            
                             data.push_back(roomData);
                         }
 
@@ -4027,26 +4354,45 @@ void worker_t::work()
                     auto parsedJson = nlohmann::json::parse(body);
                     std::string rid = parsedJson["rid"];
                     std::string uid = parsedJson["uid"];
-    
-                    /** checking if there even is a connection with the provided UID */
-                    tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
+                    uWS::WebSocket<true, true, PerSocketData>* ws = nullptr;
+                    worker_t* worker = nullptr;
 
-                    if (!connections.find(accessor, uid)) {
-                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                    if(isMultiThread) {
+                        /** checking if there even is a connection with the provided UID */
+                        tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
-                        if (!res->hasResponded()) {
-                            res->cork([res]() {
-                                res->writeStatus("404 Not Found");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Invalid uid!"})");
-                            });
+                        if (!ThreadSafe::connections.find(accessor, uid)) {
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                            if (!res->hasResponded()) {
+                                res->cork([res]() {
+                                    res->writeStatus("404 Not Found");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "Invalid uid!"})");
+                                });
+                            }
+
+                            return;
                         }
 
-                        return;
-                    }
+                        ws = accessor->second.ws;
+                        worker = accessor->second.worker;
+                    } else {
+                        if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                            if (!res->hasResponded()) {
+                                res->cork([res]() {
+                                    res->writeStatus("404 Not Found");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "Invalid uid!"})");
+                                });
+                            }
+                            return;
+                        }
 
-                    auto *ws = accessor->second.ws;
-                    auto *worker = accessor->second.worker;
+                        ws = SingleThreaded::connections[uid].ws;
+                        worker = SingleThreaded::connections[uid].worker;
+                    }
 
                     /** checking if the room length is valid */
                     if (rid.empty() || rid.length() > 160) {
@@ -4114,9 +4460,9 @@ void worker_t::work()
                     }
 
                     /** checking if the user is already unsubscribed to the given room */
-                    {
+                    if(isMultiThread) {
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-                        if (uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
                             auto& inner_map = uid_to_rid_outer_accessor->second;
 
                             /** check if the room is already present under the UID */
@@ -4129,7 +4475,7 @@ void worker_t::work()
                                         res->cork([res]() {
                                             res->writeStatus("400 Bad Request");
                                             res->writeHeader("Content-Type", "application/json");
-                                            res->end(R"({"message": "You are already unsubscribed to the given room!"})");
+                                            res->end(R"({"message": "You are not subscribed to the given room!"})");
                                         });
                                     }
 
@@ -4137,12 +4483,26 @@ void worker_t::work()
                                 } 
                             }
                         }
+                    } else {
+                        auto it = SingleThreaded::uidToRoomMapping.find(uid);
+                        if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) == it->second.end()) {
+                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
+                            if (!res->hasResponded()) {
+                                res->cork([res]() {
+                                    res->writeStatus("400 Bad Request");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "You are not subscribed to the given room!"})");
+                                });
+                            }
+                            return;
+                        }
                     }
 
                     /** removing the RID from the uid_to_rid mapping */
-                    {
+                    if(isMultiThread) {
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-                        if (uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
+                        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
                             auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
 
                             /** Remove the rid from the inner map */
@@ -4158,15 +4518,27 @@ void worker_t::work()
 
                                 /** Check if the uid map has the value false, make it true (orphan) else ignore */
                                 tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-                                if (::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
+                                if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
                                     if (!uid_outer_accessor->second) { 
                                         uid_outer_accessor->second = true;
                                     }
                                 }
 
-                                uidToRoomMapping.erase(uid_to_rid_outer_accessor);
+                                ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
                             }
                         }
+                    } else {
+                        if (auto it = SingleThreaded::uidToRoomMapping.find(uid); it != SingleThreaded::uidToRoomMapping.end()) {
+                            it->second.erase(rid);
+                            
+                            if (it->second.empty()) {
+                                SingleThreaded::uidToRoomMapping.erase(it);
+                        
+                                if (auto uidIt = SingleThreaded::uid.find(uid); uidIt != SingleThreaded::uid.end() && !uidIt->second) {
+                                    uidIt->second = true;
+                                }
+                            }
+                        }                        
                     }
 
                     /** cloding the connection for the given rid */
@@ -4469,36 +4841,55 @@ void worker_t::work()
                     try {
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
 
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
-                        tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
-
                         /** saving all the banned connections in a map */
-
                         for (const auto& item : parsedJson) {
                             /** Extract `rid` and `uid` from each item in the request */ 
                             std::string rid = item["rid"];
                             std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
+                            
+                            if(isMultiThread) {
+                                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                                tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
-                            /** Try to find or insert the outer map entry */
-                            if (!bannedConnections.find(global_accessor, rid)) {
-                                bannedConnections.insert(global_accessor, rid);
-                            }
+                                /** Try to find or insert the outer map entry */
+                                if (!ThreadSafe::bannedConnections.find(global_accessor, rid)) {
+                                    ThreadSafe::bannedConnections.insert(global_accessor, rid);
+                                }
 
-                            for (const auto& uid : uids) {                            
-                                /** Check if uid already exists before inserting */
-                                if (!global_accessor->second.find(user_accessor, uid)) {
-                                    global_accessor->second.insert(user_accessor, uid);
-                                    user_accessor->second = true;
+                                for (const auto& uid : uids) {                            
+                                    /** Check if uid already exists before inserting */
+                                    if (!global_accessor->second.find(user_accessor, uid)) {
+                                        global_accessor->second.insert(user_accessor, uid);
+                                        user_accessor->second = true;
 
-                                    /** Fetch the connection for the given uid from the connections map */
-                                    tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
-                                    if (connections.find(conn_accessor, uid)) {
-                                        uWS::WebSocket<true, true, PerSocketData>* ws = conn_accessor->second.ws; 
-                                        worker_t* worker = conn_accessor->second.worker; 
+                                        /** Fetch the connection for the given uid from the connections map */
+                                        tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
+                                        if (ThreadSafe::connections.find(conn_accessor, uid)) {
+                                            uWS::WebSocket<true, true, PerSocketData>* ws = conn_accessor->second.ws; 
+                                            worker_t* worker = conn_accessor->second.worker; 
 
-                                        /** Disconnect the WebSocket or perform any other disconnection logic */
-                                        worker->loop_->defer([ws]() {
-                                            ws->end(1008, "{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\"}");
+                                            /** Disconnect the WebSocket or perform any other disconnection logic */
+                                            worker->loop_->defer([ws]() {
+                                                ws->end(1008, "{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\"}");
+                                            });
+                                        }
+                                    }
+                                }
+                            } else {
+                                /** Insert or update banned connections efficiently */
+                                auto& bannedSet = SingleThreaded::bannedConnections[rid];
+
+                                /** Insert all UIDs into the banned set in one operation */
+                                bannedSet.insert(uids.begin(), uids.end());
+
+                                /** Iterate over the list of UIDs and disconnect banned users */
+                                for (const auto& uid : uids) {
+                                    /** Check if the UID exists in active connections */
+                                    if (auto it = SingleThreaded::connections.find(uid); it != SingleThreaded::connections.end()) {
+                                        /** Defer execution to properly close the WebSocket connection */
+                                        it->second.worker->loop_->defer([ws = it->second.ws]() {
+                                            /** Send a WebSocket close message with a ban notification */
+                                            ws->end(1008, R"({"data":"YOU_HAVE_BEEN_BANNED", "source":"admin"})");
                                         });
                                     }
                                 }
@@ -4569,26 +4960,40 @@ void worker_t::work()
                 if (last) { 
                     try {
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
-                        tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
                         for (const auto& item : parsedJson) {
                             /** Extract `rid` and `uid` from each item in the request */ 
                             std::string rid = item["rid"];
                             std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                            /** Check if the room exists before trying to erase */
-                            if (bannedConnections.find(global_accessor, rid)) {
-                                for (const auto& uid : uids) {
-                                    /** Check if the user exists before erasing */
-                                    if (global_accessor->second.find(user_accessor, uid)) {
-                                        global_accessor->second.erase(user_accessor);
+                            if(isMultiThread) {
+                                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                                tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
+
+                                /** Check if the room exists before trying to erase */
+                                if (ThreadSafe::bannedConnections.find(global_accessor, rid)) {
+                                    for (const auto& uid : uids) {
+                                        /** Check if the user exists before erasing */
+                                        if (global_accessor->second.find(user_accessor, uid)) {
+                                            global_accessor->second.erase(user_accessor);
+                                        }
+                                    }
+
+                                    /** If the inner map becomes empty, erase the entire entry */
+                                    if (global_accessor->second.empty()) {
+                                        ThreadSafe::bannedConnections.erase(global_accessor);
                                     }
                                 }
+                            } else {
+                                auto it = SingleThreaded::bannedConnections.find(rid);
+                                if (it != SingleThreaded::bannedConnections.end()) {
+                                    for (const auto& uid : uids) {
+                                        it->second.erase(uid);
+                                    }
 
-                                /** If the inner map becomes empty, erase the entire entry */
-                                if (global_accessor->second.empty()) {
-                                    bannedConnections.erase(global_accessor);
+                                    if (it->second.empty()) {
+                                        SingleThreaded::bannedConnections.erase(it);
+                                    }
                                 }
                             }
                         }
@@ -4726,8 +5131,6 @@ void worker_t::work()
                 if (last) { 
                     try {
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
-                        tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
                         for (const auto& item : parsedJson) {
                             /** Extract `rid` and `uid` from each item in the request */ 
@@ -4736,33 +5139,57 @@ void worker_t::work()
 
                             if (action == "enable")
                             {
-                                /** Check if the room exists before trying to erase */
-                                if (disabledConnections.find(global_accessor, rid)) {
-                                    for (const auto& uid : uids) {
-                                        /** Check if the user exists before erasing */
-                                        if (global_accessor->second.find(user_accessor, uid)) {
-                                            global_accessor->second.erase(user_accessor);
+                                if(isMultiThread) {
+                                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                                    tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
+
+                                    /** Check if the room exists before trying to erase */
+                                    if (ThreadSafe::disabledConnections.find(global_accessor, rid)) {
+                                        for (const auto& uid : uids) {
+                                            /** Check if the user exists before erasing */
+                                            if (global_accessor->second.find(user_accessor, uid)) {
+                                                global_accessor->second.erase(user_accessor);
+                                            }
+                                        }
+
+                                        /** If the inner map becomes empty, erase the entire entry */
+                                        if (global_accessor->second.empty()) {
+                                            ThreadSafe::disabledConnections.erase(global_accessor);
                                         }
                                     }
-
-                                    /** If the inner map becomes empty, erase the entire entry */
-                                    if (global_accessor->second.empty()) {
-                                        disabledConnections.erase(global_accessor);
-                                    }
+                                } else {
+                                    if (auto it = SingleThreaded::disabledConnections.find(rid); it != SingleThreaded::disabledConnections.end()) {
+                                        for (const auto& uid : uids) {
+                                            it->second.erase(uid);
+                                        }
+                                    
+                                        if (it->second.empty()) {
+                                            SingleThreaded::disabledConnections.erase(it);
+                                        }
+                                    }                                    
                                 }
                             }
                             else if (action == "disable")
                             {
-                                /** Try to find or insert the outer map entry */
-                                if (!disabledConnections.find(global_accessor, rid)) {
-                                    disabledConnections.insert(global_accessor, rid);
-                                }
+                                if(isMultiThread) {
+                                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
+                                    tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
-                                for (const auto& uid : uids) {                            
-                                    /** Check if uid already exists before inserting */
-                                    if (!global_accessor->second.find(user_accessor, uid)) {
-                                        global_accessor->second.insert(user_accessor, uid);
-                                        user_accessor->second = true;
+                                    /** Try to find or insert the outer map entry */
+                                    if (!ThreadSafe::disabledConnections.find(global_accessor, rid)) {
+                                        ThreadSafe::disabledConnections.insert(global_accessor, rid);
+                                    }
+
+                                    for (const auto& uid : uids) {                            
+                                        /** Check if uid already exists before inserting */
+                                        if (!global_accessor->second.find(user_accessor, uid)) {
+                                            global_accessor->second.insert(user_accessor, uid);
+                                            user_accessor->second = true;
+                                        }
+                                    }
+                                } else {
+                                    for (const auto& uid : uids) {
+                                        SingleThreaded::disabledConnections[rid].insert(uid);
                                     }
                                 }
                             }
@@ -4843,23 +5270,36 @@ void worker_t::work()
             /** Create and reserve space for the JSON response */
             nlohmann::json data = nlohmann::json::array(); 
 
-            for (const auto& [rid, users] : bannedConnections) {  
-                /** Create a JSON object for the room */
-                nlohmann::json roomData;
-                roomData["rid"] = rid;
-
-                /** Store only the keys from the inner map */
-                std::vector<std::string> userKeys;
-                
-                for (const auto& [uid, _] : users) {  
-                    userKeys.push_back(uid);
+            if(isMultiThread) {
+                for (const auto& [rid, users] : ThreadSafe::bannedConnections) {  
+                    /** Create a JSON object for the room */
+                    nlohmann::json roomData;
+                    roomData["rid"] = rid;
+    
+                    /** Store only the keys from the inner map */
+                    std::vector<std::string> userKeys;
+                    
+                    for (const auto& [uid, _] : users) {  
+                        userKeys.push_back(uid);
+                    }
+    
+                    /** Convert vector to JSON array */
+                    roomData["uid"] = std::move(userKeys);
+    
+                    /** Store the room data in the final list */
+                    data.push_back(std::move(roomData));
                 }
-
-                /** Convert vector to JSON array */
-                roomData["uid"] = std::move(userKeys);
-
-                /** Store the room data in the final list */
-                data.push_back(std::move(roomData));
+            } else {
+                for (const auto& [rid, users] : SingleThreaded::bannedConnections) {  
+                    nlohmann::json roomData;
+                    roomData["rid"] = rid;
+                
+                    /** Convert set to vector more efficiently */
+                    std::vector<std::string> userKeys(users.begin(), users.end());
+                
+                    roomData["uid"] = std::move(userKeys);
+                    data.push_back(std::move(roomData));
+                }
             }
 
             /** Send the successful response with all banned connections */
@@ -4911,23 +5351,36 @@ void worker_t::work()
             /** Create and reserve space for the JSON response */
             nlohmann::json json_response = nlohmann::json::array();
 
-            for (const auto& [rid, users] : disabledConnections) {  
-                /** Create a JSON object for the room */
-                nlohmann::json roomData;
-                roomData["rid"] = rid;
-
-                /** Store only the keys from the inner map */
-                std::vector<std::string> userKeys;
-                
-                for (const auto& [uid, _] : users) {  
-                    userKeys.push_back(uid);
+            if(isMultiThread) {
+                for (const auto& [rid, users] : ThreadSafe::disabledConnections) {  
+                    /** Create a JSON object for the room */
+                    nlohmann::json roomData;
+                    roomData["rid"] = rid;
+    
+                    /** Store only the keys from the inner map */
+                    std::vector<std::string> userKeys;
+                    
+                    for (const auto& [uid, _] : users) {  
+                        userKeys.push_back(uid);
+                    }
+    
+                    /** Convert vector to JSON array */
+                    roomData["uid"] = std::move(userKeys);
+    
+                    /** Store the room data in the final list */
+                    json_response.push_back(std::move(roomData));
                 }
-
-                /** Convert vector to JSON array */
-                roomData["uid"] = std::move(userKeys);
-
-                /** Store the room data in the final list */
-                json_response.push_back(std::move(roomData));
+            } else {
+                for (const auto& [rid, users] : SingleThreaded::disabledConnections) {  
+                    nlohmann::json roomData;
+                    roomData["rid"] = rid;
+                
+                    /** Convert set to vector more efficiently */
+                    std::vector<std::string> userKeys(users.begin(), users.end());
+                
+                    roomData["uid"] = std::move(userKeys);
+                    json_response.push_back(std::move(roomData));
+                }                
             }
             
             /** Send the successful response with all banned connections */
@@ -4962,67 +5415,10 @@ void worker_t::work()
             std::string_view apiKey = req->getHeader("api-key");
             std::string_view uid = req->getHeader("uid");
 
-            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
+            if(isMultiThread) {
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
 
-            if (topics.find(outer_accessor, std::string(rid))) {
-                /** Access the inner map corresponding to 'rid' */
-                tbb::concurrent_hash_map<std::string, bool>& inner_map = outer_accessor->second;
-
-                /** Create an accessor for the inner map */
-                tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
-
-                /** Check if value exists in the inner map (uid) */
-                if (inner_map.find(inner_accessor, std::string(uid))) {
-                    int limit, offset;
-
-                    try {
-                        limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
-                    } catch (const std::exception& e) {
-                        limit = 10; /** Default value if conversion fails */
-                    }
-
-                    if (limit > 10) {
-                        if(!*isAborted){
-                            res->cork([res]() {
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Limit cannot be greater than 10!"})");
-                            });
-                        }
-
-                        return;
-                    }
-
-                    try {
-                        offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
-                    } catch (const std::exception& e) {
-                        offset = 0; /** Default value if conversion fails */
-                    }
-
-                    write_worker(std::string(rid), "", "", true);
-
-                    if (apiKey != UserData::getInstance().clientApiKey) {
-                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
-                        if(!*isAborted){
-                            res->cork([res]() {
-                                res->writeStatus("403 Forbidden");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                            });
-                        }
-
-                        return;
-                    }
-
-                    if(!*isAborted){
-                        res->cork([res, rid, limit, offset]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(read_worker(std::string(rid), limit, offset));
-                        });
-                    }
-                } else {
+                if (!ThreadSafe::topics.find(outer_accessor, std::string(rid))) {
                     if(!*isAborted){
                         res->cork([res]() {
                             res->writeStatus("403 Forbidden");
@@ -5030,15 +5426,90 @@ void worker_t::work()
                             res->end(R"({"message": "Access denied!"})");
                         });
                     }
+
+                    return;
+                } else {
+                    /** Access the inner map corresponding to 'rid' */
+                    tbb::concurrent_hash_map<std::string, bool>& inner_map = outer_accessor->second;
+
+                    /** Create an accessor for the inner map */
+                    tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+
+                    /** Check if value exists in the inner map (uid) */
+                    if (!inner_map.find(inner_accessor, std::string(uid))) {
+                        if(!*isAborted){
+                            res->cork([res]() {
+                                res->writeStatus("403 Forbidden");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Access denied!"})");
+                            });
+                        }
+                    }
+
+                    return;
                 }
             } else {
+                if (SingleThreaded::topics.find(std::string(rid)) == SingleThreaded::topics.end()) {
+                    if(!*isAborted){
+                        res->cork([res]() {
+                            res->writeStatus("403 Forbidden");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"message": "Access denied!"})");
+                        });
+                    }
+
+                    return;
+                }
+            }
+            
+            int limit, offset;
+
+            try {
+                limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
+            } catch (const std::exception& e) {
+                limit = 10; /** Default value if conversion fails */
+            }
+
+            if (limit > 10) {
+                if(!*isAborted){
+                    res->cork([res]() {
+                        res->writeStatus("400 Bad Request");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "Limit cannot be greater than 10!"})");
+                    });
+                }
+
+                return;
+            }
+
+            try {
+                offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
+            } catch (const std::exception& e) {
+                offset = 0; /** Default value if conversion fails */
+            }
+
+            write_worker(std::string(rid), "", "", true);
+
+            if (apiKey != UserData::getInstance().clientApiKey) {
+                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+
                 if(!*isAborted){
                     res->cork([res]() {
                         res->writeStatus("403 Forbidden");
                         res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"message": "Access denied!"})");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                     });
                 }
+
+                return;
+            }
+
+            if(!*isAborted){
+                res->cork([res, rid, limit, offset]() {
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(read_worker(std::string(rid), limit, offset));
+                });
             }
         } catch (std::exception &e) {
             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
@@ -5408,7 +5879,14 @@ int main() {
     std::thread watcher(watchCertChanges, domain);
     watcher.detach();
 
-    workers.resize(std::thread::hardware_concurrency());
+    int numThreads = std::thread::hardware_concurrency();
+
+    if (numThreads > 1)
+    {
+        isMultiThread = true;
+    }
+
+    workers.resize(numThreads);
     
     std::transform(workers.begin(), workers.end(), workers.begin(), [](worker_t &w) {
         w.thread_ = std::make_shared<std::thread>([&w]() {
