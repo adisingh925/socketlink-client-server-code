@@ -4495,6 +4495,7 @@ void worker_t::work()
                                     res->end(R"({"message": "You are not subscribed to the given room!"})");
                                 });
                             }
+                            
                             return;
                         }
                     }
@@ -4548,7 +4549,7 @@ void worker_t::work()
                         res->cork([res]() {
                             res->writeStatus("200 OK");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Successfully unsubscribed to the given room!"})");
+                            res->end(R"({"message": "Successfully unsubscribed from the given room!"})");
                         });
                     }
                 } catch (const std::exception &e) {
