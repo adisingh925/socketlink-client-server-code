@@ -4482,6 +4482,16 @@ void worker_t::work()
                                     return;
                                 } 
                             }
+                        } else {
+                            if (!res->hasResponded()) {
+                                res->cork([res]() {
+                                    res->writeStatus("400 Bad Request");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "You are not subscribed to the given room!"})");
+                                });
+                            }
+
+                            return;
                         }
                     } else {
                         auto it = SingleThreaded::uidToRoomMapping.find(uid);
@@ -4495,7 +4505,17 @@ void worker_t::work()
                                     res->end(R"({"message": "You are not subscribed to the given room!"})");
                                 });
                             }
-                            
+
+                            return;
+                        } else {
+                            if (!res->hasResponded()) {
+                                res->cork([res]() {
+                                    res->writeStatus("400 Bad Request");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "You are not subscribed to the given room!"})");
+                                });
+                            }
+
                             return;
                         }
                     }
