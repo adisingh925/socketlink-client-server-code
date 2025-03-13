@@ -3853,6 +3853,8 @@ void worker_t::work()
                         ws = accessor->second.ws;
                         worker = accessor->second.worker;
                     } else {
+                        log("Single Threaded");
+                        
                         if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
                             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
                             if (!res->hasResponded()) {
