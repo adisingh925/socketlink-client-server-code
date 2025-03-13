@@ -4495,19 +4495,9 @@ void worker_t::work()
                         }
                     } else {
                         auto it = SingleThreaded::uidToRoomMapping.find(uid);
-                        if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) == it->second.end()) {
+                        if ((it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) == it->second.end()) || (it == SingleThreaded::uidToRoomMapping.end())) {
                             totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-                            if (!res->hasResponded()) {
-                                res->cork([res]() {
-                                    res->writeStatus("400 Bad Request");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "You are not subscribed to the given room!"})");
-                                });
-                            }
-
-                            return;
-                        } else {
                             if (!res->hasResponded()) {
                                 res->cork([res]() {
                                     res->writeStatus("400 Bad Request");
