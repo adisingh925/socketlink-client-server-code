@@ -2828,11 +2828,13 @@ void worker_t::work()
         auto& userData = *ws->getUserData();
         auto uid = userData.uid;
 
+        /** checking if the message sending is disabled globally at the server level */
         if(isMessagingDisabled.load(std::memory_order_relaxed)) {
             ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
             return;
         }
 
+        /** checking if the messaging is disabled for a particular connection at global level */
         if(isMultiThread) {
             /** Check if messaging is disabled for the user */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
@@ -2853,7 +2855,7 @@ void worker_t::work()
                 globalIt->second.find(uid) != globalIt->second.end()) {
 
                 /** Send a message to the user indicating messaging is disabled */
-                ws->send(R"({"data":"MESSAGING_DISABLED","source":"server"})", uWS::OpCode::TEXT, true);
+                ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
 
                 return;
             }
