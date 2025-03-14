@@ -4196,12 +4196,28 @@ void worker_t::work()
                     data.push_back(std::move(roomData));
                 }
             } else {
+                /** 
+                 * Iterate through each user (UID) in the mapping.
+                 * The outer map contains a mapping from UID to a set of rooms.
+                 */
                 for (const auto& [uid, rids] : SingleThreaded::uidToRoomMapping) {  
                     /** Create a JSON object for the room */
-                    data.push_back({
-                        {"uid", uid},
-                        {"rid", nlohmann::json(rids)}  
-                    });
+                    nlohmann::json roomData;
+                    roomData["uid"] = uid;
+
+                    /** Use a more efficient constructor to extract keys from the inner map */
+                    std::vector<std::string> roomIDs;
+                    roomIDs.reserve(rids.size());  // Reserve space to avoid multiple reallocations
+
+                    for (const auto& rid : rids) {  
+                        roomIDs.push_back(rid.first);  // Directly access the room ID
+                    }
+
+                    /** Store extracted room IDs in JSON */
+                    roomData["rid"] = std::move(roomIDs);
+
+                    /** Store the room data in the final list */
+                    data.push_back(std::move(roomData));
                 }
             }
 
@@ -4287,11 +4303,22 @@ void worker_t::work()
                                     roomData["rid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
                                 }
                             } else {
-                                auto it = SingleThreaded::uidToRoomMapping.find(uid);
-                                if (it != SingleThreaded::uidToRoomMapping.end()) {
-                                    roomData["rid"] = nlohmann::json(it->second);
+                                /** 
+                                 * Check if the user (UID) exists in the mapping.
+                                 * If it exists, extract the associated room IDs (RIDs).
+                                 */
+                                if (auto uidIt = SingleThreaded::uidToRoomMapping.find(uid); uidIt != SingleThreaded::uidToRoomMapping.end()) {
+                                    /** Reserve space to avoid multiple reallocations */
+                                    nlohmann::json ridArray = nlohmann::json::array();
+                                    ridArray.get_ptr<nlohmann::json::array_t*>()->reserve(uidIt->second.size());
+
+                                    /** Use `transform` to efficiently populate the JSON array */
+                                    std::transform(uidIt->second.begin(), uidIt->second.end(), std::back_inserter(ridArray), [](const auto& entry) { return entry.first; });
+
+                                    roomData["rid"] = std::move(ridArray);
                                 } else {
-                                    roomData["rid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
+                                    /** Assign an empty array if no room IDs are found */
+                                    roomData["rid"] = nlohmann::json::array();
                                 }
                             }
                             
