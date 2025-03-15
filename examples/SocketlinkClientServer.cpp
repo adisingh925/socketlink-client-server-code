@@ -14,6 +14,16 @@
 #include <filesystem>
 #include "simdjson.h"
 
+/** is logs enabled */
+constexpr bool LOGS_ENABLED = true;
+
+/** log the sata in the console */
+void log(const std::string& message) {
+    if (LOGS_ENABLED) {
+        std::cout << message << std::endl;
+    }
+}
+
 /******************************************************************************************************************************************************************************/
 
 class UserData {
@@ -168,7 +178,6 @@ private:
     bool insertBatchData() {
         try {
             if (!conn){
-                batch_data.clear();  /**< Clear the batch data if empty */
                 return false;
             }
 
@@ -181,7 +190,9 @@ private:
 
             MYSQL_STMT* stmt = mysql_stmt_init(conn);  /**< Initialize the prepared statement */
             if (!stmt || mysql_stmt_prepare(stmt, query.c_str(), query.length())) {
-                throw MySQLException("Statement preparation failed: " + std::string(mysql_error(conn)));
+                mysql_stmt_close(stmt);  /**< Close the statement on exception */
+                log("Batch Insertion Error : " + std::string(mysql_stmt_error(stmt)));
+                return false;
             }
 
             /** Bind parameters to the prepared statement */
@@ -214,17 +225,16 @@ private:
 
             /** Bind the parameters to the statement and execute */
             if (mysql_stmt_bind_param(stmt, bind) || mysql_stmt_execute(stmt)) {
-                throw MySQLException("Batch insertion failed: " + std::string(mysql_stmt_error(stmt)));
+                mysql_stmt_close(stmt);  /**< Close the statement on exception */
+                log("Batch Insertion Error : " + std::string(mysql_stmt_error(stmt)));
+                return false;
             }
 
             mysql_stmt_close(stmt);  /**< Close the statement after execution */
             batch_data.clear();  /**< Clear the batch data after successful insertion */
             return true;
         } catch (const MySQLException& e) {
-            std::cerr << "Batch Insertion Error: " << e.what() << std::endl;
-
-            /** clearing the batch data */
-            batch_data.clear();
+            std::cerr << "Batch Insertion Error : " << e.what() << std::endl;
 
             return false;
         }
@@ -755,9 +765,6 @@ constexpr const char* RATE_LIMIT_LIFTED = "RATE_LIMIT_LIFTED";
 constexpr const char* BROADCAST = "SOCKETLINK_BROADCAST";
 constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 
-/** is logs enabled */
-constexpr bool LOGS_ENABLED = true;
-
 /** HMAC-SHA256 Constants */
 constexpr int HMAC_SHA256_DIGEST_LENGTH = 32;  /**< SHA-256 produces a 32-byte (256-bit) output */
 
@@ -804,13 +811,6 @@ std::string to_hex(const unsigned char* data, size_t len) {
     }
     
     return hex;  /**< Return hex string */
-}
-
-/** log the sata in the console */
-void log(const std::string& message) {
-    if (LOGS_ENABLED) {
-        std::cout << message << std::endl;
-    }
 }
 
 /** Fetch the current time in SQL compatible format */
