@@ -694,7 +694,9 @@ struct WebSocketData {
 std::atomic<int> globalConnectionCounter(0);
 std::atomic<unsigned long long> globalMessagesSent{0}; 
 std::atomic<unsigned long long> totalPayloadSent{0};
-std::atomic<unsigned long long> totalRejectedRquests{0};
+std::atomic<unsigned long long> totalConnectionErrors{0}; /** Websocket connections rejected due to some error */
+std::atomic<unsigned long long> totalFailedApiCalls{0}; /** API calls rejected due to 4XX or 5XX codes */
+std::atomic<unsigned long long> totalSuccessApiCalls{0}; /** API calls with 2XX code */
 std::atomic<double> averagePayloadSize{0.0};
 std::atomic<double> averageLatency{0.0};
 std::atomic<unsigned long long> droppedMessages{0};
@@ -2547,6 +2549,7 @@ void worker_t::work()
         });
 
         if(upgradeData->uid.empty() || upgradeData->uid.length() > 4096) {
+            totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
             res->cork([res]() {
                 res->writeStatus("400 Bad Request");
@@ -2585,7 +2588,7 @@ void worker_t::work()
                 /** Check if the user UID is banned in the inner map */
                 if (inner_map.find(innerAccessor, upgradeData->uid)) {
 
-                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                    totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
                     res->cork([res]() {
                         res->writeStatus("403 Forbidden");
@@ -2619,7 +2622,7 @@ void worker_t::work()
             if (SingleThreaded::bannedConnections.find("global") != SingleThreaded::bannedConnections.end() 
             && SingleThreaded::bannedConnections["global"].find(upgradeData->uid) != SingleThreaded::bannedConnections["global"].end()) {
                 
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
                 
                 res->cork([res]() {
                     res->writeStatus("403 Forbidden");
@@ -2653,7 +2656,7 @@ void worker_t::work()
             tbb::concurrent_hash_map<std::string, bool>::const_accessor accessor;
             if(ThreadSafe::uid.find(accessor, upgradeData->uid)){
 
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
                 res->cork([res]() {
                     res->writeStatus("409 Conflict")->end("UID_ALREADY_EXIST");
@@ -2682,7 +2685,7 @@ void worker_t::work()
             /** check if a connection is already there with the same uid (thread safe) */
             if(SingleThreaded::uid.find(upgradeData->uid) != SingleThreaded::uid.end()) {
                 
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
                 res->cork([res]() {
                     res->writeStatus("409 Conflict")->end("UID_ALREADY_EXIST");
@@ -2711,7 +2714,7 @@ void worker_t::work()
 
         /** Check if the connection limit has been exceeded */
         if (globalConnectionCounter.load(std::memory_order_relaxed) >= UserData::getInstance().connections) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
             res->cork([res]() {
                 res->writeStatus("503 Service Unavailable")->end("MAX_CONNECTION_LIMIT_REACHED");
@@ -2739,7 +2742,7 @@ void worker_t::work()
 
         /** Check if API key is valid or not */
         if(UserData::getInstance().clientApiKey != upgradeData->key){
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
             res->cork([res]() {
                 res->writeStatus("401 Unauthorized")->end("INVALID_API_KEY");
@@ -3340,13 +3343,15 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             if (req->getHeader("api-key") != UserData::getInstance().adminApiKey) {
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
     
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -3358,6 +3363,8 @@ void worker_t::work()
             }
     
             if (!*isAborted) {
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res]() {
                 res->writeStatus("200 OK");
                 res->writeHeader("Content-Type", "application/json");
@@ -3369,8 +3376,12 @@ void worker_t::work()
                     + std::to_string(averagePayloadSize.load(std::memory_order_relaxed)) 
                     + R"(,"total_payload_sent": )" 
                     + std::to_string(totalPayloadSent.load(std::memory_order_relaxed)) 
-                    + R"(,"total_rejected_requests": )" 
-                    + std::to_string(totalRejectedRquests.load(std::memory_order_relaxed))
+                    + R"(,"total_failed_api_calls": )" 
+                    + std::to_string(totalFailedApiCalls.load(std::memory_order_relaxed))
+                    + R"(,"total_success_api_calls": )" 
+                    + std::to_string(totalSuccessApiCalls.load(std::memory_order_relaxed))
+                    + R"(,"total_failed_connection_attempts": )" 
+                    + std::to_string(totalConnectionErrors.load(std::memory_order_relaxed))
                     + R"(,"average_latency": )" 
                     + std::to_string(averageLatency.load(std::memory_order_relaxed)) 
                     + R"(,"dropped_messages": )" 
@@ -3379,13 +3390,15 @@ void worker_t::work()
                 });
             }            
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if (!*isAborted) {
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/invalidate", [](auto *res, auto *req) {
         /** update the metadata used by the server */
@@ -3395,6 +3408,7 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
@@ -3403,9 +3417,10 @@ void worker_t::work()
 
             /** check if the API key is valid or not */
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
@@ -3431,9 +3446,10 @@ void worker_t::work()
 
                         /** compare HMAC and respond accordingly */
                         if(secret != to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)){
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                             if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 res->cork([res]() {
                                     res->writeStatus("403");
                                     res->writeHeader("Content-Type", "application/json");
@@ -3466,6 +3482,8 @@ void worker_t::work()
                         }
 
                         if(!*isAborted){
+                            totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
@@ -3481,6 +3499,8 @@ void worker_t::work()
                         }
                     } catch (std::exception &e) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -3491,13 +3511,15 @@ void worker_t::work()
                 }
             });
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/mysql/sync", [](auto *res, auto *req) {
         /** sync all the data in the buffers to integrated mysql server */
@@ -3507,13 +3529,15 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
     
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -3525,9 +3549,10 @@ void worker_t::work()
             }
 
             if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 0){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
     
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403 Forbidden");
                         res->writeHeader("Content-Type", "application/json");
@@ -3546,6 +3571,8 @@ void worker_t::work()
             });
     
             if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
@@ -3553,13 +3580,15 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).get("/api/v1/rooms/users/all", [this](auto *res, auto *req) {
         /** fetch all the rooms present on the server */
@@ -3569,13 +3598,15 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
     
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -3618,6 +3649,8 @@ void worker_t::work()
             }
             
             if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res, data]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
@@ -3625,13 +3658,15 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).get("/api/v1/users/orphan", [this](auto *res, auto *req) {
         /** fetch all the rooms present on the server */
@@ -3641,13 +3676,15 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
     
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -3678,6 +3715,8 @@ void worker_t::work()
             data["uid"] = orphanUids;
             
             if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res, data]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
@@ -3685,13 +3724,15 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/rooms/users", [this](auto *res, auto *req) {
         /** get all the connectiond for a room */
@@ -3701,15 +3742,17 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             std::string_view apiKey = req->getHeader("api-key");
 
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -3771,6 +3814,8 @@ void worker_t::work()
                         }
 
                         if(!*isAborted){
+                            totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res, data]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
@@ -3779,6 +3824,8 @@ void worker_t::work()
                         }
                     } catch (std::exception &e) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res, e]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -3789,22 +3836,28 @@ void worker_t::work()
                 }
             }); 
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/users/subscribe/room", [this](auto *res, auto *req) {
         auto isAborted = std::make_shared<bool>(false);
-        res->onAborted([isAborted]() { *isAborted = true; });
+        res->onAborted([isAborted]() { 
+            *isAborted = true; 
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+        });
 
         try {
             if (req->getHeader("api-key") != UserData::getInstance().clientApiKey) {
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                if (!res->hasResponded()) {
+                if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -3835,11 +3888,12 @@ void worker_t::work()
 
                         /** Attempt to find the connection */
                         if (!ThreadSafe::connections.find(accessor, uid)) {
-                            /** Atomically increment the rejected request counter */
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                             /** Ensure the response is sent only once */
-                            if (!res->hasResponded()) {
+                            if(!*isAborted){
+                                /** Atomically increment the rejected request counter */
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 /** Batch write operations for improved performance */
                                 res->cork([res]() {
                                     res->writeStatus("404 Not Found");  /** Set HTTP status */
@@ -3856,8 +3910,9 @@ void worker_t::work()
                         worker = accessor->second.worker;
                     } else {
                         if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                            if (!res->hasResponded()) {
+                            if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 res->cork([res]() {
                                     res->writeStatus("404 Not Found");
                                     res->writeHeader("Content-Type", "application/json");
@@ -3873,11 +3928,11 @@ void worker_t::work()
 
                     /** Validate the room ID (rid) length constraints */
                     if (rid.empty() || rid.size() > 160) {
-                        /** Atomically increment the rejected request counter */
-                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
                         /** Ensure the response is sent only once */
-                        if (!res->hasResponded()) {
+                        if(!*isAborted){
+                            /** Atomically increment the rejected request counter */
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             /** Batch response writes for efficiency */
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");  /** Set HTTP status */
@@ -3925,10 +3980,10 @@ void worker_t::work()
                         roomType = static_cast<uint8_t>(Rooms::PRIVATE);
                     }
                     else
-                    {
-                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                        
+                    {                        
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -3951,11 +4006,13 @@ void worker_t::work()
                             /** Check if the room is already associated with the UID */
                             tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
                             if (inner_map.find(inner_accessor, rid)) {
-                                /** Increment rejected request counter in a relaxed memory order for efficiency */
-                                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                                
 
                                 /** Ensure response is not sent multiple times */
-                                if (!res->hasResponded()) {
+                                if(!*isAborted){
+                                    /** Increment rejected request counter in a relaxed memory order for efficiency */
+                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                     /** Use `cork` to optimize response writing */
                                     res->cork([res]() {
                                         res->writeStatus("400 Bad Request"); /** Set HTTP status */
@@ -3970,9 +4027,10 @@ void worker_t::work()
                     } else {
                         auto it = SingleThreaded::uidToRoomMapping.find(uid);
                         if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) != it->second.end()) {
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-                            if (!res->hasResponded()) {
+                            if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 res->cork([res]() {
                                     res->writeStatus("400 Bad Request");
                                     res->writeHeader("Content-Type", "application/json");
@@ -3988,8 +4046,10 @@ void worker_t::work()
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
                         
                         if (ThreadSafe::bannedConnections.find(outer_accessor, rid) && outer_accessor->second.count(uid)) {
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                            if (!res->hasResponded()) {
+
+                            if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 res->cork([res]() {
                                     res->writeStatus("403 Forbidden");
                                     res->writeHeader("Content-Type", "application/json");
@@ -4002,8 +4062,10 @@ void worker_t::work()
                     } else {
                         auto it = SingleThreaded::bannedConnections.find(rid);
                         if (it != SingleThreaded::bannedConnections.end() && it->second.count(uid)) {
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                            if (!res->hasResponded()) {
+
+                            if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 res->cork([res]() {
                                     res->writeStatus("403 Forbidden");
                                     res->writeHeader("Content-Type", "application/json");
@@ -4074,10 +4136,10 @@ void worker_t::work()
                                 headers
                             ).status;
     
-                            if(status != 200){
-                                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                                
+                            if(status != 200){                                
                                 if(!*isAborted){
+                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                     res->cork([res]() {
                                         res->writeStatus("403 Forbidden");
                                         res->writeHeader("Content-Type", "application/json");
@@ -4087,9 +4149,7 @@ void worker_t::work()
     
                                 return;
                             }
-                        } else {
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-    
+                        } else {    
                             if(webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1){
                                 std::ostringstream payload;
                                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
@@ -4109,6 +4169,8 @@ void worker_t::work()
                             }
     
                             if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 res->cork([res]() {
                                     res->writeStatus("403 Forbidden");
                                     res->writeHeader("Content-Type", "application/json");
@@ -4122,7 +4184,9 @@ void worker_t::work()
 
                     openConnection(ws, worker, rid, roomType);
     
-                    if (!res->hasResponded()) {
+                    if(!*isAborted){
+                        totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                         res->cork([res]() {
                             res->writeStatus("200 OK");
                             res->writeHeader("Content-Type", "application/json");
@@ -4130,7 +4194,9 @@ void worker_t::work()
                         });
                     }
                 } catch (const std::exception &e) {
-                    if (!res->hasResponded()) {
+                    if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                         res->cork([res, e]() {
                             res->writeStatus("400 Bad Request");
                             res->writeHeader("Content-Type", "application/json");
@@ -4140,13 +4206,15 @@ void worker_t::work()
                 }
             });
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).get("/api/v1/users/subscriptions/all", [this](auto *res, auto *req) {
         /** get all the subscribed rooms from the given UIDs */
@@ -4156,15 +4224,17 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             std::string_view apiKey = req->getHeader("api-key");
 
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -4224,6 +4294,8 @@ void worker_t::work()
             }
 
             if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res, data]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
@@ -4231,13 +4303,15 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/users/subscriptions", [this](auto *res, auto *req) {
         /** get all the subscribed rooms from the given UIDs */
@@ -4247,15 +4321,16 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             std::string_view apiKey = req->getHeader("api-key");
 
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -4328,6 +4403,8 @@ void worker_t::work()
                         }
 
                         if(!*isAborted){
+                            totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res, data]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4336,6 +4413,8 @@ void worker_t::work()
                         }
                     } catch (std::exception &e) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res, e]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4346,22 +4425,28 @@ void worker_t::work()
                 }
             }); 
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/users/unsubscribe/room", [this](auto *res, auto *req) {
         auto isAborted = std::make_shared<bool>(false);
-        res->onAborted([isAborted]() { *isAborted = true; });
+        res->onAborted([isAborted]() { 
+            *isAborted = true; 
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+        });
 
         try {
             if (req->getHeader("api-key") != UserData::getInstance().clientApiKey) {
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                if (!res->hasResponded()) {
+                if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -4391,9 +4476,9 @@ void worker_t::work()
                         tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
                         if (!ThreadSafe::connections.find(accessor, uid)) {
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                            if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                            if (!res->hasResponded()) {
                                 res->cork([res]() {
                                     res->writeStatus("404 Not Found");
                                     res->writeHeader("Content-Type", "application/json");
@@ -4408,8 +4493,9 @@ void worker_t::work()
                         worker = accessor->second.worker;
                     } else {
                         if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                            if (!res->hasResponded()) {
+                            if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 res->cork([res]() {
                                     res->writeStatus("404 Not Found");
                                     res->writeHeader("Content-Type", "application/json");
@@ -4425,9 +4511,9 @@ void worker_t::work()
 
                     /** checking if the room length is valid */
                     if (rid.empty() || rid.length() > 160) {
-                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+                        if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                        if (!res->hasResponded()) {
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4474,10 +4560,10 @@ void worker_t::work()
                         roomType = static_cast<uint8_t>(Rooms::PRIVATE);
                     }
                     else
-                    {
-                        totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-                        
+                    {                        
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4498,9 +4584,10 @@ void worker_t::work()
                             {
                                 tbb::concurrent_hash_map<std::string, uint8_t>::accessor inner_accessor;
                                 if (!inner_map.find(inner_accessor, rid)) {
-                                    totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-                                    if (!res->hasResponded()) {
+                                    if(!*isAborted){
+                                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                         res->cork([res]() {
                                             res->writeStatus("400 Bad Request");
                                             res->writeHeader("Content-Type", "application/json");
@@ -4512,7 +4599,9 @@ void worker_t::work()
                                 } 
                             }
                         } else {
-                            if (!res->hasResponded()) {
+                            if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 res->cork([res]() {
                                     res->writeStatus("400 Bad Request");
                                     res->writeHeader("Content-Type", "application/json");
@@ -4525,9 +4614,10 @@ void worker_t::work()
                     } else {
                         auto it = SingleThreaded::uidToRoomMapping.find(uid);
                         if ((it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) == it->second.end()) || (it == SingleThreaded::uidToRoomMapping.end())) {
-                            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
-                            if (!res->hasResponded()) {
+                            if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                 res->cork([res]() {
                                     res->writeStatus("400 Bad Request");
                                     res->writeHeader("Content-Type", "application/json");
@@ -4584,7 +4674,9 @@ void worker_t::work()
                     /** cloding the connection for the given rid */
                     closeConnection(ws, worker, {{rid, roomType}});
     
-                    if (!res->hasResponded()) {
+                    if(!*isAborted){
+                        totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                         res->cork([res]() {
                             res->writeStatus("200 OK");
                             res->writeHeader("Content-Type", "application/json");
@@ -4592,7 +4684,9 @@ void worker_t::work()
                         });
                     }
                 } catch (const std::exception &e) {
-                    if (!res->hasResponded()) {
+                    if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                         res->cork([res, e]() {
                             res->writeStatus("400 Bad Request");
                             res->writeHeader("Content-Type", "application/json");
@@ -4602,13 +4696,15 @@ void worker_t::work()
                 }
             });
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/broadcast", [this](auto *res, auto *req) {
         /** broadcast a message to everyone connected to the server */
@@ -4617,13 +4713,15 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             if(req->getHeader("api-key") != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
     
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
@@ -4657,6 +4755,8 @@ void worker_t::work()
                         });
     
                         if(!*isAborted){
+                            totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4665,6 +4765,8 @@ void worker_t::work()
                         }
                     } catch (std::exception &e) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res, e]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4675,13 +4777,15 @@ void worker_t::work()
                 }
             });
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/rooms/broadcast", [this](auto *res, auto *req) {
         /** broadcast a message to a particular room */
@@ -4691,15 +4795,17 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             std::string_view apiKey = req->getHeader("api-key");
 
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
@@ -4737,6 +4843,8 @@ void worker_t::work()
                         }
 
                         if(!*isAborted){
+                            totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4745,6 +4853,8 @@ void worker_t::work()
                         }
                     } catch (std::exception &e) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4755,13 +4865,15 @@ void worker_t::work()
                 }
             });
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/users/broadcast", [this](auto *res, auto *req) {
         /** broadcast a message to a particular connection */
@@ -4771,15 +4883,17 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             std::string_view apiKey = req->getHeader("api-key");
 
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
@@ -4817,6 +4931,8 @@ void worker_t::work()
                         }
 
                         if(!*isAborted){
+                            totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4825,6 +4941,8 @@ void worker_t::work()
                         }
                     } catch (std::exception &e) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4835,13 +4953,15 @@ void worker_t::work()
                 }
             });
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/rooms/users/ban", [this](auto *res, auto *req) {
         /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
@@ -4851,15 +4971,17 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             std::string_view apiKey = req->getHeader("api-key");
 
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
@@ -4937,6 +5059,8 @@ void worker_t::work()
                         }
 
                         if(!*isAborted){
+                            totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4945,6 +5069,8 @@ void worker_t::work()
                         }
                     } catch (std::exception &e) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -4955,13 +5081,15 @@ void worker_t::work()
                 }
             });
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/rooms/users/unban", [this](auto *res, auto *req) {
         /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
@@ -4971,15 +5099,17 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             std::string_view apiKey = req->getHeader("api-key");
 
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
@@ -5039,6 +5169,8 @@ void worker_t::work()
                         }
 
                         if(!*isAborted){
+                            totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
@@ -5047,6 +5179,8 @@ void worker_t::work()
                         }
                     } catch (std::exception &e) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -5057,13 +5191,15 @@ void worker_t::work()
                 }
             });
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).put("/api/v1/server/messaging/:action", [this](auto *res, auto *req) {
         /** enable or disable message sending at the server level (for everyone) */
@@ -5073,6 +5209,7 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
@@ -5080,9 +5217,10 @@ void worker_t::work()
             std::string_view action = req->getParameter("action");
 
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
@@ -5104,6 +5242,8 @@ void worker_t::work()
             else
             {
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("400 Bad Request");
                         res->writeHeader("Content-Type", "application/json");
@@ -5114,6 +5254,8 @@ void worker_t::work()
             }
 
             if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res, action]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
@@ -5125,13 +5267,15 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).post("/api/v1/rooms/messaging/:action", [this](auto *res, auto *req) {
         /** enable or disable messaging at room level */
@@ -5141,6 +5285,7 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
@@ -5148,9 +5293,10 @@ void worker_t::work()
             std::string_view action = req->getParameter("action");
 
             if(apiKey != UserData::getInstance().adminApiKey){
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
@@ -5236,6 +5382,8 @@ void worker_t::work()
                             else
                             {
                                 if(!*isAborted){
+                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                                     res->cork([res]() {
                                         res->writeStatus("400 Bad Request");
                                         res->writeHeader("Content-Type", "application/json");
@@ -5248,6 +5396,8 @@ void worker_t::work()
                         }
 
                         if(!*isAborted){
+                            totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res, action]() {
                                 res->writeStatus("200 OK");
                                 res->writeHeader("Content-Type", "application/json");
@@ -5260,6 +5410,8 @@ void worker_t::work()
                         }
                     } catch (std::exception &e) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
@@ -5270,13 +5422,15 @@ void worker_t::work()
                 }
             });
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).get("/api/v1/users/banned", [this](auto *res, auto *req) {
         /** Handle the request to fetch all banned connections */
@@ -5286,6 +5440,7 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
@@ -5293,10 +5448,11 @@ void worker_t::work()
 
             /** Check if the API key is valid */
             if (apiKey != UserData::getInstance().adminApiKey) {
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 /** Respond with 403 Unauthorized if the API key is invalid */
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
@@ -5344,6 +5500,8 @@ void worker_t::work()
 
             /** Send the successful response with all banned connections */
             if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res, data]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
@@ -5351,13 +5509,15 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).get("/api/v1/users/messaging/disabled", [this](auto *res, auto *req) {
         /** Handle the request to fetch all disabled connections */
@@ -5367,6 +5527,7 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
@@ -5374,10 +5535,11 @@ void worker_t::work()
 
             /** Check if the API key is valid */
             if (apiKey != UserData::getInstance().adminApiKey) {
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 /** Respond with 403 Unauthorized if the API key is invalid */
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403");
                         res->writeHeader("Content-Type", "application/json");
@@ -5425,6 +5587,8 @@ void worker_t::work()
             
             /** Send the successful response with all banned connections */
             if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res, json_response]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
@@ -5432,13 +5596,15 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).get("/api/v1/messages/room/:rid", [this](auto *res, auto *req) {
         /** retrieve the messages for cache rooms (for other rooms no data will be returned) */
@@ -5448,6 +5614,7 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
@@ -5460,6 +5627,8 @@ void worker_t::work()
 
                 if (!ThreadSafe::topics.find(outer_accessor, std::string(rid))) {
                     if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                         res->cork([res]() {
                             res->writeStatus("403 Forbidden");
                             res->writeHeader("Content-Type", "application/json");
@@ -5478,6 +5647,8 @@ void worker_t::work()
                     /** Check if value exists in the inner map (uid) */
                     if (!inner_map.find(inner_accessor, std::string(uid))) {
                         if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                             res->cork([res]() {
                                 res->writeStatus("403 Forbidden");
                                 res->writeHeader("Content-Type", "application/json");
@@ -5491,6 +5662,8 @@ void worker_t::work()
             } else {
                 if (SingleThreaded::topics.find(std::string(rid)) == SingleThreaded::topics.end()) {
                     if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                         res->cork([res]() {
                             res->writeStatus("403 Forbidden");
                             res->writeHeader("Content-Type", "application/json");
@@ -5512,6 +5685,8 @@ void worker_t::work()
 
             if (limit > 10) {
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("400 Bad Request");
                         res->writeHeader("Content-Type", "application/json");
@@ -5531,9 +5706,10 @@ void worker_t::work()
             write_worker(std::string(rid), "", "", true);
 
             if (apiKey != UserData::getInstance().clientApiKey) {
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403 Forbidden");
                         res->writeHeader("Content-Type", "application/json");
@@ -5545,6 +5721,8 @@ void worker_t::work()
             }
 
             if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res, rid, limit, offset]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
@@ -5552,13 +5730,15 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).del("/api/v1/database", [this](auto *res, auto *req) {
         /** delete all the data present in the LMDB database */
@@ -5568,6 +5748,7 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
@@ -5576,11 +5757,12 @@ void worker_t::work()
 
             /** Check if the provided API key is valid */
             if (apiKey != UserData::getInstance().adminApiKey) {
-                /** Increment the rejected request counter to track unauthorized access */
-                totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
 
                 /** Respond with 403 Forbidden if the API key is invalid */
                 if(!*isAborted){
+                    /** Increment the rejected request counter to track unauthorized access */
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("403 Forbidden");
                         res->writeHeader("Content-Type", "application/json");
@@ -5619,6 +5801,8 @@ void worker_t::work()
 
                 /** Respond with a success message */
                 if(!*isAborted){
+                    totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res]() {
                         res->writeStatus("200 OK");
                         res->writeHeader("Content-Type", "application/json");
@@ -5633,6 +5817,8 @@ void worker_t::work()
 
                 /** Respond with the error message */
                 if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                     res->cork([res, e]() {
                         res->writeStatus("500 Internal Server Error");
                         res->writeHeader("Content-Type", "application/json");
@@ -5641,13 +5827,15 @@ void worker_t::work()
                 }
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).get("/api/v1/ping", [](auto *res, auto */*req*/) {
         /** send pong as a response for ping */
@@ -5656,23 +5844,28 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res]() {
                     res->writeStatus("200 OK");
                     res->end("pong!");
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).any("/*", [](auto *res, auto */*req*/) {
         /** wildcard url to handle any random request */
@@ -5681,12 +5874,13 @@ void worker_t::work()
         res->onAborted([isAborted]() {
             /** connection aborted */
             *isAborted = true;
+            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
-
             if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
                 res->cork([res]() {
                     res->writeStatus("404 Not Found");
                     res->writeHeader("Content-Type", "application/json");
@@ -5694,13 +5888,15 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            totalRejectedRquests.fetch_add(1, std::memory_order_relaxed);
+            if(!*isAborted){
+                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-            res->cork([res]() {
-                res->writeStatus("500 Internal Server Error");
-                res->writeHeader("Content-Type", "application/json");
-                res->end(R"({"message": "Internal server error!"})");
-            });
+                res->cork([res]() {
+                    res->writeStatus("500 Internal Server Error");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Internal server error!"})");
+                });
+            }
         }
 	}).listen(PORT, [this](auto *token) {
     listen_socket_ = token;
