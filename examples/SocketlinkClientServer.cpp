@@ -4279,9 +4279,7 @@ void worker_t::work()
                     std::vector<std::string> roomIDs;
                     roomIDs.reserve(rids.size());  // Reserve space to avoid multiple reallocations
 
-                    for (const auto& rid : rids) {  
-                        roomIDs.push_back(rid.first);  // Directly access the room ID
-                    }
+                    std::transform(rids.begin(), rids.end(), std::back_inserter(roomIDs), [](const auto& pair) { return pair.first; });
 
                     /** Store extracted room IDs in JSON */
                     roomData["rid"] = std::move(roomIDs);
@@ -4291,13 +4289,15 @@ void worker_t::work()
                 }
             }
 
+            std::string response = data.dump();
+
             if(!*isAborted){
                 totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                res->cork([res, data]() {
+                res->cork([res, response]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
-                    res->end(data.dump()); 
+                    res->end(response); 
                 });
             }
         } catch (std::exception &e) {
@@ -6124,9 +6124,10 @@ int main() {
     
     std::transform(workers.begin(), workers.end(), workers.begin(), [](worker_t &w) {
         w.thread_ = std::make_shared<std::thread>([&w]() {
-        /* create uWebSocket worker and capture uWS::Loop, uWS::App objects. */
-        w.work();
+            /* create uWebSocket worker and capture uWS::Loop, uWS::App objects. */
+            w.work();
         });
+
         return w;
     });
     
