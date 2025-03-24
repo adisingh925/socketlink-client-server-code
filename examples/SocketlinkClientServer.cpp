@@ -1627,10 +1627,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 
                     /** Remove disabled and banned connections */
                     for (auto& map : {&SingleThreaded::disabledConnections, &SingleThreaded::bannedConnections}) {
-                        auto it = map->find(rid);
-                        if (it != map->end()) {
-                            map->erase(it); 
-                        }
+                        map->erase(rid);
                     }
                 }
             }
@@ -2068,7 +2065,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             auto& inner_set = it->second; 
 
             /** Insert the user into the inner set */
-            inner_set.insert(uid);
+            inner_set.emplace(std::move(uid));
 
             /** Store the new size */
             size = inner_set.size();
@@ -2107,10 +2104,11 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 }
             }
         } else {
-            auto [it, inserted] = SingleThreaded::uidToRoomMapping.try_emplace(uid);
-            it->second[rid] = roomType; 
+            /** Try inserting the UID into uidToRoomMapping */
+            auto result = SingleThreaded::uidToRoomMapping.try_emplace(uid);
+            result.first->second.emplace(rid, roomType); 
 
-            /** Check if uid exists and is true, then set to false */
+            /** Check if UID exists in SingleThreaded::uid and update if needed */
             if (auto it2 = SingleThreaded::uid.find(uid); it2 != SingleThreaded::uid.end() && it2->second) {
                 it2->second = false;
             }
@@ -2802,7 +2800,7 @@ void worker_t::work()
             }
         } else {
             /** Single-threaded insertion into connections map */
-            SingleThreaded::connections[userId] = std::move(data);
+            SingleThreaded::connections.emplace(userId, std::move(data));
         }
 
         /** Increment global connection counter */
@@ -2820,7 +2818,7 @@ void worker_t::work()
             }
         } else {
             /** Single-threaded insertion into uid map */
-            SingleThreaded::uid[userId] = true;
+            SingleThreaded::uid.emplace(userId, true);
         }
 
         /** Subscribe to channels */
@@ -2858,7 +2856,7 @@ void worker_t::work()
                 globalIt->second.find(uid) != globalIt->second.end()) {
 
                 /** Send a message to the user indicating messaging is disabled */
-                ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+                ws->send(std::string_view{"{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}"}, uWS::OpCode::TEXT, true);
 
                 return;
             }
