@@ -122,7 +122,6 @@ private:
                 UserData::getInstance().dbPort, NULL, 0
             )) {
                 log("MySQL Connection Error : " + std::string(mysql_error(conn)));
-                mysql_close(conn);  /**< Close the connection on error */
                 conn == nullptr;
             } else {
                 mysql_query(conn, "SET SESSION query_cache_type = OFF");  /**< Disable query caching */
