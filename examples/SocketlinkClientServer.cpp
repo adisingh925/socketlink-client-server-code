@@ -100,11 +100,12 @@ private:
         try {
             if (conn) {
                 mysql_close(conn);  /**< Close existing connection */
+                conn == nullptr;
             }
 
             conn = mysql_init(NULL);  /**< Initialize a new MySQL connection */
             if (!conn) {
-                throw MySQLException("mysql_init() failed");
+                log("MySQL Initialization Error");
             }
 
             /** Set timeout for MySQL connection (in seconds) */
@@ -120,13 +121,15 @@ private:
                 UserData::getInstance().dbName.c_str(),
                 UserData::getInstance().dbPort, NULL, 0
             )) {
-                throw MySQLException("mysql_real_connect() failed: " + std::string(mysql_error(conn)));
+                log("MySQL Connection Error : " + std::string(mysql_error(conn)));
+                mysql_close(conn);  /**< Close the connection on error */
+                conn == nullptr;
             } else {
                 mysql_query(conn, "SET SESSION query_cache_type = OFF");  /**< Disable query caching */
                 createTableIfNotExists();  /**< Create the table if it doesn't exist */
             }
         } catch (const MySQLException& e) {
-            std::cerr << "MySQL Error: " << e.what() << std::endl;
+            std::cerr << "MySQL Error : " << e.what() << std::endl;
         }
     }
 
@@ -248,7 +251,7 @@ public:
         try {
             createConnection();  /**< Create the initial connection */
         } catch (const MySQLException& e) {
-            std::cerr << "Constructor Error: " << e.what() << std::endl;
+            std::cerr << "Constructor Error : " << e.what() << std::endl;
         }
     }
 
@@ -261,7 +264,7 @@ public:
                 mysql_close(conn);  /**< Close the connection if it exists */
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Destructor Error: " << e.what() << std::endl;
+            std::cerr << "Destructor Error : " << e.what() << std::endl;
         }
     }
 
@@ -287,7 +290,7 @@ public:
                 batch_data.clear();
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Insert Data Error: " << e.what() << std::endl;
+            std::cerr << "Insert Data Error : " << e.what() << std::endl;
         }
     }
 
