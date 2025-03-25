@@ -100,7 +100,7 @@ private:
         try {
             if (conn) {
                 mysql_close(conn);  /**< Close existing connection */
-                conn == nullptr;
+                conn = nullptr;
             }
 
             conn = mysql_init(NULL);  /**< Initialize a new MySQL connection */
@@ -122,7 +122,8 @@ private:
                 UserData::getInstance().dbPort, NULL, 0
             )) {
                 log("MySQL Connection Error : " + std::string(mysql_error(conn)));
-                conn == nullptr;
+                mysql_close(conn);  /**< Close the connection on error */
+                conn = nullptr;
             } else {
                 mysql_query(conn, "SET SESSION query_cache_type = OFF");  /**< Disable query caching */
                 createTableIfNotExists();  /**< Create the table if it doesn't exist */
