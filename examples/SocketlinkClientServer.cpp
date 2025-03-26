@@ -870,7 +870,7 @@ void init_env() {
 }
 
 /** write the data to the LMDB, LMDB has internal locking mechanish so no need to mutexes */
-void write_worker(const std::string& room_id, const std::string& user_id, const std::string& message_content, bool needsCommit = false) {
+void write_worker(const std::string& room_id, const std::string& message_content, bool needsCommit = false) {
     MDB_txn* txn;
     MDB_dbi dbi;
 
@@ -879,16 +879,8 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
 
     /** Collect writes in a batch if commit is not immediately required */
     if (!needsCommit) {
-        /** Get the current timestamp in milliseconds */
-        auto timestamp = std::chrono::system_clock::now().time_since_epoch();
-        auto timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp).count();
-        std::string timestamp_str = std::to_string(timestamp_ms);
-
-        /** Create the key format: room_id:timestamp:user_id */
-        std::string combined_key = room_id + ":" + timestamp_str + ":" + user_id;
-
         /** Add the key-value pair to the batch */
-        batch.push_back({combined_key, message_content});
+        batch.push_back({room_id, message_content});
     }
 
     /** Begin a write transaction when batch size reaches limit or a commit is explicitly needed */
@@ -944,11 +936,11 @@ void write_worker(const std::string& room_id, const std::string& user_id, const 
     }
 }
 
-/** this function will delete all the entries for a room */
+/** This function will delete the entry stored under the exact room_id key */
 void delete_worker(const std::string& room_id) {
     MDB_txn* txn;
     MDB_dbi dbi;
-    MDB_cursor* cursor;
+    MDB_val key;
 
     /** Lock the mutex to ensure thread-safety for shared resources */
     std::lock_guard<std::mutex> lock(write_worker_mutex);
@@ -966,31 +958,15 @@ void delete_worker(const std::string& room_id) {
         return;
     }
 
-    /** Open a cursor to iterate over keys */
-    if (mdb_cursor_open(txn, dbi, &cursor) != 0) {
-        std::cerr << "Failed to open cursor.\n";
+    /** Set up the key for deletion */
+    key.mv_data = (void*)room_id.c_str();
+    key.mv_size = room_id.size();
+
+    /** Delete the entry with the exact room_id key */
+    if (mdb_del(txn, dbi, &key, nullptr) != 0) {
+        std::cerr << "Failed to delete key: " << room_id << "\n";
         mdb_txn_abort(txn);
         return;
-    }
-
-    MDB_val key, value;
-    int rc = mdb_cursor_get(cursor, &key, &value, MDB_FIRST);
-
-    /** Iterate through the database and delete all keys that match the room_id prefix */
-    while (rc == 0) {
-        std::string key_str(static_cast<char*>(key.mv_data), key.mv_size);
-        
-        /** Check if the key starts with room_id */
-        if (key_str.find(room_id + ":") == 0) {
-            if (mdb_del(txn, dbi, &key, nullptr) != 0) {
-                std::cerr << "Failed to delete key: " << key_str << "\n";
-                mdb_cursor_close(cursor);
-                mdb_txn_abort(txn);
-                return;
-            }
-        }
-        
-        rc = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
     }
 
     /** Commit the transaction after deletion */
@@ -998,121 +974,54 @@ void delete_worker(const std::string& room_id) {
         std::cerr << "Failed to commit delete transaction.\n";
     }
 
-    /** Close cursor and database handle */
-    mdb_cursor_close(cursor);
+    /** Close database handle */
     mdb_dbi_close(env, dbi);
 }
 
-/** read the data from the LMDB */
-std::string read_worker(const std::string& room_id, int n, int m) {
+std::string read_worker(const std::string& room_id) {
     MDB_txn* txn;  /** Transaction handle */
     MDB_dbi dbi;   /** Database handle */
-    MDB_cursor* cursor;  /** Cursor for iterating through the database */
-
-    std::ostringstream result;  /** Output stream to accumulate messages in JSON format */
+    MDB_val key, value;  /** Key-value pair to store the retrieved data */
 
     /** Start a read-only transaction */
     if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
         std::cerr << "Failed to begin read transaction: " << mdb_strerror(errno) << "\n";
-        return "[]";  /** Return empty JSON array on failure */
+        return "{}";  /** Return empty JSON object on failure */
     }
 
     /** Open the common database for all rooms */
     if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
         std::cerr << "Failed to open database: " << mdb_strerror(errno) << "\n";
-        mdb_txn_abort(txn);  /** Abort the transaction if opening the database fails */
-        return "[]";  /** Return empty JSON array on failure */
+        mdb_txn_abort(txn);
+        return "{}";  /** Return empty JSON object on failure */
     }
 
-    /** Open a cursor to iterate through the database */
-    if (mdb_cursor_open(txn, dbi, &cursor) != 0) {
-        std::cerr << "Failed to open cursor: " << mdb_strerror(errno) << "\n";
-        mdb_txn_abort(txn);  /** Abort the transaction if opening the cursor fails */
-        mdb_dbi_close(env, dbi);  /** Close the database handle */
-        return "[]";  /** Return empty JSON array on failure */
+    /** Prepare the key (room_id) */
+    key.mv_size = room_id.size();
+    key.mv_data = (void*)room_id.data();
+
+    /** Retrieve the value for the given room_id */
+    if (mdb_get(txn, dbi, &key, &value) == 0) {
+        std::string message_content((char*)value.mv_data, value.mv_size);
+        
+        /** Construct the JSON response */
+        std::ostringstream result;
+        result << "{\n";
+        result << "  \"message\": \"" << message_content << "\"\n";
+        result << "}";
+
+        /** Close the database handle and commit transaction */
+        mdb_dbi_close(env, dbi);
+        mdb_txn_commit(txn);
+
+        return result.str();
     }
 
-    MDB_val key, value;  /** Key-value pair to store the retrieved data */
-    int messages_skipped = 0;  /** Counter for skipped messages */
-    int messages_read = 0;  /** Counter for read messages */
-
-    /** Construct the prefix for the given room_id */
-    std::string room_prefix = room_id + ":";
-
-    /** Position the cursor at the last key in the database */
-    if (mdb_cursor_get(cursor, &key, &value, MDB_LAST) == 0) {
-        /** Skip messages for the specified room_id until `m` messages are skipped */
-        while (messages_skipped < m) {
-            std::string key_str((char*)key.mv_data, key.mv_size);
-
-            /** Only consider keys that match the `room_id` prefix */
-            if (key_str.find(room_prefix) == 0) {
-                messages_skipped++;
-            }
-
-            /** Break if the desired number of messages have been skipped */
-            if (messages_skipped >= m) break;
-
-            /** Move to the previous key */
-            if (mdb_cursor_get(cursor, &key, &value, MDB_PREV) != 0) break;
-        }
-
-        /** If offset `m` is larger than the number of messages, return an empty JSON array */
-        if (messages_skipped < m) {
-            mdb_cursor_close(cursor);
-            mdb_dbi_close(env, dbi);
-            mdb_txn_abort(txn);
-            return "[]";
-        }
-
-        /** Start JSON array */
-        result << "[\n";
-
-        /** Read the next `n` messages */
-        while (messages_read < n) {
-            std::string key_str((char*)key.mv_data, key.mv_size);
-
-            /** Only consider keys that match the `room_id` prefix */
-            if (key_str.find(room_prefix) == 0) {
-                /** Extract metadata from the key */
-                size_t first_colon = key_str.find(':');
-                size_t second_colon = key_str.find(':', first_colon + 1);
-                std::string timestamp_str = key_str.substr(first_colon + 1, second_colon - first_colon - 1);
-                std::string user_id = key_str.substr(second_colon + 1);
-
-                /** Append message JSON to result */
-                result << "  {\n";
-                result << "    \"timestamp\": \"" << timestamp_str << "\",\n";
-                result << "    \"message\": \"" << std::string((char*)value.mv_data, value.mv_size) << "\",\n";
-                result << "    \"uid\": \"" << user_id << "\"\n";
-                result << "  }";
-
-                messages_read++;
-                if (messages_read < n) result << ",\n";  /** Add a comma if not the last message */
-            }
-
-            /** Move to the previous key */
-            if (mdb_cursor_get(cursor, &key, &value, MDB_PREV) != 0) break;
-        }
-
-        /** End JSON array */
-        result << "\n]";
-    } else {
-        std::cerr << "No messages found for the given room_id.\n";
-        result << "[]";  /** Return an empty JSON array if no messages were found */
-    }
-
-    /** Commit the transaction */
-    if (mdb_txn_commit(txn) != 0) {
-        std::cerr << "Failed to commit transaction: " << mdb_strerror(errno) << "\n";
-    }
-
-    /** Close the cursor and database handle */
-    mdb_cursor_close(cursor);
+    /** No message found for the given room_id */
+    std::cerr << "No message found for room_id: " << room_id << "\n";
     mdb_dbi_close(env, dbi);
-
-    /** Return the JSON string */
-    return result.str();
+    mdb_txn_abort(txn);
+    return "{}";  /** Return empty JSON object if no message exists */
 }
 
 /** Function to populate the global unordered_map with active (1) and inactive (0) statuses */
@@ -3005,7 +2914,7 @@ void worker_t::work()
                     || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
                     ) {
                         /** write the data in the local storage */
-                        write_worker(rid, uid, std::string(message));
+                        write_worker(rid, std::string(message));
 
                         /** SQL integration works in cache channels only */
                         if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
@@ -5704,7 +5613,7 @@ void worker_t::work()
                 offset = 0; /** Default value if conversion fails */
             }
 
-            write_worker(std::string(rid), "", "", true);
+            write_worker(std::string(rid), "", true);
 
             if (apiKey != UserData::getInstance().clientApiKey) {
 
@@ -5727,7 +5636,7 @@ void worker_t::work()
                 res->cork([res, rid, limit, offset]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
-                    res->end(read_worker(std::string(rid), limit, offset));
+                    res->end(read_worker(std::string(rid)));
                 });
             }
         } catch (std::exception &e) {
