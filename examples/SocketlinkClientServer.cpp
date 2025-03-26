@@ -1553,6 +1553,18 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
             unsubscribe_fn();
         }
 
+        static const std::unordered_set<uint8_t> validCacheRoomTypes = {
+            static_cast<uint8_t>(Rooms::PUBLIC_CACHE),
+            static_cast<uint8_t>(Rooms::PRIVATE_CACHE),
+            static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE),
+            static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        };
+
+        /** delete the key value pair if it's a cache room */
+        if(size == 0 && validCacheRoomTypes.count(roomType)){
+            delete_worker(rid);
+        }
+
         /** Broadcast disconnect message */
         static const std::unordered_set<uint8_t> validRoomTypes = {
             static_cast<uint8_t>(Rooms::PUBLIC_STATE),
