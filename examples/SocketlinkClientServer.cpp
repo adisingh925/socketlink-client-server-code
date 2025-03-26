@@ -846,7 +846,7 @@ void init_env() {
     }
 
     /** map size is 10 GB */
-    if (mdb_env_set_mapsize(env, UserData::getInstance().lmdbDatabaseSizeInBytes) != 0) { 
+    if (mdb_env_set_mapsize(env, 20ULL * 1024 * 1024 * 1024) != 0) { 
         std::cerr << "Failed to set map size.\n";
         exit(-1);
     }
