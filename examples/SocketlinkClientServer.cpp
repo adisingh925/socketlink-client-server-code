@@ -17,6 +17,8 @@
 /** is logs enabled */
 constexpr bool LOGS_ENABLED = true;
 
+std::atomic<unsigned long long> totalMysqlDBWrites{0}; /** Total writes to the MySQL database */
+
 /** log the sata in the console */
 void log(const std::string& message) {
     if (LOGS_ENABLED) {
@@ -85,7 +87,7 @@ private:
     MYSQL *conn;  /**< MySQL connection object */
     std::vector<std::tuple<std::string, std::string, std::string, std::string>> batch_data;  /**< Holds batch data to be inserted */
 
-    // Custom exception class for MySQL errors
+    /** Custom exception class for MySQL errors */ 
     class MySQLException : public std::runtime_error {
     public:
         explicit MySQLException(const std::string& message)
@@ -143,7 +145,7 @@ private:
                 createConnection();  /**< Create a new connection if not present */
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Connection Error: " << e.what() << std::endl;
+            std::cerr << "Connection Error : " << e.what() << std::endl;
         }
     }
 
@@ -165,10 +167,10 @@ private:
                 ")";
 
             if (mysql_query(conn, query)) {
-                throw MySQLException("Table creation failed: " + std::string(mysql_error(conn)));
+                throw MySQLException("Table creation failed : " + std::string(mysql_error(conn)));
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Table Creation Error: " << e.what() << std::endl;
+            std::cerr << "Table Creation Error : " << e.what() << std::endl;
         }
     }
 
@@ -235,6 +237,7 @@ private:
 
             mysql_stmt_close(stmt);  /**< Close the statement after execution */
             batch_data.clear();  /**< Clear the batch data after successful insertion */
+            totalMysqlDBWrites.fetch_add(1, std::memory_order_relaxed);  /**< Increment the total write count */
             return true;
         } catch (const MySQLException& e) {
             std::cerr << "Batch Insertion Error : " << e.what() << std::endl;
@@ -303,7 +306,7 @@ public:
                 insertBatchData();  /**< Insert the remaining data in the batch */
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Flush Data Error: " << e.what() << std::endl;
+            std::cerr << "Flush Data Error : " << e.what() << std::endl;
         }
     }
 
@@ -314,7 +317,7 @@ public:
         try {
             createConnection();  /**< Manually create a connection to the database */
         } catch (const MySQLException& e) {
-            std::cerr << "Manual Connection Error: " << e.what() << std::endl;
+            std::cerr << "Manual Connection Error : " << e.what() << std::endl;
         }
     }
 
@@ -328,7 +331,7 @@ public:
                 conn = NULL;
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Disconnect Error: " << e.what() << std::endl;
+            std::cerr << "Disconnect Error : " << e.what() << std::endl;
         }
     }
 };
@@ -700,6 +703,7 @@ std::atomic<unsigned long long> totalPayloadSent{0};
 std::atomic<unsigned long long> totalConnectionErrors{0}; /** Websocket connections rejected due to some error */
 std::atomic<unsigned long long> totalFailedApiCalls{0}; /** API calls rejected due to 4XX or 5XX codes */
 std::atomic<unsigned long long> totalSuccessApiCalls{0}; /** API calls with 2XX code */
+std::atomic<unsigned long long> totalLMDBWrites{0}; /** Total writes to the LMDB database */
 std::atomic<double> averagePayloadSize{0.0};
 std::atomic<double> averageLatency{0.0};
 std::atomic<unsigned long long> droppedMessages{0};
@@ -2928,6 +2932,9 @@ void worker_t::work()
                         /** write the data in the local storage */
                         write_worker(rid, std::string(message));
 
+                        /** update the LMDB write count */
+                        totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
+
                         /** SQL integration works in cache channels only */
                         if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
                             db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid, rid);
@@ -3304,6 +3311,10 @@ void worker_t::work()
                     + std::to_string(totalSuccessApiCalls.load(std::memory_order_relaxed))
                     + R"(,"total_failed_connection_attempts": )" 
                     + std::to_string(totalConnectionErrors.load(std::memory_order_relaxed))
+                    + R"(,"total_mysql_db_writes": )" 
+                    + std::to_string(totalMysqlDBWrites.load(std::memory_order_relaxed))
+                    + R"(,"total_local_db_writes": )" 
+                    + std::to_string(totalLMDBWrites.load(std::memory_order_relaxed))
                     + R"(,"average_latency": )" 
                     + std::to_string(averageLatency.load(std::memory_order_relaxed)) 
                     + R"(,"dropped_messages": )" 
