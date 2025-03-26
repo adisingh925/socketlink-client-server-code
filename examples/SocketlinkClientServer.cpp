@@ -1411,7 +1411,7 @@ int populateUserData(std::string data) {
     }
 
     if(parsedJson.contains("max_storage_allowed_in_gb") && !parsedJson["max_storage_allowed_in_gb"].is_null()){
-        userData.lmdbDatabaseSizeInBytes = parsedJson["max_storage_allowed_in_gb"].get<unsigned long long>() * 1024ULL * 1024 * 1024;
+        userData.lmdbDatabaseSizeInBytes = parsedJson["max_storage_allowed_in_gb"].get<unsigned long long>();
     }
 
     if(parsedJson.contains("lmdb_commit_batch_size") && !parsedJson["lmdb_commit_batch_size"].is_null()){
