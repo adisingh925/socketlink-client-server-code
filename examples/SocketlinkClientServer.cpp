@@ -1531,7 +1531,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 inner_set.erase(ws->getUserData()->uid);
 
                 /** Store the new size */
-                size_t size = inner_set.size();
+                size = inner_set.size();
 
                 /** Remove the room if empty */
                 if (size == 0) {
