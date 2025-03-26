@@ -846,7 +846,7 @@ void init_env() {
     }
 
     /** map size is 10 GB */
-    if (mdb_env_set_mapsize(env, 20ULL * 1024 * 1024 * 1024) != 0) { 
+    if (mdb_env_set_mapsize(env, UserData::getInstance().lmdbDatabaseSizeInBytes) != 0) { 
         std::cerr << "Failed to set map size.\n";
         exit(-1);
     }
@@ -1411,7 +1411,7 @@ int populateUserData(std::string data) {
     }
 
     if(parsedJson.contains("max_storage_allowed_in_gb") && !parsedJson["max_storage_allowed_in_gb"].is_null()){
-        userData.lmdbDatabaseSizeInBytes = parsedJson["max_storage_allowed_in_gb"].get<unsigned long long>();
+        userData.lmdbDatabaseSizeInBytes = parsedJson["max_storage_allowed_in_gb"].get<unsigned long long>() * 1024ULL * 1024 * 1024;
     }
 
     if(parsedJson.contains("lmdb_commit_batch_size") && !parsedJson["lmdb_commit_batch_size"].is_null()){
