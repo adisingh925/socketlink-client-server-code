@@ -1937,6 +1937,8 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 
 /** subscribe to a new room */
 void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, uint8_t roomType) {
+    log(roomType);
+    
     if (!rid.empty()) {
         const auto& uid = ws->getUserData()->uid;
         auto currentThreadId = std::this_thread::get_id();
@@ -2160,9 +2162,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             }
 
             case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
-                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM] == 1){
-                    log("ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM");
-                    
+                if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM] == 1){                    
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM\", "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
