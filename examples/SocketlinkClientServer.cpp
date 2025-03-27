@@ -1119,8 +1119,6 @@ void sendHTTPSPOSTRequestFireAndForget(
     const std::map<std::string, std::string>& headers = {}
 ) {
     try {
-        log("Sending HTTPS POST request to " + baseURL + path);
-
         /** Disable SSL certificate verification if needed. 
          *  This is insecure and should only be used for testing purposes. */
         if(UserData::getInstance().webhookIP.empty()){
@@ -1134,7 +1132,7 @@ void sendHTTPSPOSTRequestFireAndForget(
             ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
             
             /** if the request cannot be delivered immediately it will be dropped */
-            // ssl_socket->lowest_layer().non_blocking(true);  
+            ssl_socket->lowest_layer().non_blocking(true);  
 
             /** Specify the endpoint using the IP address and port. 
              *  Ensure the IP address is correctly formatted. */
@@ -1152,8 +1150,6 @@ void sendHTTPSPOSTRequestFireAndForget(
             /** Perform the SSL handshake. */
             ssl_socket->handshake(boost::asio::ssl::stream_base::client);
         }
-
-        log("Connected to " + baseURL + path);
 
         /** Enable the TCP no-delay option to minimize latency. */
         boost::asio::ip::tcp::no_delay no_delay_option(true);
@@ -2489,8 +2485,6 @@ void worker_t::work()
             });
 
             if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
-                log("INVALID_UID");
-
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"INVALID_UID\", "
