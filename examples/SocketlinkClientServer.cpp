@@ -2484,6 +2484,8 @@ void worker_t::work()
             });
 
             if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
+                log("INVALID_UID");
+                
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"INVALID_UID\", "
