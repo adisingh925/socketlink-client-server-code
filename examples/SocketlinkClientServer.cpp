@@ -2162,6 +2162,8 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             }
 
             case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
+            log("public cache room");
+            
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM] == 1){                    
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM\", "
