@@ -1120,7 +1120,7 @@ void sendHTTPSPOSTRequestFireAndForget(
 ) {
     try {
         log("Sending HTTPS POST request to " + baseURL + path);
-        
+
         /** Disable SSL certificate verification if needed. 
          *  This is insecure and should only be used for testing purposes. */
         if(UserData::getInstance().webhookIP.empty()){
@@ -1200,6 +1200,7 @@ void sendHTTPSPOSTRequestFireAndForget(
 
         ssl_socket = nullptr; */
     } catch (const boost::system::system_error& e) {
+        log("Error in sendHTTPSPOSTRequestFireAndForget : " + std::string(e.what()));
         if (e.code() == boost::asio::error::broken_pipe) {
             /** broken pipe error, resending */
             ssl_socket = nullptr;  
