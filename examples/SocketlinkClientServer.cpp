@@ -1153,6 +1153,8 @@ void sendHTTPSPOSTRequestFireAndForget(
             ssl_socket->handshake(boost::asio::ssl::stream_base::client);
         }
 
+        log("Connected to " + baseURL + path);
+
         /** Enable the TCP no-delay option to minimize latency. */
         boost::asio::ip::tcp::no_delay no_delay_option(true);
         ssl_socket->lowest_layer().set_option(no_delay_option);
