@@ -1119,6 +1119,8 @@ void sendHTTPSPOSTRequestFireAndForget(
     const std::map<std::string, std::string>& headers = {}
 ) {
     try {
+        log("Sending HTTPS POST request to " + baseURL + path);
+        
         /** Disable SSL certificate verification if needed. 
          *  This is insecure and should only be used for testing purposes. */
         if(UserData::getInstance().webhookIP.empty()){
@@ -2485,7 +2487,7 @@ void worker_t::work()
 
             if (webhookStatus[Webhooks::ON_CONNECTION_UPGRADE_REJECTED] == 1) {
                 log("INVALID_UID");
-                
+
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_CONNECTION_UPGRADE_REJECTED\", "
                         << "\"trigger\":\"INVALID_UID\", "
