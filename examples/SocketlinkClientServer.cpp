@@ -1120,10 +1120,11 @@ void sendHTTPSPOSTRequestFireAndForget(
 ) {
     try {
         log("Sending HTTPS POST request to " + baseURL + path);
-        
+
         /** Disable SSL certificate verification if needed. 
          *  This is insecure and should only be used for testing purposes. */
         if(UserData::getInstance().webhookIP.empty()){
+            log("DNS is not resolved, returning");
             /** DNS is not resolved, returning */
             return;
         }
