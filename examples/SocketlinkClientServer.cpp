@@ -1119,6 +1119,8 @@ void sendHTTPSPOSTRequestFireAndForget(
     const std::map<std::string, std::string>& headers = {}
 ) {
     try {
+        log("Sending HTTPS POST request to " + baseURL + path);
+        
         /** Disable SSL certificate verification if needed. 
          *  This is insecure and should only be used for testing purposes. */
         if(UserData::getInstance().webhookIP.empty()){
@@ -2166,7 +2168,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM] == 1){    
                 log("public cache room webhook");
-                                
+
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM\", "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
