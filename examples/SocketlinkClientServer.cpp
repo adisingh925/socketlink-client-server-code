@@ -1937,7 +1937,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 
 /** subscribe to a new room */
 void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, uint8_t roomType) {
-    log(roomType);
+    log("Opening connection to room " + std::to_string(roomType) + " " + rid);
     
     if (!rid.empty()) {
         const auto& uid = ws->getUserData()->uid;
