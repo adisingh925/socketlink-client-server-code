@@ -2161,6 +2161,8 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
             case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM] == 1){
+                    log("ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM");
+                    
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM\", "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
@@ -2177,6 +2179,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                         {}
                     );
                 }
+
                 break;
             }
 
