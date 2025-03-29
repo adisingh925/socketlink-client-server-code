@@ -1119,12 +1119,9 @@ void sendHTTPSPOSTRequestFireAndForget(
     const std::map<std::string, std::string>& headers = {}
 ) {
     try {
-        log("Sending HTTPS POST request to " + baseURL + path);
-
         /** Disable SSL certificate verification if needed. 
          *  This is insecure and should only be used for testing purposes. */
         if(UserData::getInstance().webhookIP.empty()){
-            log("DNS is not resolved, returning");
             /** DNS is not resolved, returning */
             return;
         }
@@ -1163,7 +1160,7 @@ void sendHTTPSPOSTRequestFireAndForget(
         boost::asio::streambuf request_buffer;
         std::ostream request_stream(&request_buffer);
 
-        if(UserData::getInstance().webhookSecret.length() > 0){
+        if(UserData::getInstance().webhookSecret.length() > 0) {
             unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
             hmac_sha256(UserData::getInstance().webhookSecret.c_str(), strlen(UserData::getInstance().webhookSecret.c_str()), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
                         
@@ -1939,9 +1936,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 }
 
 /** subscribe to a new room */
-void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, uint8_t roomType) {
-    log("Opening connection to room " + std::to_string(roomType) + " " + rid);
-    
+void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, uint8_t roomType) {    
     if (!rid.empty()) {
         const auto& uid = ws->getUserData()->uid;
         auto currentThreadId = std::this_thread::get_id();
@@ -2165,11 +2160,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             }
 
             case static_cast<uint8_t>(Rooms::PUBLIC_CACHE) : {
-            log("public cache room");
-
                 if(webhookStatus[Webhooks::ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM] == 1){    
-                log("public cache room webhook");
-
                     std::ostringstream payload;
                     payload << "{\"event\":\"ON_CONNECTION_OPEN_PUBLIC_CACHE_ROOM\", "
                             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
