@@ -1204,16 +1204,18 @@ void sendHTTPSPOSTRequestFireAndForget(
             ssl_socket = nullptr; */
 
             if (waitForResponse) {
-                log("Waiting for response...");
-                
                 boost::asio::streambuf response_buffer;
-                boost::asio::read_until(*ssl_socket, response_buffer, "\r\n\r\n");
+                boost::asio::read_until(*ssl_socket, response_buffer, "\r\n");
 
                 std::istream response_stream(&response_buffer);
-                std::string response_line;
-                std::getline(response_stream, response_line);
+                std::string http_version;
+                unsigned int status_code;
+                std::string status_message;
 
-                log("Received response : " + response_line);
+                response_stream >> http_version >> status_code;
+                std::getline(response_stream, status_message); 
+
+                log("Received response code : " + std::to_string(status_code));
             }
 
             break;
