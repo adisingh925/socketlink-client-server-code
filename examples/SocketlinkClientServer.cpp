@@ -1235,6 +1235,9 @@ int sendHTTPSPOSTRequestFireAndForget(
                     if (!status_message.empty() && status_message.front() == ' ') {
                         status_message.erase(0, 1);
                     }
+
+                    /** increment success webhook calls */
+                    totalSuccessWebhookCalls.fetch_add(1, std::memory_order_relaxed);
                         
                     return status_code;
                 } else {
@@ -1242,7 +1245,7 @@ int sendHTTPSPOSTRequestFireAndForget(
                     return 0;
                 }
             }
-            
+
             /** increment success webhook calls */
             totalSuccessWebhookCalls.fetch_add(1, std::memory_order_relaxed);
 
