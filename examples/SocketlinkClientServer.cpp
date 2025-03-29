@@ -1205,18 +1205,18 @@ int sendHTTPSPOSTRequestFireAndForget(
                 boost::system::error_code ec;
             
                 /** Read until the full headers are received */
-                boost::asio::read_until(*ssl_socket, response_buffer, "\r\n\r\n", ec);
+                std::size_t bytes_transferred = boost::asio::read_until(*ssl_socket, response_buffer, "\r\n\r\n", ec);
             
-                if (!ec) {
+                if (!ec && bytes_transferred > 0) {
                     std::istream response_stream(&response_buffer);
                     std::string status_line;
-                    
+            
                     /** Read the first line containing HTTP status */
                     std::getline(response_stream, status_line);
             
                     /** Ensure the line is properly read */
-                    if (status_line.empty()) {
-                        log("Error : Empty response line.");
+                    if (status_line.empty() || status_line.find("HTTP/") == std::string::npos) {
+                        log("Error : Invalid or empty response line : " + status_line);
                         return 0;
                     }
             
@@ -1236,12 +1236,18 @@ int sendHTTPSPOSTRequestFireAndForget(
             
                     log("Full Response : " + http_version + " " + std::to_string(status_code) + " " + status_message);
             
+                    /** Print all headers */
+                    std::string header;
+                    while (std::getline(response_stream, header) && header != "\r") {
+                        log("Header : " + header);
+                    }
+            
                     return status_code;
                 } else {
-                    log("Error reading response : " + ec.message());
+                    log("Error reading response : " + ec.message() + " | Bytes Transferred: " + std::to_string(bytes_transferred));
                     return 0;
                 }
-            }                        
+            }                                               
 
             break;
         } catch (const boost::system::system_error& e) {
