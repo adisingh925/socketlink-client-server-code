@@ -1204,6 +1204,8 @@ void sendHTTPSPOSTRequestFireAndForget(
             ssl_socket = nullptr; */
 
             if (waitForResponse) {
+                log("Waiting for response...");
+                
                 boost::asio::streambuf response_buffer;
                 boost::asio::read_until(*ssl_socket, response_buffer, "\r\n\r\n");
 
