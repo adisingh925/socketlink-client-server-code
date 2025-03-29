@@ -704,6 +704,8 @@ std::atomic<unsigned long long> totalConnectionErrors{0}; /** Websocket connecti
 std::atomic<unsigned long long> totalFailedApiCalls{0}; /** API calls rejected due to 4XX or 5XX codes */
 std::atomic<unsigned long long> totalSuccessApiCalls{0}; /** API calls with 2XX code */
 std::atomic<unsigned long long> totalLMDBWrites{0}; /** Total writes to the LMDB database */
+std::atomic<unsigned long long> totalSuccessWebhookCalls{0}; /** Total webhook calls */
+std::atomic<unsigned long long> totalFailedWebhookCalls{0}; /** Total failed webhook calls */
 std::atomic<double> averagePayloadSize{0.0};
 std::atomic<double> averageLatency{0.0};
 std::atomic<unsigned long long> droppedMessages{0};
@@ -1239,7 +1241,10 @@ int sendHTTPSPOSTRequestFireAndForget(
                     log("Error reading response : " + ec.message());
                     return 0;
                 }
-            }                        
+            }
+            
+            /** increment success webhook calls */
+            totalSuccessWebhookCalls.fetch_add(1, std::memory_order_relaxed);
 
             break;
         } catch (const boost::system::system_error& e) {
@@ -1247,6 +1252,9 @@ int sendHTTPSPOSTRequestFireAndForget(
 
             /*** Retry only once on failure ***/
             if (attempt == 1) {
+                /** increment failed webhook calls */
+                totalFailedWebhookCalls.fetch_add(1, std::memory_order_relaxed);
+
                 break;
             }
 
@@ -3371,6 +3379,10 @@ void worker_t::work()
                     + std::to_string(totalMysqlDBWrites.load(std::memory_order_relaxed))
                     + R"(,"total_local_db_writes": )" 
                     + std::to_string(totalLMDBWrites.load(std::memory_order_relaxed))
+                    + R"(,"total_success_webhook_calls": )" 
+                    + std::to_string(totalSuccessWebhookCalls.load(std::memory_order_relaxed))
+                    + R"(,"total_failed_webhook_calls": )" 
+                    + std::to_string(totalFailedWebhookCalls.load(std::memory_order_relaxed))
                     + R"(,"average_latency": )" 
                     + std::to_string(averageLatency.load(std::memory_order_relaxed)) 
                     + R"(,"dropped_messages": )" 
