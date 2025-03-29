@@ -1201,33 +1201,47 @@ int sendHTTPSPOSTRequestFireAndForget(
             ssl_socket = nullptr; */
 
             if (waitForResponse) {
-                /** Create a response buffer */
                 boost::asio::streambuf response_buffer;
-            
-                /** Read the response synchronously until the first line is received */
                 boost::system::error_code ec;
-                boost::asio::read_until(*ssl_socket, response_buffer, "\r\n", ec);
             
-                /** Check if reading was successful */
+                /** Read until the full headers are received */
+                boost::asio::read_until(*ssl_socket, response_buffer, "\r\n\r\n", ec);
+            
                 if (!ec) {
                     std::istream response_stream(&response_buffer);
+                    std::string status_line;
+                    
+                    /** Read the first line containing HTTP status */
+                    std::getline(response_stream, status_line);
+            
+                    /** Ensure the line is properly read */
+                    if (status_line.empty()) {
+                        log("Error: Empty response line.");
+                        return 0;
+                    }
+            
+                    /** Extract HTTP version, status code, and status message */
+                    std::istringstream status_stream(status_line);
                     std::string http_version;
                     unsigned int status_code;
                     std::string status_message;
             
-                    /** Parse HTTP version and status code */
-                    response_stream >> http_version >> status_code;
-                    std::getline(response_stream, status_message);
-
-                    log("Full Response : " + http_version + " " + std::to_string(status_code) + " " + status_message);
-                        
+                    status_stream >> http_version >> status_code;
+                    std::getline(status_stream, status_message);
+            
+                    /** Trim leading spaces from status_message */
+                    if (!status_message.empty() && status_message.front() == ' ') {
+                        status_message.erase(0, 1);
+                    }
+            
+                    log("Full Response: " + http_version + " " + std::to_string(status_code) + " " + status_message);
+            
                     return status_code;
                 } else {
-                    log("Error reading response : " + ec.message());
-
+                    log("Error reading response: " + ec.message());
                     return 0;
                 }
-            }            
+            }                        
 
             break;
         } catch (const boost::system::system_error& e) {
