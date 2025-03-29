@@ -1275,6 +1275,7 @@ int sendHTTPSPOSTRequestFireAndForget(
                 sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);
             } else {
                 /** some other error has occurred */
+                ssl_socket = nullptr;
             }
         }
     }
