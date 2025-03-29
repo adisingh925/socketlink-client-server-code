@@ -1217,7 +1217,6 @@ int sendHTTPSPOSTRequestFireAndForget(
                     /** Ensure the line is properly read */
                     if (status_line.empty() || status_line.find("HTTP/") == std::string::npos) {
                         log("Error : Invalid or empty response line : " + status_line);
-                        return 0;
                     }
             
                     /** Extract HTTP version, status code, and status message */
