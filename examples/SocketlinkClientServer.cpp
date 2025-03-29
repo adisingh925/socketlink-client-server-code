@@ -13,7 +13,6 @@
 #include <tbb/concurrent_hash_map.h>
 #include <filesystem>
 #include "simdjson.h"
-#include <curl/curl.h>
 
 /** is logs enabled */
 constexpr bool LOGS_ENABLED = true;
@@ -1117,9 +1116,7 @@ void sendHTTPSPOSTRequestFireAndForget(
     const std::string& baseURL, 
     const std::string& path, 
     const std::string& body, 
-    const std::map<std::string, std::string>& headers = {},
-    bool waitForResponse = false,
-    std::function<void(unsigned int)> callback = nullptr
+    const std::map<std::string, std::string>& headers = {}
 ) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         try {
@@ -1153,8 +1150,6 @@ void sendHTTPSPOSTRequestFireAndForget(
 
                 /** Perform the SSL handshake. */
                 ssl_socket->handshake(boost::asio::ssl::stream_base::client);
-            } else {
-                log("Reusing the existing connection");
             }
 
             /** Enable the TCP no-delay option to minimize latency. */
@@ -1204,35 +1199,12 @@ void sendHTTPSPOSTRequestFireAndForget(
 
             ssl_socket = nullptr; */
 
-            if (waitForResponse) {
-                auto response_buffer = std::make_shared<boost::asio::streambuf>();
-            
-                boost::asio::async_read_until(*ssl_socket, *response_buffer, "\r\n", [response_buffer, callback](boost::system::error_code ec, std::size_t bytes_transferred) {
-                    if (!ec) {
-                        std::istream response_stream(response_buffer.get());
-                        std::string http_version;
-                        unsigned int status_code;
-                        std::string status_message;
-        
-                        response_stream >> http_version >> status_code;
-                        std::getline(response_stream, status_message);
-        
-                        if (callback) {
-                            callback(status_code);
-                        }
-                    } else {
-                        log("Error reading response : " + ec.message());
-                    }
-                });
-            }            
-                       
             break;
         } catch (const boost::system::system_error& e) {
             log("Error in sendHTTPSPOSTRequestFireAndForget : " + std::string(e.what()));
 
             /*** Retry only once on failure ***/
             if (attempt == 1) {
-                log("Failed to send the request after 2 attempts!");
                 break;
             }
 
@@ -4101,21 +4073,6 @@ void worker_t::work()
                                 hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
                                 headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
                             }
-
-                            sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {},
-                                true,
-                                [](unsigned int statusCode) {                                    
-                                    if (statusCode == 200) {
-                                        log("Request was successful!");
-                                    } else {
-                                        log("Request failed with status : " + std::to_string(statusCode));
-                                    }
-                                }
-                            );                            
             
                             int status = sendHTTPSPOSTRequest(
                                 UserData::getInstance().webHookBaseUrl,
@@ -6071,7 +6028,7 @@ void watchCertChanges(std::string_view domain) {
 }
 
 /* Main */
-int main() {    
+int main() {
     /** Fetch and populated data before starting the threads */
     fetchAndPopulateUserData();
     init_env();
