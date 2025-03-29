@@ -1204,19 +1204,27 @@ void sendHTTPSPOSTRequestFireAndForget(
             ssl_socket = nullptr; */
 
             if (waitForResponse) {
-                boost::asio::streambuf response_buffer;
-                boost::asio::read_until(*ssl_socket, response_buffer, "\r\n");
-
-                std::istream response_stream(&response_buffer);
-                std::string http_version;
-                unsigned int status_code;
-                std::string status_message;
-
-                response_stream >> http_version >> status_code;
-                std::getline(response_stream, status_message); 
-
-                log("Received response code : " + std::to_string(status_code));
-            }
+                auto response_buffer = std::make_shared<boost::asio::streambuf>();
+            
+                boost::asio::async_read_until(*ssl_socket, *response_buffer, "\r\n",
+                    [response_buffer](boost::system::error_code ec, std::size_t bytes_transferred) {
+                        if (!ec) {
+                            std::istream response_stream(response_buffer.get());
+                            std::string http_version;
+                            unsigned int status_code;
+                            std::string status_message;
+            
+                            response_stream >> http_version >> status_code;
+                            std::getline(response_stream, status_message);
+            
+                            log("Received response code : " + std::to_string(status_code));
+                        } else {
+                            log("Error reading response : " + ec.message());
+                        }
+                    });
+            
+                io_context.run(); 
+            }            
 
             break;
         } catch (const boost::system::system_error& e) {
