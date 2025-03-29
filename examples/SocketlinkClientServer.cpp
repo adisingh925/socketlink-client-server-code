@@ -1233,7 +1233,9 @@ int sendHTTPSPOSTRequestFireAndForget(
                     if (!status_message.empty() && status_message.front() == ' ') {
                         status_message.erase(0, 1);
                     }
-                        
+            
+                    log("Full Response : " + http_version + " " + std::to_string(status_code) + " " + status_message);
+            
                     return status_code;
                 } else {
                     log("Error reading response : " + ec.message());
