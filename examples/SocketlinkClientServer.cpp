@@ -1216,7 +1216,7 @@ int sendHTTPSPOSTRequestFireAndForget(
             
                     /** Ensure the line is properly read */
                     if (status_line.empty()) {
-                        log("Error: Empty response line.");
+                        log("Error : Empty response line.");
                         return 0;
                     }
             
@@ -1233,12 +1233,10 @@ int sendHTTPSPOSTRequestFireAndForget(
                     if (!status_message.empty() && status_message.front() == ' ') {
                         status_message.erase(0, 1);
                     }
-            
-                    log("Full Response: " + http_version + " " + std::to_string(status_code) + " " + status_message);
-            
+                        
                     return status_code;
                 } else {
-                    log("Error reading response: " + ec.message());
+                    log("Error reading response : " + ec.message());
                     return 0;
                 }
             }                        
