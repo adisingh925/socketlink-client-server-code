@@ -1218,6 +1218,8 @@ int sendHTTPSPOSTRequestFireAndForget(
                     /** Parse HTTP version and status code */
                     response_stream >> http_version >> status_code;
                     std::getline(response_stream, status_message);
+
+                    log("Full Response : " + http_version + " " + std::to_string(status_code) + " " + status_message);
                         
                     return status_code;
                 } else {
@@ -4111,8 +4113,6 @@ void worker_t::work()
                                 {},
                                 true
                             );
-
-                            log("Webhook status : " + std::to_string(status));
     
                             if(status != 200){                                
                                 if(!*isAborted){
