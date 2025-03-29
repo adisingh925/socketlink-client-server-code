@@ -1261,22 +1261,8 @@ int sendHTTPSPOSTRequestFireAndForget(
                 break;
             }
 
-            if (e.code() == boost::asio::error::broken_pipe) {
-                /** broken pipe error, resending */
-                ssl_socket = nullptr;  
-
-                /** dangerous retry */
-                sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);
-            } else if (e.code() == boost::asio::error::connection_reset) {
-                /** connection reset by peer */
-                ssl_socket = nullptr;
-
-                /** dangerous retry */
-                sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);
-            } else {
-                /** some other error has occurred */
-                ssl_socket = nullptr;
-            }
+            ssl_socket = nullptr;
+            sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);
         }
     }
 
