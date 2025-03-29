@@ -1118,7 +1118,8 @@ void sendHTTPSPOSTRequestFireAndForget(
     const std::string& path, 
     const std::string& body, 
     const std::map<std::string, std::string>& headers = {},
-    bool waitForResponse = false
+    bool waitForResponse = false,
+    std::function<void(unsigned int)> callback = nullptr
 ) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         try {
@@ -1207,7 +1208,7 @@ void sendHTTPSPOSTRequestFireAndForget(
                 auto response_buffer = std::make_shared<boost::asio::streambuf>();
             
                 boost::asio::async_read_until(*ssl_socket, *response_buffer, "\r\n",
-                    [response_buffer](boost::system::error_code ec, std::size_t bytes_transferred) {
+                    [response_buffer, callback](boost::system::error_code ec, std::size_t bytes_transferred) {
                         if (!ec) {
                             std::istream response_stream(response_buffer.get());
                             std::string http_version;
@@ -1218,6 +1219,10 @@ void sendHTTPSPOSTRequestFireAndForget(
                             std::getline(response_stream, status_message);
             
                             log("Received response code : " + std::to_string(status_code));
+
+                            if (callback) {
+                                callback(status_code);
+                            }
                         } else {
                             log("Error reading response : " + ec.message());
                         }
@@ -4107,8 +4112,17 @@ void worker_t::work()
                                 UserData::getInstance().webhookPath,
                                 body,
                                 {},
-                                true
-                            );
+                                true,
+                                [](unsigned int statusCode) {
+                                    log("Callback executed! HTTP Response Code : " + std::to_string(statusCode));
+                                    
+                                    if (statusCode == 200) {
+                                        log("Request was successful!");
+                                    } else {
+                                        log("Request failed with status: " + std::to_string(statusCode));
+                                    }
+                                }
+                            );                            
             
                             int status = sendHTTPSPOSTRequest(
                                 UserData::getInstance().webHookBaseUrl,
