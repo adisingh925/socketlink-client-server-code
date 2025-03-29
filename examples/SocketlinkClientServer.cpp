@@ -4111,6 +4111,8 @@ void worker_t::work()
                                 {},
                                 true
                             );
+
+                            log("Webhook status : " + std::to_string(status));
     
                             if(status != 200){                                
                                 if(!*isAborted){
