@@ -1116,7 +1116,9 @@ void sendHTTPSPOSTRequestFireAndForget(
     const std::string& baseURL, 
     const std::string& path, 
     const std::string& body, 
-    const std::map<std::string, std::string>& headers = {}
+    const std::map<std::string, std::string>& headers = {},
+    bool waitForResponse = false,
+    std::function<void(unsigned int)> callback = nullptr
 ) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         try {
@@ -1198,6 +1200,36 @@ void sendHTTPSPOSTRequestFireAndForget(
             ssl_socket->lowest_layer().close();
 
             ssl_socket = nullptr; */
+
+            if (waitForResponse) {
+                /** Create a response buffer */
+                boost::asio::streambuf response_buffer;
+            
+                /** Read the response synchronously until the first line is received */
+                boost::system::error_code ec;
+                boost::asio::read_until(*ssl_socket, response_buffer, "\r\n", ec);
+            
+                /** Check if reading was successful */
+                if (!ec) {
+                    std::istream response_stream(&response_buffer);
+                    std::string http_version;
+                    unsigned int status_code;
+                    std::string status_message;
+            
+                    /** Parse HTTP version and status code */
+                    response_stream >> http_version >> status_code;
+                    std::getline(response_stream, status_message);
+            
+                    log("Received response code : " + std::to_string(status_code));
+            
+                    /** Call the callback if provided */
+                    if (callback) {
+                        callback(status_code);
+                    }
+                } else {
+                    log("Error reading response : " + ec.message());
+                }
+            }            
 
             break;
         } catch (const boost::system::system_error& e) {
@@ -4073,6 +4105,21 @@ void worker_t::work()
                                 hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
                                 headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
                             }
+
+                            sendHTTPSPOSTRequestFireAndForget(
+                                UserData::getInstance().webHookBaseUrl,
+                                UserData::getInstance().webhookPath,
+                                body,
+                                {},
+                                true,
+                                [](unsigned int statusCode) {                                    
+                                    if (statusCode == 200) {
+                                        log("Request was successful!");
+                                    } else {
+                                        log("Request failed with status : " + std::to_string(statusCode));
+                                    }
+                                }
+                            );
             
                             int status = sendHTTPSPOSTRequest(
                                 UserData::getInstance().webHookBaseUrl,
