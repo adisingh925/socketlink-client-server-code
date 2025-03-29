@@ -1149,6 +1149,8 @@ void sendHTTPSPOSTRequestFireAndForget(
 
             /** Perform the SSL handshake. */
             ssl_socket->handshake(boost::asio::ssl::stream_base::client);
+        } else {
+            log("Reusing the existing connection");
         }
 
         /** Enable the TCP no-delay option to minimize latency. */
