@@ -13,6 +13,7 @@
 #include <tbb/concurrent_hash_map.h>
 #include <filesystem>
 #include "simdjson.h"
+#include <curl/curl.h>
 
 /** is logs enabled */
 constexpr bool LOGS_ENABLED = true;
@@ -1116,7 +1117,8 @@ void sendHTTPSPOSTRequestFireAndForget(
     const std::string& baseURL, 
     const std::string& path, 
     const std::string& body, 
-    const std::map<std::string, std::string>& headers = {}
+    const std::map<std::string, std::string>& headers = {},
+    bool waitForResponse = false
 ) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         try {
@@ -1200,6 +1202,17 @@ void sendHTTPSPOSTRequestFireAndForget(
             ssl_socket->lowest_layer().close();
 
             ssl_socket = nullptr; */
+
+            if (waitForResponse) {
+                boost::asio::streambuf response_buffer;
+                boost::asio::read_until(*ssl_socket, response_buffer, "\r\n\r\n");
+
+                std::istream response_stream(&response_buffer);
+                std::string response_line;
+                std::getline(response_stream, response_line);
+
+                log("Received response : " + response_line);
+            }
 
             break;
         } catch (const boost::system::system_error& e) {
@@ -4076,6 +4089,14 @@ void worker_t::work()
                                 hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
                                 headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
                             }
+
+                            sendHTTPSPOSTRequestFireAndForget(
+                                UserData::getInstance().webHookBaseUrl,
+                                UserData::getInstance().webhookPath,
+                                body,
+                                {},
+                                true
+                            );
             
                             int status = sendHTTPSPOSTRequest(
                                 UserData::getInstance().webHookBaseUrl,
@@ -6031,7 +6052,7 @@ void watchCertChanges(std::string_view domain) {
 }
 
 /* Main */
-int main() {
+int main() {    
     /** Fetch and populated data before starting the threads */
     fetchAndPopulateUserData();
     init_env();
