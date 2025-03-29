@@ -1112,13 +1112,12 @@ HTTPResponse sendHTTPSPOSTRequest(
 }
 
 /** send a FIRE-AND-FOREGET http post request for webhook */
-void sendHTTPSPOSTRequestFireAndForget(
+int sendHTTPSPOSTRequestFireAndForget(
     const std::string& baseURL, 
     const std::string& path, 
     const std::string& body, 
     const std::map<std::string, std::string>& headers = {},
-    bool waitForResponse = false,
-    std::function<void(unsigned int)> callback = nullptr
+    bool waitForResponse = false
 ) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         try {
@@ -1126,7 +1125,7 @@ void sendHTTPSPOSTRequestFireAndForget(
              *  This is insecure and should only be used for testing purposes. */
             if(UserData::getInstance().webhookIP.empty()){
                 /** DNS is not resolved, returning */
-                return;
+                return 0;
             }
 
             ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
@@ -1219,15 +1218,12 @@ void sendHTTPSPOSTRequestFireAndForget(
                     /** Parse HTTP version and status code */
                     response_stream >> http_version >> status_code;
                     std::getline(response_stream, status_message);
-            
-                    log("Received response code : " + std::to_string(status_code));
-            
-                    /** Call the callback if provided */
-                    if (callback) {
-                        callback(status_code);
-                    }
+                        
+                    return status_code;
                 } else {
                     log("Error reading response : " + ec.message());
+
+                    return 0;
                 }
             }            
 
@@ -1257,6 +1253,8 @@ void sendHTTPSPOSTRequestFireAndForget(
             }
         }
     }
+
+    return 0;
 }
 
 /**
@@ -4106,27 +4104,13 @@ void worker_t::work()
                                 headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
                             }
 
-                            sendHTTPSPOSTRequestFireAndForget(
+                            int status = sendHTTPSPOSTRequestFireAndForget(
                                 UserData::getInstance().webHookBaseUrl,
                                 UserData::getInstance().webhookPath,
                                 body,
                                 {},
-                                true,
-                                [](unsigned int statusCode) {                                    
-                                    if (statusCode == 200) {
-                                        log("Request was successful!");
-                                    } else {
-                                        log("Request failed with status : " + std::to_string(statusCode));
-                                    }
-                                }
+                                true
                             );
-            
-                            int status = sendHTTPSPOSTRequest(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                headers
-                            ).status;
     
                             if(status != 200){                                
                                 if(!*isAborted){
