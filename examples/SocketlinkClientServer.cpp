@@ -1358,6 +1358,9 @@ int populateUserData(std::string data) {
 
     if (parsedJson.contains("webhooks") && !parsedJson["webhooks"].is_null()) {
         userData.webhooks = parsedJson["webhooks"].get<uint64_t>();
+
+        /** populate enabled webhooks and features */
+        populateWebhookStatus(userData.webhooks);
     }
 
     if (parsedJson.contains("features") && !parsedJson["features"].is_null()) {
@@ -1366,6 +1369,9 @@ int populateUserData(std::string data) {
 
     if (parsedJson.contains("webhook_base_url") && !parsedJson["webhook_base_url"].is_null()) {
         userData.webHookBaseUrl = parsedJson["webhook_base_url"].get<std::string>();
+
+        /** resolve and store the IP address of the client's webhook URL */
+        resolveAndStoreIPAddress(userData.webHookBaseUrl);
     }
 
     if (parsedJson.contains("webhook_path") && !parsedJson["webhook_path"].is_null()) {
@@ -1498,12 +1504,6 @@ int populateUserData(std::string data) {
     if (parsedJson.contains("total_payload_sent")) {
         totalPayloadSent = parsedJson["total_payload_sent"].get<unsigned long long>();
     }
-
-    /** populate enabled webhooks and features */
-    populateWebhookStatus(UserData::getInstance().webhooks);
-
-    /** resolve and store the IP address of the client's webhook URL */
-    resolveAndStoreIPAddress(UserData::getInstance().webHookBaseUrl);
 
     return needsDBUpdate;
 }
@@ -3413,7 +3413,7 @@ void worker_t::work()
                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                     res->cork([res]() {
-                        res->writeStatus("403");
+                        res->writeStatus("400 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
                         res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                     });
@@ -3442,7 +3442,7 @@ void worker_t::work()
                                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                                 res->cork([res]() {
-                                    res->writeStatus("403");
+                                    res->writeStatus("400 Unauthorized");
                                     res->writeHeader("Content-Type", "application/json");
                                     res->end(R"({"message": "Unauthorized access, Invalid signature!"})");
                                 });
