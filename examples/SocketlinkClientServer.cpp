@@ -568,10 +568,10 @@ enum class Webhooks : uint8_t {
     ON_VERIFICATION_REQUEST = 1 << 2,          /** value 4 */
 
     /** Connection open events */
-    ON_CONNECTION_OPEN = 1 << 3,               /** value 8 */
+    ON_SUBSCRIBE = 1 << 3,               /** value 8 */
 
     /** Connection close events */
-    ON_CONNECTION_CLOSE = 1 << 4,              /** value 16 */
+    ON_UNSUBSCRIBE = 1 << 4,              /** value 16 */
 
     /** Room occupancy events */
     ON_ROOM_OCCUPIED = 1 << 5,                 /** value 32 */
@@ -1547,13 +1547,12 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
             }
         }
 
-        if(webhookStatus[Webhooks::ON_CONNECTION_CLOSE] == 1){
+        if(webhookStatus[Webhooks::ON_UNSUBSCRIBE] == 1){
             std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_CLOSE\", "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << rid << "\", "
-                    << "\"connections_in_room\":\"" << size << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            payload << "{\"event\":\"ON_UNSUBSCRIBE\", "
+            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+            << "\"rid\":\"" << rid << "\", "
+            << "\"connections_in_room\":\"" << size << "\"}";    
 
             std::string body = payload.str(); 
             
@@ -1570,10 +1569,9 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
             if(webhookStatus[Webhooks::ON_ROOM_VACATED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_ROOM_VACATED\", "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << rid << "\", "
-                        << "\"connections_in_room\":\"" << size << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                << "\"rid\":\"" << rid << "\", "
+                << "\"connections_in_room\":\"" << size << "\"}";        
 
                 std::string body = payload.str(); 
                 
@@ -1727,13 +1725,12 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
 
         /** fire connection open webhook */
-        if(webhookStatus[Webhooks::ON_CONNECTION_OPEN] == 1){
+        if(webhookStatus[Webhooks::ON_SUBSCRIBE] == 1){
             std::ostringstream payload;
-            payload << "{\"event\":\"ON_CONNECTION_OPEN\", "
-                    << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                    << "\"rid\":\"" << rid << "\", "
-                    << "\"connections_in_room\":\"" << size << "\", "
-                    << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+            payload << "{\"event\":\"ON_SUBSCRIBE\", "
+            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+            << "\"rid\":\"" << rid << "\", "
+            << "\"connections_in_room\":\"" << size << "\"}";    
 
             std::string body = payload.str(); 
             
@@ -1750,10 +1747,9 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED] == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_ROOM_OCCUPIED\", "
-                        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                        << "\"rid\":\"" << rid << "\", "
-                        << "\"connections_in_room\":\"" << size << "\", "
-                        << "\"total_connections\":\"" << globalConnectionCounter.load(std::memory_order_relaxed) << "\"}";
+                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+                << "\"rid\":\"" << rid << "\", "
+                << "\"connections_in_room\":\"" << size << "\"}";        
 
                 std::string body = payload.str(); 
                 
