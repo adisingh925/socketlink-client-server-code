@@ -1570,8 +1570,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_ROOM_VACATED\", "
                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                << "\"rid\":\"" << rid << "\", "
-                << "\"connections_in_room\":\"" << size << "\"}";        
+                << "\"rid\":\"" << rid << "\"}";             
 
                 std::string body = payload.str(); 
                 
@@ -1748,8 +1747,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_ROOM_OCCUPIED\", "
                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                << "\"rid\":\"" << rid << "\", "
-                << "\"connections_in_room\":\"" << size << "\"}";        
+                << "\"rid\":\"" << rid << "\"}";             
 
                 std::string body = payload.str(); 
                 
