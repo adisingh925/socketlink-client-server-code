@@ -1044,7 +1044,7 @@ int sendHTTPSPOSTRequestFireAndForget(
                 ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
                 
                 /** if the request cannot be delivered immediately it will be dropped */
-                /* ssl_socket->lowest_layer().non_blocking(true);   */
+                ssl_socket->lowest_layer().non_blocking(true);  
 
                 /** Specify the endpoint using the IP address and port. 
                  *  Ensure the IP address is correctly formatted. */
