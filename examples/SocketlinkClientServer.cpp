@@ -1161,16 +1161,14 @@ int sendHTTPSPOSTRequestFireAndForget(
         } catch (const boost::system::system_error& e) {
             log("Error in sendHTTPSPOSTRequestFireAndForget : " + std::string(e.what()));
 
+            ssl_socket = nullptr;
+
             /*** Retry only once on failure ***/
             if (attempt == 1) {
                 /** increment failed webhook calls */
                 totalFailedWebhookCalls.fetch_add(1, std::memory_order_relaxed);
-
                 break;
             }
-
-            ssl_socket = nullptr;
-            sendHTTPSPOSTRequestFireAndForget(baseURL, path, body, headers);
         }
     }
 
