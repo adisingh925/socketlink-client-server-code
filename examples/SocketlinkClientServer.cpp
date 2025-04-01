@@ -2128,10 +2128,25 @@ void worker_t::work()
                         }
                     }
 
-                    unsigned int subscribers = app_->numSubscribers(rid);
+                    /** publishing message */
+                    /* ws->publish(rid, message, opCode, true); */
+                    
+                    std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
+                    ws->publish(rid, data, opCode, true);
 
+                    std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
+                        /** Check if the current thread ID matches the worker's thread ID */ 
+                        if (std::this_thread::get_id() != w.thread_->get_id()) {
+                            /** Defer the message publishing to the worker's loop */ 
+                            w.loop_->defer([&w, data, opCode, rid]() {
+                                w.app_->publish(rid, data, opCode, true);
+                            });
+                        }
+                    });
+
+                    unsigned int subscribers = app_->numSubscribers(rid);
                     globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
-                    totalPayloadSent.fetch_add(static_cast<unsigned long long>(message.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
+                    totalPayloadSent.fetch_add(static_cast<unsigned long long>(data.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
 
                     /** Writing data to the LMDB */
                     if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
@@ -2151,23 +2166,7 @@ void worker_t::work()
                         }
                     }
 
-                    /** publishing message */
-                    /* ws->publish(rid, message, opCode, true); */
-                    
-                    std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
-                    ws->publish(rid, data, opCode, true);
-
-                    std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
-                        /** Check if the current thread ID matches the worker's thread ID */ 
-                        if (std::this_thread::get_id() != w.thread_->get_id()) {
-                            /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w, data, opCode, rid]() {
-                                w.app_->publish(rid, data, opCode, true);
-                            });
-                        }
-                    });
-
-                    if(webhookStatus[Webhooks::ON_MESSAGE] == 1){
+                    if(webhookStatus[Webhooks::ON_MESSAGE] == 1) {
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_MESSAGE\", "
                                 << "\"uid\":\"" << uid << "\", "
