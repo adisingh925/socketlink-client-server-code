@@ -1697,7 +1697,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }   
     
         /** Send a message to self */
-        std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+        std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
         if (workerThreadId == currentThreadId) {
             ws->send(selfMessage, uWS::OpCode::TEXT, true);
@@ -2035,25 +2035,25 @@ void worker_t::work()
 
                     /** Parse JSON and handle potential errors */
                     if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
-                        ws->send(R"({"error":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
                         return;
                     }
 
                     /** Retrieve 'rid' */
                     std::string rid;
                     if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
-                        rid = std::string(ridField.get_string().value());  // Convert only once
+                        rid = std::string(ridField.get_string().value());  
                     } else {
-                        ws->send(R"({"error":"MISSING_RID","source":"server"})", uWS::OpCode::TEXT, true);
+                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
                         return;
                     }
 
                     /** Retrieve 'message' */
                     std::string message;
                     if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
-                        message = std::string(msgField.get_string().value());  // Convert only once
+                        message = std::string(msgField.get_string().value());  
                     } else {
-                        ws->send(R"({"error":"MISSING_MESSAGE","source":"server"})", uWS::OpCode::TEXT, true);
+                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
                         return;
                     }
 
@@ -2071,7 +2071,7 @@ void worker_t::work()
                             tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
                             if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                 /** Room not found under this UID, send response and return */
-                                ws->send(R"({"data":"ROOM_NOT_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                                ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
                                 return;
                             }
                     
@@ -2097,7 +2097,7 @@ void worker_t::work()
                                 roomType = ridIt->second;
                             } else {
                                 /** Room not found under this UID, send error response */
-                                ws->send(R"({"data":"ROOM_NOT_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                                ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
                                 return;
                             }
                         } else {
@@ -3863,7 +3863,7 @@ void worker_t::work()
                         std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
 
                         for (const auto& uid : uids) {
-                            std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"rid\":\"" + uid + "\"}";
+                            std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"uid\":\"" + uid + "\"}";
 
                             /** broadcast a message to a specific member of a room */
                             std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast, uid](worker_t &w) {
