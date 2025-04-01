@@ -162,8 +162,8 @@ private:
                 "id INT AUTO_INCREMENT PRIMARY KEY,"
                 "insert_time DATETIME NOT NULL,"
                 "message TEXT NOT NULL,"
-                "identifier VARCHAR(255) NOT NULL,"
-                "room VARCHAR(255) NOT NULL"
+                "uid VARCHAR(4096) NOT NULL,"
+                "rid VARCHAR(160) NOT NULL"
                 ")";
 
             if (mysql_query(conn, query)) {
@@ -187,7 +187,7 @@ private:
             }
 
             /** Build the query for batch insertion */
-            std::string query = "INSERT INTO socketlink_messages (insert_time, message, identifier, room) VALUES ";
+            std::string query = "INSERT INTO socketlink_messages (insert_time, message, uid, rid) VALUES ";
             for (size_t i = 0; i < batch_data.size(); ++i) {
                 if (i > 0) query += ", ";
                 query += "(?, ?, ?, ?)";
@@ -1793,6 +1793,7 @@ void worker_t::work()
     .resetIdleTimeoutOnSend = true,
     .sendPingsAutomatically = true,
     .maxLifetime = UserData::getInstance().maxLifetimeInMinutes,
+
     /* Handlers */
     .upgrade = [](auto *res, auto *req, auto *context) {
         struct UpgradeData {
