@@ -3045,40 +3045,9 @@ void worker_t::work()
                         if(webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1){
                             std::ostringstream payload;
     
-                            switch (roomType)
-                            {
-                                case static_cast<uint8_t>(Rooms::PRIVATE) : {
-                                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                                    << "\"trigger\":\"INIT_PRIVATE_ROOM_VERIFICATION\", "
-                                    << "\"uid\":\"" << uid << "\", "
-                                    << "\"rid\":\"" << rid << "\"}";
-                                    break;
-                                }
-    
-                                case static_cast<uint8_t>(Rooms::PRIVATE_STATE) : {
-                                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                                    << "\"trigger\":\"INIT_PRIVATE_STATE_ROOM_VERIFICATION\", "
-                                    << "\"uid\":\"" << uid << "\", "
-                                    << "\"rid\":\"" << rid << "\"}";
-                                    break;
-                                }
-    
-                                case static_cast<uint8_t>(Rooms::PRIVATE_CACHE) : {
-                                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                                    << "\"trigger\":\"INIT_PRIVATE_CACHE_ROOM_VERIFICATION\", "
-                                    << "\"uid\":\"" << uid << "\", "
-                                    << "\"rid\":\"" << rid << "\"}";
-                                    break;
-                                }
-    
-                                case static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE) : {
-                                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                                    << "\"trigger\":\"INIT_PRIVATE_STATE_CACHE_ROOM_VERIFICATION\", "
-                                    << "\"uid\":\"" << uid << "\", "
-                                    << "\"rid\":\"" << rid << "\"}";
-                                    break;
-                                }
-                            }
+                            payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                            << "\"uid\":\"" << uid << "\", "
+                            << "\"rid\":\"" << rid << "\"}";
     
                             std::string body = payload.str(); 
                             httplib::Headers headers = {};
