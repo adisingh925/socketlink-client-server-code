@@ -1728,8 +1728,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         /** fire connection open webhook */
         if(webhookStatus[Webhooks::ON_CONNECTION_OPEN] == 1){
-            log("Firing ON_CONNECTION_OPEN webhook");
-
             std::ostringstream payload;
             payload << "{\"event\":\"ON_CONNECTION_OPEN\", "
                     << "\"uid\":\"" << ws->getUserData()->uid << "\", "
@@ -1750,8 +1748,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         /** Room ocuupied webhooks */
         if(size == 1){            
             if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED] == 1){
-                log("Firing ON_ROOM_OCCUPIED webhook");
-                
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_ROOM_OCCUPIED\", "
                         << "\"uid\":\"" << ws->getUserData()->uid << "\", "
