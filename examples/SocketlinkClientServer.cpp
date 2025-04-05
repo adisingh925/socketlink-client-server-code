@@ -614,7 +614,6 @@ std::atomic<unsigned long long> totalSuccessApiCalls{0}; /** API calls with 2XX 
 std::atomic<unsigned long long> totalLMDBWrites{0}; /** Total writes to the LMDB database */
 std::atomic<unsigned long long> totalSuccessWebhookCalls{0}; /** Total webhook calls */
 std::atomic<unsigned long long> totalFailedWebhookCalls{0}; /** Total failed webhook calls */
-std::atomic<double> averagePayloadSize{0.0};
 std::atomic<double> averageLatency{0.0};
 std::atomic<unsigned long long> droppedMessages{0};
 std::atomic<unsigned int> messageCount(0);
@@ -2318,9 +2317,7 @@ void worker_t::work()
                 res->end(R"({"connections": )" 
                     + std::to_string(globalConnectionCounter.load(std::memory_order_relaxed)) 
                     + R"(,"messages_sent": )" 
-                    + std::to_string(globalMessagesSent.load(std::memory_order_relaxed)) 
-                    + R"(,"average_payload_size": )" 
-                    + std::to_string(averagePayloadSize.load(std::memory_order_relaxed)) 
+                    + std::to_string(globalMessagesSent.load(std::memory_order_relaxed))
                     + R"(,"total_payload_sent": )" 
                     + std::to_string(totalPayloadSent.load(std::memory_order_relaxed)) 
                     + R"(,"total_failed_api_calls": )" 
@@ -2329,7 +2326,7 @@ void worker_t::work()
                     + std::to_string(totalSuccessApiCalls.load(std::memory_order_relaxed))
                     + R"(,"total_failed_connection_attempts": )" 
                     + std::to_string(totalConnectionErrors.load(std::memory_order_relaxed))
-                    + R"(,"total_mysql_db_writes": )" 
+                    + R"(,"total_mysql_db_batch_writes": )" 
                     + std::to_string(totalMysqlDBWrites.load(std::memory_order_relaxed))
                     + R"(,"total_local_db_writes": )" 
                     + std::to_string(totalLMDBWrites.load(std::memory_order_relaxed))
