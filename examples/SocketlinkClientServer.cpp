@@ -774,7 +774,7 @@ void init_env() {
         exit(-1);
     }
 
-    if (mdb_env_open(env, "/home/socketlink/socketlink-client-server-executable/messages_db", MDB_WRITEMAP, 0664) != 0) {
+    if (mdb_env_open(env, "./messages_db", MDB_WRITEMAP, 0664) != 0) {
         std::cerr << "Failed to open LMDB environment.\n";
         exit(-1);
     }
