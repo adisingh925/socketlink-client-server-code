@@ -2798,8 +2798,11 @@ void worker_t::work()
                 });
             }
         }
-	}).post("/api/v1/users/subscribe/room", [this](auto *res, auto *req) {
+	}).get("/api/v1/users/subscribe/room/:rid", [this](auto *res, auto *req) {
         auto isAborted = std::make_shared<bool>(false);
+        std::string rid = std::string(req->getParameter("rid"));  /** Extract the room ID from the request */
+        std::string uid = std::string(req->getHeader("uid"));  /** Extract the user ID from the request */
+
         res->onAborted([isAborted]() { 
             *isAborted = true; 
             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
@@ -2820,295 +2823,272 @@ void worker_t::work()
                 return;
             }
     
-            std::string body;
-            body.reserve(1024);
-    
-            res->onData([res, isAborted, body = std::move(body)](std::string_view data, bool last) mutable {
-                body.append(data);
-                if (!last) return;
-    
-                try {
-                    auto parsedJson = nlohmann::json::parse(body);
-                    std::string rid = parsedJson["rid"];
-                    std::string uid = parsedJson["uid"];
-                    uWS::WebSocket<true, true, PerSocketData>* ws = nullptr;
-                    worker_t* worker = nullptr;
-                    
-                    if(isMultiThread) {
-                        /** Checking if a connection exists for the provided UID */
-                        tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
+            uWS::WebSocket<true, true, PerSocketData>* ws = nullptr;
+            worker_t* worker = nullptr;
+            
+            if(isMultiThread) {
+                /** Checking if a connection exists for the provided UID */
+                tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
-                        /** Attempt to find the connection */
-                        if (!ThreadSafe::connections.find(accessor, uid)) {
+                /** Attempt to find the connection */
+                if (!ThreadSafe::connections.find(accessor, uid)) {
 
-                            /** Ensure the response is sent only once */
-                            if(!*isAborted){
-                                /** Atomically increment the rejected request counter */
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                /** Batch write operations for improved performance */
-                                res->cork([res]() {
-                                    res->writeStatus("404 Not Found");  /** Set HTTP status */
-                                    res->writeHeader("Content-Type", "application/json");  /** Define response type */
-                                    res->end(R"({"message": "Invalid uid!"})");  /** Send error message */
-                                });
-                            }
-
-                            return;  /** Exit early since the UID is invalid */
-                        }
-
-                        /** Retrieve the connection object */
-                        ws = accessor->second.ws;
-                        worker = accessor->second.worker;
-                    } else {
-                        if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("404 Not Found");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "Invalid uid!"})");
-                                });
-                            }
-                            return;
-                        }
-
-                        ws = SingleThreaded::connections[uid].ws;
-                        worker = SingleThreaded::connections[uid].worker;
-                    }
-
-                    /** Validate the room ID (rid) length constraints */
-                    if (rid.empty() || rid.size() > 160) {
-                        /** Ensure the response is sent only once */
-                        if(!*isAborted){
-                            /** Atomically increment the rejected request counter */
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            /** Batch response writes for efficiency */
-                            res->cork([res]() {
-                                res->writeStatus("400 Bad Request");  /** Set HTTP status */
-                                res->writeHeader("Content-Type", "application/json");  /** Define response type */
-                                res->end(R"({"message": "The room ID length should be between 1 to 160 characters!"})");  /** Send error message */
-                            });
-                        }
-
-                        return;  /** Exit early since rid is invalid */
-                    }
-
-                    uint8_t roomType = 255;
-    
-                    /** checking if the correct room type is received */
-                    if (rid.rfind("pub-state-cache-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
-                    }
-                    else if (rid.rfind("pri-state-cache-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
-                    }
-                    else if (rid.rfind("pub-cache-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
-                    }
-                    else if (rid.rfind("pri-cache-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
-                    }
-                    else if (rid.rfind("pub-state-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
-                    }
-                    else if (rid.rfind("pri-state-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
-                    }
-                    else if (rid.rfind("pub-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PUBLIC);
-                    }
-                    else if (rid.rfind("pri-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PRIVATE);
-                    }
-                    else
-                    {                        
-                        if(!*isAborted){
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"message\": \"The provided room type is invalid!\"}");
-                            });
-                        }
-    
-                        return;
-                    }
-
-                    if(isMultiThread) {
-                        /** checking if the user is already subscribed to the given room */
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
-
-                        /** Check if the UID is present in the mapping */
-                        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                            /** Retrieve reference to the inner map containing room IDs */
-                            auto& inner_map = uid_to_rid_outer_accessor->second;
-
-                            /** Check if the room is already associated with the UID */
-                            tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
-                            if (inner_map.find(inner_accessor, rid)) {
-                                
-
-                                /** Ensure response is not sent multiple times */
-                                if(!*isAborted){
-                                    /** Increment rejected request counter in a relaxed memory order for efficiency */
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    /** Use `cork` to optimize response writing */
-                                    res->cork([res]() {
-                                        res->writeStatus("400 Bad Request"); /** Set HTTP status */
-                                        res->writeHeader("Content-Type", "application/json"); /** Set response type */
-                                        res->end(R"({"message": "You are already subscribed to the given room!"})"); /** Send error message */
-                                    });
-                                }
-
-                                return; /** Exit early since user is already subscribed */
-                            }
-                        }
-                    } else {
-                        auto it = SingleThreaded::uidToRoomMapping.find(uid);
-                        if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) != it->second.end()) {
-
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("400 Bad Request");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "You are already subscribed to the given room!"})");
-                                });
-                            }
-                            return;
-                        }
-                    }
-                    
-                    /** checking if the user is banned from the given room */
-                    if(isMultiThread) {
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
-                        
-                        if (ThreadSafe::bannedConnections.find(outer_accessor, rid) && outer_accessor->second.count(uid)) {
-
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("403 Forbidden");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "You have been banned from this room!"})");
-                                });
-                            }
-                            
-                            return;
-                        }
-                    } else {
-                        auto it = SingleThreaded::bannedConnections.find(rid);
-                        if (it != SingleThreaded::bannedConnections.end() && it->second.count(uid)) {
-
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("403 Forbidden");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "You have been banned from this room!"})");
-                                });
-                            }
-                            return;
-                        }
-                    }
-    
-                    if(roomType == static_cast<uint8_t>(Rooms::PRIVATE) 
-                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) 
-                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
-                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-                    ){
-                        if(webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1){
-                            std::ostringstream payload;
-    
-                            payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                            << "\"uid\":\"" << uid << "\", "
-                            << "\"rid\":\"" << rid << "\"}";
-    
-                            std::string body = payload.str(); 
-                            httplib::Headers headers = {};
-    
-                            /** if the webhook secret is present add the hmac */
-                            if(UserData::getInstance().webhookSecret.length() > 0){
-                                unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
-                                hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
-                                headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
-                            }
-
-                            int status = sendHTTPSPOSTRequestFireAndForget(
-                                UserData::getInstance().webHookBaseUrl,
-                                UserData::getInstance().webhookPath,
-                                body,
-                                {},
-                                true
-                            );
-    
-                            if(status != 200){                                
-                                if(!*isAborted){
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("403 Forbidden");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end("{\"message\": \"You are not allowed to access this private room!\"}");
-                                    });
-                                }
-    
-                                return;
-                            }
-                        } else {    
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("403 Forbidden");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end("{\"message\": \"The ON_VERIFICATION_REQUEST webhook must be enabled to activate private rooms!\"}");
-                                });
-                            }
-    
-                            return;
-                        } 
-                    }
-
-                    openConnection(ws, worker, rid, roomType);
-    
+                    /** Ensure the response is sent only once */
                     if(!*isAborted){
-                        totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+                        /** Atomically increment the rejected request counter */
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
+                        /** Batch write operations for improved performance */
                         res->cork([res]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Successfully subscribed to the given room!"})");
+                            res->writeStatus("404 Not Found");  /** Set HTTP status */
+                            res->writeHeader("Content-Type", "application/json");  /** Define response type */
+                            res->end(R"({"message": "Invalid uid!"})");  /** Send error message */
                         });
                     }
-                } catch (const std::exception &e) {
+
+                    return;  /** Exit early since the UID is invalid */
+                }
+
+                /** Retrieve the connection object */
+                ws = accessor->second.ws;
+                worker = accessor->second.worker;
+            } else {
+                if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
                     if(!*isAborted){
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                        res->cork([res, e]() {
-                            res->writeStatus("400 Bad Request");
+                        res->cork([res]() {
+                            res->writeStatus("404 Not Found");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Invalid JSON format!"})");
+                            res->end(R"({"message": "Invalid uid!"})");
                         });
                     }
+                    return;
                 }
-            });
+
+                ws = SingleThreaded::connections[uid].ws;
+                worker = SingleThreaded::connections[uid].worker;
+            }
+
+            /** Validate the room ID (rid) length constraints */
+            if (rid.empty() || rid.size() > 160) {
+                /** Ensure the response is sent only once */
+                if(!*isAborted){
+                    /** Atomically increment the rejected request counter */
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                    /** Batch response writes for efficiency */
+                    res->cork([res]() {
+                        res->writeStatus("400 Bad Request");  /** Set HTTP status */
+                        res->writeHeader("Content-Type", "application/json");  /** Define response type */
+                        res->end(R"({"message": "The room ID length should be between 1 to 160 characters!"})");  /** Send error message */
+                    });
+                }
+
+                return;  /** Exit early since rid is invalid */
+            }
+
+            uint8_t roomType = 255;
+
+            /** checking if the correct room type is received */
+            if (rid.rfind("pub-state-cache-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
+            }
+            else if (rid.rfind("pri-state-cache-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
+            }
+            else if (rid.rfind("pub-cache-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
+            }
+            else if (rid.rfind("pri-cache-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
+            }
+            else if (rid.rfind("pub-state-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
+            }
+            else if (rid.rfind("pri-state-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
+            }
+            else if (rid.rfind("pub-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PUBLIC);
+            }
+            else if (rid.rfind("pri-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PRIVATE);
+            }
+            else
+            {                        
+                if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                    res->cork([res]() {
+                        res->writeStatus("400 Bad Request");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end("{\"message\": \"The provided room type is invalid!\"}");
+                    });
+                }
+
+                return;
+            }
+
+            if(isMultiThread) {
+                /** checking if the user is already subscribed to the given room */
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
+
+                /** Check if the UID is present in the mapping */
+                if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                    /** Retrieve reference to the inner map containing room IDs */
+                    auto& inner_map = uid_to_rid_outer_accessor->second;
+
+                    /** Check if the room is already associated with the UID */
+                    tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
+                    if (inner_map.find(inner_accessor, rid)) {
+                        
+
+                        /** Ensure response is not sent multiple times */
+                        if(!*isAborted){
+                            /** Increment rejected request counter in a relaxed memory order for efficiency */
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                            /** Use `cork` to optimize response writing */
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request"); /** Set HTTP status */
+                                res->writeHeader("Content-Type", "application/json"); /** Set response type */
+                                res->end(R"({"message": "You are already subscribed to the given room!"})"); /** Send error message */
+                            });
+                        }
+
+                        return; /** Exit early since user is already subscribed */
+                    }
+                }
+            } else {
+                auto it = SingleThreaded::uidToRoomMapping.find(uid);
+                if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) != it->second.end()) {
+
+                    if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                        res->cork([res]() {
+                            res->writeStatus("400 Bad Request");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"message": "You are already subscribed to the given room!"})");
+                        });
+                    }
+                    return;
+                }
+            }
+            
+            /** checking if the user is banned from the given room */
+            if(isMultiThread) {
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
+                
+                if (ThreadSafe::bannedConnections.find(outer_accessor, rid) && outer_accessor->second.count(uid)) {
+
+                    if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                        res->cork([res]() {
+                            res->writeStatus("403 Forbidden");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"message": "You have been banned from this room!"})");
+                        });
+                    }
+                    
+                    return;
+                }
+            } else {
+                auto it = SingleThreaded::bannedConnections.find(rid);
+                if (it != SingleThreaded::bannedConnections.end() && it->second.count(uid)) {
+
+                    if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                        res->cork([res]() {
+                            res->writeStatus("403 Forbidden");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"message": "You have been banned from this room!"})");
+                        });
+                    }
+                    return;
+                }
+            }
+
+            if(roomType == static_cast<uint8_t>(Rooms::PRIVATE) 
+            || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) 
+            || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
+            || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+            ){
+                if(webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1){
+                    std::ostringstream payload;
+
+                    payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
+                    << "\"uid\":\"" << uid << "\", "
+                    << "\"rid\":\"" << rid << "\"}";
+
+                    std::string body = payload.str(); 
+                    httplib::Headers headers = {};
+
+                    /** if the webhook secret is present add the hmac */
+                    if(UserData::getInstance().webhookSecret.length() > 0){
+                        unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
+                        hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
+                        headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
+                    }
+
+                    int status = sendHTTPSPOSTRequestFireAndForget(
+                        UserData::getInstance().webHookBaseUrl,
+                        UserData::getInstance().webhookPath,
+                        body,
+                        {},
+                        true
+                    );
+
+                    if(status != 200){                                
+                        if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                            res->cork([res]() {
+                                res->writeStatus("403 Forbidden");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end("{\"message\": \"You are not allowed to access this private room!\"}");
+                            });
+                        }
+
+                        return;
+                    }
+                } else {    
+                    if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                        res->cork([res]() {
+                            res->writeStatus("403 Forbidden");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end("{\"message\": \"The ON_VERIFICATION_REQUEST webhook must be enabled to activate private rooms!\"}");
+                        });
+                    }
+
+                    return;
+                } 
+            }
+
+            openConnection(ws, worker, rid, roomType);
+
+            if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                res->cork([res]() {
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Successfully subscribed to the given room!"})");
+                });
+            }
         } catch (std::exception &e) {
             if(!*isAborted){
                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
@@ -3339,8 +3319,11 @@ void worker_t::work()
                 });
             }
         }
-	}).post("/api/v1/users/unsubscribe/room", [this](auto *res, auto *req) {
+	}).get("/api/v1/users/unsubscribe/room/:rid", [this](auto *res, auto *req) {
         auto isAborted = std::make_shared<bool>(false);
+        std::string rid = std::string(req->getParameter("rid"));  /** Extract the room ID from the request */
+        std::string uid = std::string(req->getHeader("uid"));  /** Extract the user ID from the request */
+
         res->onAborted([isAborted]() { 
             *isAborted = true; 
             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
@@ -3361,244 +3344,221 @@ void worker_t::work()
                 return;
             }
     
-            std::string body;
-            body.reserve(1024);
-    
-            res->onData([res, isAborted, body = std::move(body)](std::string_view data, bool last) mutable {
-                body.append(data);
-                if (!last) return;
-    
-                try {
-                    auto parsedJson = nlohmann::json::parse(body);
-                    std::string rid = parsedJson["rid"];
-                    std::string uid = parsedJson["uid"];
-                    uWS::WebSocket<true, true, PerSocketData>* ws = nullptr;
-                    worker_t* worker = nullptr;
+            uWS::WebSocket<true, true, PerSocketData>* ws = nullptr;
+            worker_t* worker = nullptr;
 
-                    if(isMultiThread) {
-                        /** checking if there even is a connection with the provided UID */
-                        tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
+            if(isMultiThread) {
+                /** checking if there even is a connection with the provided UID */
+                tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
-                        if (!ThreadSafe::connections.find(accessor, uid)) {
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("404 Not Found");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "Invalid uid!"})");
-                                });
-                            }
-
-                            return;
-                        }
-
-                        ws = accessor->second.ws;
-                        worker = accessor->second.worker;
-                    } else {
-                        if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("404 Not Found");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "Invalid uid!"})");
-                                });
-                            }
-                            return;
-                        }
-
-                        ws = SingleThreaded::connections[uid].ws;
-                        worker = SingleThreaded::connections[uid].worker;
-                    }
-
-                    /** checking if the room length is valid */
-                    if (rid.empty() || rid.length() > 160) {
-                        if(!*isAborted){
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "The room id length should be between 1 to 160 characters!"})");
-                            });
-                        }
-
-                        return;
-                    }
-    
-                    uint8_t roomType = 255;
-    
-                    /** checking if the correct room type is received */
-                    if (rid.rfind("pub-state-cache-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
-                    }
-                    else if (rid.rfind("pri-state-cache-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
-                    }
-                    else if (rid.rfind("pub-cache-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
-                    }
-                    else if (rid.rfind("pri-cache-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
-                    }
-                    else if (rid.rfind("pub-state-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
-                    }
-                    else if (rid.rfind("pri-state-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
-                    }
-                    else if (rid.rfind("pub-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PUBLIC);
-                    }
-                    else if (rid.rfind("pri-", 0) == 0)
-                    {
-                        roomType = static_cast<uint8_t>(Rooms::PRIVATE);
-                    }
-                    else
-                    {                        
-                        if(!*isAborted){
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"message\": \"The provided room type is invalid!\"}");
-                            });
-                        }
-    
-                        return;
-                    }
-
-                    /** checking if the user is already unsubscribed to the given room */
-                    if(isMultiThread) {
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-                        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                            auto& inner_map = uid_to_rid_outer_accessor->second;
-
-                            /** check if the room is already present under the UID */
-                            {
-                                tbb::concurrent_hash_map<std::string, uint8_t>::accessor inner_accessor;
-                                if (!inner_map.find(inner_accessor, rid)) {
-
-                                    if(!*isAborted){
-                                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                        res->cork([res]() {
-                                            res->writeStatus("400 Bad Request");
-                                            res->writeHeader("Content-Type", "application/json");
-                                            res->end(R"({"message": "You are not subscribed to the given room!"})");
-                                        });
-                                    }
-
-                                    return;
-                                } 
-                            }
-                        } else {
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("400 Bad Request");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "You are not subscribed to the given room!"})");
-                                });
-                            }
-
-                            return;
-                        }
-                    } else {
-                        auto it = SingleThreaded::uidToRoomMapping.find(uid);
-                        if ((it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) == it->second.end()) || (it == SingleThreaded::uidToRoomMapping.end())) {
-
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("400 Bad Request");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "You are not subscribed to the given room!"})");
-                                });
-                            }
-
-                            return;
-                        }
-                    }
-
-                    /** removing the RID from the uid_to_rid mapping */
-                    if(isMultiThread) {
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-                        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
-                            auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
-
-                            /** Remove the rid from the inner map */
-                            {
-                                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                                if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
-                                    inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
-                                }
-                            }
-
-                            /** Check if the inner map is now empty */
-                            if (inner_uid_to_rid_map.empty()) {
-
-                                /** Check if the uid map has the value false, make it true (orphan) else ignore */
-                                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-                                if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
-                                    if (!uid_outer_accessor->second) { 
-                                        uid_outer_accessor->second = true;
-                                    }
-                                }
-
-                                ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
-                            }
-                        }
-                    } else {
-                        if (auto it = SingleThreaded::uidToRoomMapping.find(uid); it != SingleThreaded::uidToRoomMapping.end()) {
-                            it->second.erase(rid);
-                            
-                            if (it->second.empty()) {
-                                SingleThreaded::uidToRoomMapping.erase(it);
-                        
-                                if (auto uidIt = SingleThreaded::uid.find(uid); uidIt != SingleThreaded::uid.end() && !uidIt->second) {
-                                    uidIt->second = true;
-                                }
-                            }
-                        }                        
-                    }
-
-                    /** cloding the connection for the given rid */
-                    closeConnection(ws, worker, {{rid, roomType}});
-    
-                    if(!*isAborted){
-                        totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Successfully unsubscribed from the given room!"})");
-                        });
-                    }
-                } catch (const std::exception &e) {
+                if (!ThreadSafe::connections.find(accessor, uid)) {
                     if(!*isAborted){
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                        res->cork([res, e]() {
-                            res->writeStatus("400 Bad Request");
+                        res->cork([res]() {
+                            res->writeStatus("404 Not Found");
                             res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Invalid JSON format!"})");
+                            res->end(R"({"message": "Invalid uid!"})");
                         });
                     }
+
+                    return;
                 }
-            });
+
+                ws = accessor->second.ws;
+                worker = accessor->second.worker;
+            } else {
+                if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
+                    if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                        res->cork([res]() {
+                            res->writeStatus("404 Not Found");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"message": "Invalid uid!"})");
+                        });
+                    }
+                    return;
+                }
+
+                ws = SingleThreaded::connections[uid].ws;
+                worker = SingleThreaded::connections[uid].worker;
+            }
+
+            /** checking if the room length is valid */
+            if (rid.empty() || rid.length() > 160) {
+                if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                    res->cork([res]() {
+                        res->writeStatus("400 Bad Request");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(R"({"message": "The room id length should be between 1 to 160 characters!"})");
+                    });
+                }
+
+                return;
+            }
+
+            uint8_t roomType = 255;
+
+            /** checking if the correct room type is received */
+            if (rid.rfind("pub-state-cache-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
+            }
+            else if (rid.rfind("pri-state-cache-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
+            }
+            else if (rid.rfind("pub-cache-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
+            }
+            else if (rid.rfind("pri-cache-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
+            }
+            else if (rid.rfind("pub-state-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
+            }
+            else if (rid.rfind("pri-state-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
+            }
+            else if (rid.rfind("pub-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PUBLIC);
+            }
+            else if (rid.rfind("pri-", 0) == 0)
+            {
+                roomType = static_cast<uint8_t>(Rooms::PRIVATE);
+            }
+            else
+            {                        
+                if(!*isAborted){
+                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                    res->cork([res]() {
+                        res->writeStatus("400 Bad Request");
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end("{\"message\": \"The provided room type is invalid!\"}");
+                    });
+                }
+
+                return;
+            }
+
+            /** checking if the user is already unsubscribed to the given room */
+            if(isMultiThread) {
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+                if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                    auto& inner_map = uid_to_rid_outer_accessor->second;
+
+                    /** check if the room is already present under the UID */
+                    {
+                        tbb::concurrent_hash_map<std::string, uint8_t>::accessor inner_accessor;
+                        if (!inner_map.find(inner_accessor, rid)) {
+
+                            if(!*isAborted){
+                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                                res->cork([res]() {
+                                    res->writeStatus("400 Bad Request");
+                                    res->writeHeader("Content-Type", "application/json");
+                                    res->end(R"({"message": "You are not subscribed to the given room!"})");
+                                });
+                            }
+
+                            return;
+                        } 
+                    }
+                } else {
+                    if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                        res->cork([res]() {
+                            res->writeStatus("400 Bad Request");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"message": "You are not subscribed to the given room!"})");
+                        });
+                    }
+
+                    return;
+                }
+            } else {
+                auto it = SingleThreaded::uidToRoomMapping.find(uid);
+                if ((it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) == it->second.end()) || (it == SingleThreaded::uidToRoomMapping.end())) {
+
+                    if(!*isAborted){
+                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                        res->cork([res]() {
+                            res->writeStatus("400 Bad Request");
+                            res->writeHeader("Content-Type", "application/json");
+                            res->end(R"({"message": "You are not subscribed to the given room!"})");
+                        });
+                    }
+
+                    return;
+                }
+            }
+
+            /** removing the RID from the uid_to_rid mapping */
+            if(isMultiThread) {
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+                if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
+                    auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
+
+                    /** Remove the rid from the inner map */
+                    {
+                        tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                        if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
+                            inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
+                        }
+                    }
+
+                    /** Check if the inner map is now empty */
+                    if (inner_uid_to_rid_map.empty()) {
+
+                        /** Check if the uid map has the value false, make it true (orphan) else ignore */
+                        tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                        if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
+                            if (!uid_outer_accessor->second) { 
+                                uid_outer_accessor->second = true;
+                            }
+                        }
+
+                        ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
+                    }
+                }
+            } else {
+                if (auto it = SingleThreaded::uidToRoomMapping.find(uid); it != SingleThreaded::uidToRoomMapping.end()) {
+                    it->second.erase(rid);
+                    
+                    if (it->second.empty()) {
+                        SingleThreaded::uidToRoomMapping.erase(it);
+                
+                        if (auto uidIt = SingleThreaded::uid.find(uid); uidIt != SingleThreaded::uid.end() && !uidIt->second) {
+                            uidIt->second = true;
+                        }
+                    }
+                }                        
+            }
+
+            /** cloding the connection for the given rid */
+            closeConnection(ws, worker, {{rid, roomType}});
+
+            if(!*isAborted){
+                totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                res->cork([res]() {
+                    res->writeStatus("200 OK");
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(R"({"message": "Successfully unsubscribed from the given room!"})");
+                });
+            }
         } catch (std::exception &e) {
             if(!*isAborted){
                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
