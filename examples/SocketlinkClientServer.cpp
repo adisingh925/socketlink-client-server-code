@@ -2473,7 +2473,7 @@ void worker_t::work()
                 });
             }
         }
-	}).post("/api/v1/mysql/sync", [](auto *res, auto *req) {
+	}).get("/api/v1/mysql/sync", [](auto *res, auto *req) {
         /** sync all the data in the buffers to integrated mysql server */
 
         auto isAborted = std::make_shared<bool>(false);
