@@ -614,7 +614,8 @@ std::atomic<unsigned long long> totalSuccessApiCalls{0}; /** API calls with 2XX 
 std::atomic<unsigned long long> totalLMDBWrites{0}; /** Total writes to the LMDB database */
 std::atomic<unsigned long long> totalSuccessWebhookCalls{0}; /** Total webhook calls */
 std::atomic<unsigned long long> totalFailedWebhookCalls{0}; /** Total failed webhook calls */
-std::atomic<double> averageLatency{0.0};
+std::atomic<int> totalLatency{0}; /** Total latency in milliseconds */
+std::atomic<int> latencyCount(0); /** Number of latency measurements */
 std::atomic<unsigned long long> droppedMessages{0};
 std::atomic<unsigned int> messageCount(0);
 std::atomic<bool> isMessagingDisabled(false);
@@ -2051,6 +2052,28 @@ void worker_t::work()
                         return;
                     }
 
+                    int64_t timeInMs = 0;
+                    if (auto timeField = parsedData["time"]; timeField.error() == simdjson::SUCCESS) {
+                        timeInMs = timeField.get_int64().value();  
+
+                        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()
+                        ).count();
+      
+                        int64_t latency = now - timeInMs;
+
+                        totalLatency.fetch_add(latency, std::memory_order_relaxed);
+                        latencyCount.fetch_add(1, std::memory_order_relaxed);
+
+                        /** reset the data after a threshold */
+                        if(latencyCount.load(std::memory_order_relaxed) > 50) {
+                            latencyCount.store(0, std::memory_order_relaxed);
+                            totalLatency.store(0, std::memory_order_relaxed);
+                        }
+                    } else {
+                        /** no error */
+                    }
+
                     uint8_t roomType = 255;
 
                     if(isMultiThread) {
@@ -2311,7 +2334,12 @@ void worker_t::work()
             if (!*isAborted) {
                 totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                res->cork([res]() {
+                double avgLatency = 0.0;
+                if (latencyCount.load(std::memory_order_relaxed) > 0) {
+                    avgLatency = static_cast<double>(totalLatency.load(std::memory_order_relaxed)) / latencyCount.load(std::memory_order_relaxed);
+                }
+
+                res->cork([res, avgLatency]() {
                 res->writeStatus("200 OK");
                 res->writeHeader("Content-Type", "application/json");
                 res->end(R"({"connections": )" 
@@ -2335,7 +2363,7 @@ void worker_t::work()
                     + R"(,"total_failed_webhook_calls": )" 
                     + std::to_string(totalFailedWebhookCalls.load(std::memory_order_relaxed))
                     + R"(,"average_latency": )" 
-                    + std::to_string(averageLatency.load(std::memory_order_relaxed)) 
+                    + std::to_string(avgLatency) 
                     + R"(,"dropped_messages": )" 
                     + std::to_string(droppedMessages.load(std::memory_order_relaxed)) 
                     + R"(})");
