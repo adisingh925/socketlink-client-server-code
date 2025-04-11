@@ -4519,9 +4519,9 @@ void worker_t::work()
                                 res->end(R"({"message": "Access denied!"})");
                             });
                         }
-                    }
 
-                    return;
+                        return;
+                    }
                 }
             } else {
                 auto topicIt = SingleThreaded::topics.find(std::string(rid));
@@ -4535,9 +4535,9 @@ void worker_t::work()
                             res->end(R"({"message": "Access denied!"})");
                         });
                     }
-                }
 
-                return;
+                    return;
+                }
             }
 
             write_worker(std::string(rid), "", true);
