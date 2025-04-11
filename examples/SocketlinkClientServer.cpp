@@ -1775,7 +1775,8 @@ void worker_t::work()
   app_ = std::make_shared<uWS::SSLApp>(
     uWS::SSLApp({
         .key_file_name = keyFilePath.c_str(),
-        .cert_file_name = certFileName.c_str()
+        .cert_file_name = certFileName.c_str(),
+        .ssl_prefer_low_memory_usage = false,
     })
   );
 
@@ -1784,6 +1785,7 @@ void worker_t::work()
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
+    .compression = uWS::SHARED_COMPRESSOR,
     .maxPayloadLength = UserData::getInstance().msgSizeAllowedInBytes,
     .idleTimeout = UserData::getInstance().idleTimeoutInSeconds,
     .maxBackpressure = UserData::getInstance().maxBackpressureInBytes,
@@ -2059,8 +2061,6 @@ void worker_t::work()
                         ).count();
       
                         int64_t latency = now - timeInMs;
-
-                        log("Latency : " + std::to_string(latency) + "ms");
 
                         totalLatency.fetch_add(latency, std::memory_order_relaxed);
                         latencyCount.fetch_add(1, std::memory_order_relaxed);
