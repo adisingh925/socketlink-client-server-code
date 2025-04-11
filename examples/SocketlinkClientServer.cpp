@@ -4524,8 +4524,9 @@ void worker_t::work()
                     return;
                 }
             } else {
-                if (SingleThreaded::topics.find(std::string(rid)) == SingleThreaded::topics.end()) {
-                    if(!*isAborted){
+                auto topicIt = SingleThreaded::topics.find(std::string(rid));
+                if (topicIt == SingleThreaded::topics.end() || topicIt->second.find(std::string(uid)) == topicIt->second.end()) {
+                    if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                         res->cork([res]() {
@@ -4534,24 +4535,9 @@ void worker_t::work()
                             res->end(R"({"message": "Access denied!"})");
                         });
                     }
-
-                    return;
-                } else {
-                    /** Check if the uid exists in the inner map */
-                    if (SingleThreaded::topics[std::string(rid)].find(std::string(uid)) == SingleThreaded::topics[std::string(rid)].end()) {
-                        if(!*isAborted){
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("403 Forbidden");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Access denied!"})");
-                            });
-                        }
-                    }
-
-                    return;
                 }
+
+                return;
             }
 
             write_worker(std::string(rid), "", true);
