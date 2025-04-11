@@ -1981,6 +1981,9 @@ void worker_t::work()
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
         auto& userData = *ws->getUserData();
         auto uid = userData.uid;
+        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
 
         /** checking if the message sending is disabled globally at the server level */
         if(isMessagingDisabled.load(std::memory_order_relaxed)) {
@@ -2055,10 +2058,6 @@ void worker_t::work()
                     int64_t timeInMs = 0;
                     if (auto timeField = parsedData["timestamp"]; timeField.error() == simdjson::SUCCESS) {
                         timeInMs = timeField.get_int64().value();  
-
-                        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()
-                        ).count();
       
                         int64_t latency = now - timeInMs;
 
