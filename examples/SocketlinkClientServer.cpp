@@ -4536,35 +4536,22 @@ void worker_t::work()
                     }
 
                     return;
+                } else {
+                    /** Check if the uid exists in the inner map */
+                    if (SingleThreaded::topics[std::string(rid)].find(std::string(uid)) == SingleThreaded::topics[std::string(rid)].end()) {
+                        if(!*isAborted){
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                            res->cork([res]() {
+                                res->writeStatus("403 Forbidden");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Access denied!"})");
+                            });
+                        }
+                    }
+
+                    return;
                 }
-            }
-            
-            int limit, offset;
-
-            try {
-                limit = std::stoi(req->getQuery("limit").empty() ? "10" : std::string(req->getQuery("limit")));
-            } catch (const std::exception& e) {
-                limit = 10; /** Default value if conversion fails */
-            }
-
-            if (limit > 10) {
-                if(!*isAborted){
-                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                    res->cork([res]() {
-                        res->writeStatus("400 Bad Request");
-                        res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"message": "Limit cannot be greater than 10!"})");
-                    });
-                }
-
-                return;
-            }
-
-            try {
-                offset = std::stoi(req->getQuery("offset").empty() ? "0" : std::string(req->getQuery("offset")));
-            } catch (const std::exception& e) {
-                offset = 0; /** Default value if conversion fails */
             }
 
             write_worker(std::string(rid), "", true);
@@ -4587,7 +4574,7 @@ void worker_t::work()
             if(!*isAborted){
                 totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                res->cork([res, rid, limit, offset]() {
+                res->cork([res, rid]() {
                     res->writeStatus("200 OK");
                     res->writeHeader("Content-Type", "application/json");
                     res->end(read_worker(std::string(rid)));
