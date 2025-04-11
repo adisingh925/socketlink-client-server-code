@@ -2053,7 +2053,7 @@ void worker_t::work()
                     }
 
                     int64_t timeInMs = 0;
-                    if (auto timeField = parsedData["time"]; timeField.error() == simdjson::SUCCESS) {
+                    if (auto timeField = parsedData["timestamp"]; timeField.error() == simdjson::SUCCESS) {
                         timeInMs = timeField.get_int64().value();  
 
                         int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
