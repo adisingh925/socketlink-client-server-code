@@ -2062,6 +2062,8 @@ void worker_t::work()
       
                         int64_t latency = now - timeInMs;
 
+                        log("Latency : " + std::to_string(latency) + "ms");
+
                         totalLatency.fetch_add(latency, std::memory_order_relaxed);
                         latencyCount.fetch_add(1, std::memory_order_relaxed);
 
