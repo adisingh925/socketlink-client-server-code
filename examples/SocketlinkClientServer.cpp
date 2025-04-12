@@ -662,6 +662,7 @@ constexpr double M = 1000.0;    /** Normalization constant for payload size */
 thread_local boost::asio::io_context io_context;                                                           // Thread-local io_context
 thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);                     // Thread-local ssl_context
 thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr; // Thread-local ssl_socket
+thread_local double localEma = 0.0;
 
 /** Internal Constants */
 constexpr const char* INTERNAL_IP = "169.254.169.254";
@@ -686,6 +687,9 @@ constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 
 /** HMAC-SHA256 Constants */
 constexpr int HMAC_SHA256_DIGEST_LENGTH = 32;  /**< SHA-256 produces a 32-byte (256-bit) output */
+
+/** smoothing factor */
+constexpr double alpha = 0.05;
 
 /** Create an alias for the json object */
 using json = nlohmann::json;  
@@ -944,7 +948,7 @@ void populateWebhookStatus(uint8_t bitmask)
     /** Clear the existing statuses in case this is called multiple times */
     webhookStatus.clear();
 
-    for (uint8_t i = 0; i < 48; ++i)  // Use uint8_t to match bitmask size
+    for (uint8_t i = 0; i < 6; ++i)  // Use uint8_t to match bitmask size
     {
         /** Compute the webhook flag for this index */
         Webhooks webhook = static_cast<Webhooks>(static_cast<uint8_t>(1) << i);
@@ -1762,6 +1766,11 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
     }
 }
 
+/** calculate latency for each thread */
+void update_ema(double newLatency) {
+    localEma = alpha * newLatency + (1 - alpha) * localEma;
+}
+
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
@@ -2062,14 +2071,7 @@ void worker_t::work()
       
                         int64_t latency = now - timeInMs;
 
-                        totalLatency.fetch_add(latency, std::memory_order_relaxed);
-                        latencyCount.fetch_add(1, std::memory_order_relaxed);
-
-                        /** reset the data after a threshold */
-                        if(latencyCount.load(std::memory_order_relaxed) > 50) {
-                            latencyCount.store(0, std::memory_order_relaxed);
-                            totalLatency.store(0, std::memory_order_relaxed);
-                        }
+                        update_ema(latency);
                     } else {
                         /** no error */
                     }
@@ -2334,12 +2336,7 @@ void worker_t::work()
             if (!*isAborted) {
                 totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                double avgLatency = 0.0;
-                if (latencyCount.load(std::memory_order_relaxed) > 0) {
-                    avgLatency = static_cast<double>(totalLatency.load(std::memory_order_relaxed)) / latencyCount.load(std::memory_order_relaxed);
-                }
-
-                res->cork([res, avgLatency]() {
+                res->cork([res]() {
                 res->writeStatus("200 OK");
                 res->writeHeader("Content-Type", "application/json");
                 res->end(R"({"connections": )" 
@@ -2363,7 +2360,7 @@ void worker_t::work()
                     + R"(,"total_failed_webhook_calls": )" 
                     + std::to_string(totalFailedWebhookCalls.load(std::memory_order_relaxed))
                     + R"(,"average_latency": )" 
-                    + std::to_string(avgLatency) 
+                    + std::to_string(localEma) 
                     + R"(,"dropped_messages": )" 
                     + std::to_string(droppedMessages.load(std::memory_order_relaxed)) 
                     + R"(})");
