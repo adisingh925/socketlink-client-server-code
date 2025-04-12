@@ -2071,7 +2071,7 @@ void worker_t::work()
       
                         int64_t latency = now - timeInMs;
 
-                        log(latency);
+                        log("Latency : " + std::to_string(latency) + "ms");
 
                         update_ema(latency);
                     } else {
