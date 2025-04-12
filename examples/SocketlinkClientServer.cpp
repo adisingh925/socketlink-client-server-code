@@ -923,16 +923,17 @@ std::string read_worker(const std::string& room_id) {
         std::string message_content((char*)value.mv_data, value.mv_size);
         
         /** Construct the JSON response */
-        std::ostringstream result;
+        /* std::ostringstream result;
         result << "{\n";
         result << "  \"message\": \"" << message_content << "\"\n";
-        result << "}";
+        result << "}"; */
 
         /** Close the database handle and commit transaction */
         mdb_dbi_close(env, dbi);
         mdb_txn_commit(txn);
 
-        return result.str();
+        /* return result.str(); */
+        return message_content;
     }
 
     /** No message found for the given room_id */
@@ -3808,7 +3809,7 @@ void worker_t::work()
                         std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
 
                         for (const auto& uid : uids) {
-                            std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"uid\":\"" + uid + "\"}";
+                            std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"rid\":\"" + uid + "\"}";
 
                             /** broadcast a message to a specific member of a room */
                             std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast, uid](worker_t &w) {
