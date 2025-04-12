@@ -2071,6 +2071,8 @@ void worker_t::work()
       
                         int64_t latency = now - timeInMs;
 
+                        log(latency);
+
                         update_ema(latency);
                     } else {
                         /** no error */
