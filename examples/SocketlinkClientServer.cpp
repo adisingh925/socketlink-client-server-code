@@ -1452,48 +1452,50 @@ void fetchAndPopulateUserData() {
 }
 
 /** unsubscribe from the current room and do some cleanup */
-void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType) {
+void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType, bool isClosed = false) {
 
-    /** removing the RID from the uid_to_rid mapping */
-    if(isMultiThread) {
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
-            auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
+    if(isClosed == false){
+        /** removing the RID from the uid_to_rid mapping */
+        if(isMultiThread) {
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+            if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
+                auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
 
-            /** Remove the rid from the inner map */
-            {
-                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
-                    inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
-                }
-            }
-
-            /** Check if the inner map is now empty */
-            if (inner_uid_to_rid_map.empty()) {
-
-                /** Check if the uid map has the value false, make it true (orphan) else ignore */
-                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-                if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
-                    if (!uid_outer_accessor->second) { 
-                        uid_outer_accessor->second = true;
+                /** Remove the rid from the inner map */
+                {
+                    tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                    if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
+                        inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
                     }
                 }
 
-                ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
-            }
-        }
-    } else {
-        if (auto it = SingleThreaded::uidToRoomMapping.find(uid); it != SingleThreaded::uidToRoomMapping.end()) {
-            it->second.erase(rid);
-            
-            if (it->second.empty()) {
-                SingleThreaded::uidToRoomMapping.erase(it);
-        
-                if (auto uidIt = SingleThreaded::uid.find(uid); uidIt != SingleThreaded::uid.end() && !uidIt->second) {
-                    uidIt->second = true;
+                /** Check if the inner map is now empty */
+                if (inner_uid_to_rid_map.empty()) {
+
+                    /** Check if the uid map has the value false, make it true (orphan) else ignore */
+                    tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                    if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
+                        if (!uid_outer_accessor->second) { 
+                            uid_outer_accessor->second = true;
+                        }
+                    }
+
+                    ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
                 }
             }
-        }                        
+        } else {
+            if (auto it = SingleThreaded::uidToRoomMapping.find(uid); it != SingleThreaded::uidToRoomMapping.end()) {
+                it->second.erase(rid);
+                
+                if (it->second.empty()) {
+                    SingleThreaded::uidToRoomMapping.erase(it);
+            
+                    if (auto uidIt = SingleThreaded::uid.find(uid); uidIt != SingleThreaded::uid.end() && !uidIt->second) {
+                        uidIt->second = true;
+                    }
+                }
+            }                        
+        }
     }
 
     /** Unsubscribe the user from the room */
@@ -2315,8 +2317,11 @@ void worker_t::work()
                 /** Iterate through the inner map and move data into `rids` */
                 for (auto& entry : inner_map) {
                     /** Close connection */
-                    closeConnection(ws, this, entry.first, userId, entry.second);
+                    closeConnection(ws, this, entry.first, userId, entry.second, true);
                 }
+        
+                /** Remove the user ID entry from the outer map */
+                ThreadSafe::uidToRoomMapping.erase(outer_accessor);
             }
         } else {
             /** Check if the user ID exists in the map */
@@ -2327,8 +2332,11 @@ void worker_t::work()
 
                 /** Move each element from the set to `rids` using a loop */
                 for (auto& entry : inner_set) {
-                    closeConnection(ws, this, entry.first, userId, entry.second);
+                    closeConnection(ws, this, entry.first, userId, entry.second, true);
                 }
+
+                /** Erase the user ID entry from the outer map */
+                SingleThreaded::uidToRoomMapping.erase(it);
             }
         }        
     }
