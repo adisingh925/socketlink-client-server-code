@@ -1452,112 +1452,171 @@ void fetchAndPopulateUserData() {
 }
 
 /** unsubscribe from the current room and do some cleanup */
-void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, const std::vector<std::pair<std::string, uint8_t>>& rids) {
-    for (const auto& [rid, roomType] : rids) {
+void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType) {
 
-        /** Unsubscribe the user from the room */
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
+    /** removing the RID from the uid_to_rid mapping */
+    if(isMultiThread) {
+        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
+            auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
 
-        int size = 0;
-
-        /** Check if the room exists in the topics map */
-        if(isMultiThread){
-            if (ThreadSafe::topics.find(outer_accessor, rid)) {
-                auto& inner_map = outer_accessor->second;
-    
-                /** Remove user from the inner map */
-                {
-                    tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
-                    if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
-                        inner_map.erase(inner_accessor);
-                    }
-                }
-    
-                size = inner_map.size();
-    
-                /** Remove room if empty */
-                if (size == 0) {
-                    /** Remove room from topics */
-                    ThreadSafe::topics.erase(outer_accessor);
-    
-                    /** Remove disabled and banned connections */
-                    for (auto& map : {&ThreadSafe::disabledConnections, &ThreadSafe::bannedConnections}) {
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor map_accessor;
-    
-                        if (map->find(map_accessor, rid)) {
-                            map->erase(map_accessor);
-                        }
-                    }
+            /** Remove the rid from the inner map */
+            {
+                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
+                    inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
                 }
             }
-        } else {
-            auto it = SingleThreaded::topics.find(rid);
-            if (it != SingleThreaded::topics.end()) {
-                auto& inner_set = it->second; 
 
-                /** Removing the entry from the inner set */
-                inner_set.erase(ws->getUserData()->uid);
+            /** Check if the inner map is now empty */
+            if (inner_uid_to_rid_map.empty()) {
 
-                /** Store the new size */
-                size = inner_set.size();
-
-                /** Remove the room if empty */
-                if (size == 0) {
-                    SingleThreaded::topics.erase(it); 
-
-                    /** Remove disabled and banned connections */
-                    for (auto& map : {&SingleThreaded::disabledConnections, &SingleThreaded::bannedConnections}) {
-                        map->erase(rid);
+                /** Check if the uid map has the value false, make it true (orphan) else ignore */
+                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
+                    if (!uid_outer_accessor->second) { 
+                        uid_outer_accessor->second = true;
                     }
                 }
+
+                ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
             }
         }
+    } else {
+        if (auto it = SingleThreaded::uidToRoomMapping.find(uid); it != SingleThreaded::uidToRoomMapping.end()) {
+            it->second.erase(rid);
+            
+            if (it->second.empty()) {
+                SingleThreaded::uidToRoomMapping.erase(it);
         
-        /** Unsubscribe on the correct thread */
-        auto unsubscribe_fn = [ws, rid]() { ws->unsubscribe(rid); };
-        if (worker->thread_->get_id() != std::this_thread::get_id()) {
-            worker->loop_->defer(unsubscribe_fn);
-        } else {
-            unsubscribe_fn();
-        }
+                if (auto uidIt = SingleThreaded::uid.find(uid); uidIt != SingleThreaded::uid.end() && !uidIt->second) {
+                    uidIt->second = true;
+                }
+            }
+        }                        
+    }
 
-        static const std::unordered_set<uint8_t> validCacheRoomTypes = {
-            static_cast<uint8_t>(Rooms::PUBLIC_CACHE),
-            static_cast<uint8_t>(Rooms::PRIVATE_CACHE),
-            static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE),
-            static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-        };
+    /** Unsubscribe the user from the room */
+    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
 
-        /** delete the key value pair if it's a cache room */
-        if(size == 0 && validCacheRoomTypes.count(roomType)){
-            delete_worker(rid);
-        }
+    int size = 0;
 
-        /** Broadcast disconnect message */
-        static const std::unordered_set<uint8_t> validRoomTypes = {
-            static_cast<uint8_t>(Rooms::PUBLIC_STATE),
-            static_cast<uint8_t>(Rooms::PRIVATE_STATE),
-            static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE),
-            static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-        };
+    /** Check if the room exists in the topics map */
+    if(isMultiThread){
+        if (ThreadSafe::topics.find(outer_accessor, rid)) {
+            auto& inner_map = outer_accessor->second;
 
-        if (validRoomTypes.count(roomType)) {
-            std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"uid\":\"" + ws->getUserData()->uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+            /** Remove user from the inner map */
+            {
+                tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+                if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
+                    inner_map.erase(inner_accessor);
+                }
+            }
 
-            /** Publish message to all workers */
-            for (auto& w : ::workers) {
-                w.loop_->defer([&w, rid, result]() {
-                    w.app_->publish(rid, result, uWS::OpCode::TEXT, true);
-                });
+            size = inner_map.size();
+
+            /** Remove room if empty */
+            if (size == 0) {
+                /** Remove room from topics */
+                ThreadSafe::topics.erase(outer_accessor);
+
+                /** Remove disabled and banned connections */
+                for (auto& map : {&ThreadSafe::disabledConnections, &ThreadSafe::bannedConnections}) {
+                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor map_accessor;
+
+                    if (map->find(map_accessor, rid)) {
+                        map->erase(map_accessor);
+                    }
+                }
             }
         }
+    } else {
+        auto it = SingleThreaded::topics.find(rid);
+        if (it != SingleThreaded::topics.end()) {
+            auto& inner_set = it->second; 
 
-        if(webhookStatus[Webhooks::ON_UNSUBSCRIBE] == 1){
+            /** Removing the entry from the inner set */
+            inner_set.erase(ws->getUserData()->uid);
+
+            /** Store the new size */
+            size = inner_set.size();
+
+            /** Remove the room if empty */
+            if (size == 0) {
+                SingleThreaded::topics.erase(it); 
+
+                /** Remove disabled and banned connections */
+                for (auto& map : {&SingleThreaded::disabledConnections, &SingleThreaded::bannedConnections}) {
+                    map->erase(rid);
+                }
+            }
+        }
+    }
+    
+    /** Unsubscribe on the correct thread */
+    auto unsubscribe_fn = [ws, rid]() { ws->unsubscribe(rid); };
+    if (worker->thread_->get_id() != std::this_thread::get_id()) {
+        worker->loop_->defer(unsubscribe_fn);
+    } else {
+        unsubscribe_fn();
+    }
+
+    static const std::unordered_set<uint8_t> validCacheRoomTypes = {
+        static_cast<uint8_t>(Rooms::PUBLIC_CACHE),
+        static_cast<uint8_t>(Rooms::PRIVATE_CACHE),
+        static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE),
+        static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+    };
+
+    /** delete the key value pair if it's a cache room */
+    if(size == 0 && validCacheRoomTypes.count(roomType)){
+        delete_worker(rid);
+    }
+
+    /** Broadcast disconnect message */
+    static const std::unordered_set<uint8_t> validRoomTypes = {
+        static_cast<uint8_t>(Rooms::PUBLIC_STATE),
+        static_cast<uint8_t>(Rooms::PRIVATE_STATE),
+        static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE),
+        static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+    };
+
+    if (validRoomTypes.count(roomType)) {
+        std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"uid\":\"" + ws->getUserData()->uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+
+        /** Publish message to all workers */
+        for (auto& w : ::workers) {
+            w.loop_->defer([&w, rid, result]() {
+                w.app_->publish(rid, result, uWS::OpCode::TEXT, true);
+            });
+        }
+    }
+
+    if(webhookStatus[Webhooks::ON_UNSUBSCRIBE] == 1){
+        std::ostringstream payload;
+        payload << "{\"event\":\"ON_UNSUBSCRIBE\", "
+        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
+        << "\"rid\":\"" << rid << "\", "
+        << "\"connections_in_room\":\"" << size << "\"}";    
+
+        std::string body = payload.str(); 
+        
+        sendHTTPSPOSTRequestFireAndForget(
+            UserData::getInstance().webHookBaseUrl,
+            UserData::getInstance().webhookPath,
+            body,
+            {}
+        );
+    }
+
+    /** room vacate webhooks */
+    if (size == 0) {
+        if(webhookStatus[Webhooks::ON_ROOM_VACATED] == 1){
             std::ostringstream payload;
-            payload << "{\"event\":\"ON_UNSUBSCRIBE\", "
+            payload << "{\"event\":\"ON_ROOM_VACATED\", "
             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-            << "\"rid\":\"" << rid << "\", "
-            << "\"connections_in_room\":\"" << size << "\"}";    
+            << "\"rid\":\"" << rid << "\"}";             
 
             std::string body = payload.str(); 
             
@@ -1567,25 +1626,6 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
                 body,
                 {}
             );
-        }
-
-        /** room vacate webhooks */
-        if (size == 0) {
-            if(webhookStatus[Webhooks::ON_ROOM_VACATED] == 1){
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_VACATED\", "
-                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                << "\"rid\":\"" << rid << "\"}";             
-
-                std::string body = payload.str(); 
-                
-                sendHTTPSPOSTRequestFireAndForget(
-                    UserData::getInstance().webHookBaseUrl,
-                    UserData::getInstance().webhookPath,
-                    body,
-                    {}
-                );
-            }
         }
     }
 }
@@ -1950,6 +1990,9 @@ void worker_t::work()
 
         std::string userId = ws->getUserData()->uid;
 
+        /** Increment global connection counter */
+        globalConnectionCounter.fetch_add(1, std::memory_order_relaxed);
+
         if(isMultiThread) {
             /** Thread-safe insertion into connections map */
             tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
@@ -1965,9 +2008,6 @@ void worker_t::work()
             /** Single-threaded insertion into connections map */
             SingleThreaded::connections.emplace(userId, std::move(data));
         }
-
-        /** Increment global connection counter */
-        globalConnectionCounter.fetch_add(1, std::memory_order_relaxed);
 
         if(isMultiThread) {
             /** Thread-safe insertion into uid map */
@@ -2235,6 +2275,9 @@ void worker_t::work()
     .close = [this](auto *ws, int /* code */, std::string_view /* message */) {
         std::string userId = ws->getUserData()->uid;
 
+        /** Decrement global connection counter */
+        globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
+
         /** Thread-safe removal from connections map */
         if(isMultiThread) {
             tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
@@ -2244,9 +2287,6 @@ void worker_t::work()
         } else {
             SingleThreaded::connections.erase(userId);
         }
-
-        /** Decrement global connection counter */
-        globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
 
         /** Thread-safe removal from uid map */
         if(isMultiThread) {
@@ -2262,9 +2302,6 @@ void worker_t::work()
         ws->unsubscribe(userId);
         ws->unsubscribe(BROADCAST);
 
-        /** vector to store all the RID */
-        std::vector<std::pair<std::string, uint8_t>> rids;
-
         /** fetching all the RID for the UID and removing the UID from the map */
         if (isMultiThread) {
             /** Acquire access to the outer concurrent map */
@@ -2274,17 +2311,12 @@ void worker_t::work()
             if (ThreadSafe::uidToRoomMapping.find(outer_accessor, userId)) {
                 /** Reference to the inner map (rooms associated with the user ID) */
                 auto& inner_map = outer_accessor->second;
-        
-                /** Reserve space in `rids` to minimize memory reallocations */
-                rids.reserve(rids.size() + inner_map.size());
-        
+                
                 /** Iterate through the inner map and move data into `rids` */
                 for (auto& entry : inner_map) {
-                    rids.emplace_back(std::move(entry.first), entry.second);
+                    /** Close connection */
+                    closeConnection(ws, this, entry.first, userId, entry.second);
                 }
-        
-                /** Remove the user ID entry from the outer map */
-                ThreadSafe::uidToRoomMapping.erase(outer_accessor);
             }
         } else {
             /** Check if the user ID exists in the map */
@@ -2293,19 +2325,12 @@ void worker_t::work()
                 /** Move the inner set directly */
                 auto& inner_set = it->second;
 
-                /** Reserve space in `rids` before inserting */
-                rids.reserve(rids.size() + inner_set.size());
-
-                /** Move elements from the set to `rids` */
-                rids.insert(rids.end(), std::make_move_iterator(inner_set.begin()), std::make_move_iterator(inner_set.end()));
-
-                /** Erase the user ID entry from the outer map */
-                SingleThreaded::uidToRoomMapping.erase(it);
+                /** Move each element from the set to `rids` using a loop */
+                for (auto& entry : inner_set) {
+                    closeConnection(ws, this, entry.first, userId, entry.second);
+                }
             }
         }        
-
-        /** Close connection */
-        closeConnection(ws, this, rids);
     }
     }).get("/api/v1/metrics", [](auto *res, auto *req) {
         /** fetch all the server metrics */
@@ -3531,50 +3556,8 @@ void worker_t::work()
                 }
             }
 
-            /** removing the RID from the uid_to_rid mapping */
-            if(isMultiThread) {
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-                if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
-                    auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
-
-                    /** Remove the rid from the inner map */
-                    {
-                        tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                        if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
-                            inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
-                        }
-                    }
-
-                    /** Check if the inner map is now empty */
-                    if (inner_uid_to_rid_map.empty()) {
-
-                        /** Check if the uid map has the value false, make it true (orphan) else ignore */
-                        tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-                        if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
-                            if (!uid_outer_accessor->second) { 
-                                uid_outer_accessor->second = true;
-                            }
-                        }
-
-                        ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
-                    }
-                }
-            } else {
-                if (auto it = SingleThreaded::uidToRoomMapping.find(uid); it != SingleThreaded::uidToRoomMapping.end()) {
-                    it->second.erase(rid);
-                    
-                    if (it->second.empty()) {
-                        SingleThreaded::uidToRoomMapping.erase(it);
-                
-                        if (auto uidIt = SingleThreaded::uid.find(uid); uidIt != SingleThreaded::uid.end() && !uidIt->second) {
-                            uidIt->second = true;
-                        }
-                    }
-                }                        
-            }
-
             /** cloding the connection for the given rid */
-            closeConnection(ws, worker, {{rid, roomType}});
+            closeConnection(ws, worker, rid, uid, roomType);
 
             if(!*isAborted){
                 totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
