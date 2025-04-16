@@ -1847,8 +1847,7 @@ void worker_t::work()
   app_ = std::make_shared<uWS::SSLApp>(
     uWS::SSLApp({
         .key_file_name = keyFilePath.c_str(),
-        .cert_file_name = certFileName.c_str(),
-        .ssl_prefer_low_memory_usage = false,
+        .cert_file_name = certFileName.c_str()
     })
   );
 
