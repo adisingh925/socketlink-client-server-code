@@ -646,7 +646,10 @@ namespace SingleThreaded {
 
 /** map to store enabled webhooks and features (no need to make it thread safe) */
 std::unordered_map<Webhooks, int> webhookStatus;
+std::shared_mutex webhookMutex; /** shared mutex for webhook */
+
 std::unordered_map<Features, int> featureStatus;
+std::shared_mutex featureMutex; /** shared mutex for features */
 
 /* uWebSocket workers. */
 std::vector<worker_t> workers;
@@ -946,10 +949,9 @@ std::string read_worker(const std::string& room_id) {
 /** Function to populate the global unordered_map with active (1) and inactive (0) statuses */
 void populateWebhookStatus(uint8_t bitmask)
 {
-    /** Clear the existing statuses in case this is called multiple times */
-    webhookStatus.clear();
+    std::unique_lock<std::shared_mutex> lock(webhookMutex); /** Exclusive lock for writing */
 
-    for (uint8_t i = 0; i < 6; ++i)  // Use uint8_t to match bitmask size
+    for (uint8_t i = 0; i < 6; ++i)  /** Use uint8_t to match bitmask size */ 
     {
         /** Compute the webhook flag for this index */
         Webhooks webhook = static_cast<Webhooks>(static_cast<uint8_t>(1) << i);
@@ -959,17 +961,34 @@ void populateWebhookStatus(uint8_t bitmask)
     }
 }
 
+/** read webhooks, thread safe */
+int getWebhookStatus(Webhooks webhook)
+{
+    std::shared_lock<std::shared_mutex> lock(webhookMutex); /** Shared lock for reading */ 
+
+    auto it = webhookStatus.find(webhook);
+    return (it != webhookStatus.end()) ? it->second : 0; /** Return 0 if not found */ 
+}
+
 /** Populate the enabled features */
 void populateFeatureStatus(uint32_t bitmask)
 {
-    /** Clear the existing statuses in case this is called multiple times */
-    featureStatus.clear();
+    std::unique_lock<std::shared_mutex> lock(featureMutex);  /** Exclusive lock for writing */ 
 
     for (uint32_t i = 0; i < 1; ++i)
     {
         Features feature = static_cast<Features>(1 << i);
         featureStatus[feature] = (bitmask & (1 << i)) ? 1 : 0;
     }
+}
+
+/** read features, thread safe */
+int getFeatureStatus(Features feature)
+{
+    std::shared_lock<std::shared_mutex> lock(featureMutex);  /** Shared lock for reading */ 
+
+    auto it = featureStatus.find(feature);
+    return (it != featureStatus.end()) ? it->second : 0;
 }
 
 /**
@@ -1402,11 +1421,13 @@ int populateUserData(std::string data) {
 
     if (is_sql_integration_enabled == 1)
     {
+        std::unique_lock<std::shared_mutex> lock(featureMutex);
         featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
         needsDBUpdate = 1;
     }
     else if (is_sql_integration_enabled == -1)
     {
+        std::unique_lock<std::shared_mutex> lock(featureMutex);
         featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 0;
         needsDBUpdate = -1;
     }
@@ -1453,7 +1474,6 @@ void fetchAndPopulateUserData() {
 
 /** unsubscribe from the current room and do some cleanup */
 void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType, bool isClosed = false) {
-
     if(isClosed == false){
         /** removing the RID from the uid_to_rid mapping */
         if(isMultiThread) {
@@ -1595,7 +1615,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
         }
     }
 
-    if(webhookStatus[Webhooks::ON_UNSUBSCRIBE] == 1){
+    if(getWebhookStatus(Webhooks::ON_UNSUBSCRIBE) == 1){
         std::ostringstream payload;
         payload << "{\"event\":\"ON_UNSUBSCRIBE\", "
         << "\"uid\":\"" << ws->getUserData()->uid << "\", "
@@ -1614,7 +1634,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
 
     /** room vacate webhooks */
     if (size == 0) {
-        if(webhookStatus[Webhooks::ON_ROOM_VACATED] == 1){
+        if(getWebhookStatus(Webhooks::ON_ROOM_VACATED) == 1){
             std::ostringstream payload;
             payload << "{\"event\":\"ON_ROOM_VACATED\", "
             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
@@ -1771,7 +1791,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
 
         /** fire connection open webhook */
-        if(webhookStatus[Webhooks::ON_SUBSCRIBE] == 1){
+        if(getWebhookStatus(Webhooks::ON_SUBSCRIBE) == 1){
             std::ostringstream payload;
             payload << "{\"event\":\"ON_SUBSCRIBE\", "
             << "\"uid\":\"" << ws->getUserData()->uid << "\", "
@@ -1790,7 +1810,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         /** Room ocuupied webhooks */
         if(size == 1){            
-            if(webhookStatus[Webhooks::ON_ROOM_OCCUPIED] == 1){
+            if(getWebhookStatus(Webhooks::ON_ROOM_OCCUPIED) == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_ROOM_OCCUPIED\", "
                 << "\"uid\":\"" << ws->getUserData()->uid << "\", "
@@ -2228,12 +2248,12 @@ void worker_t::work()
                         totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
 
                         /** SQL integration works in cache channels only */
-                        if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 1){
+                        if(getFeatureStatus(Features::ENABLE_MYSQL_INTEGRATION) == 1){
                             db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid, rid);
                         }
                     }
 
-                    if(webhookStatus[Webhooks::ON_MESSAGE] == 1) {
+                    if(getWebhookStatus(Webhooks::ON_MESSAGE) == 1) {
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_MESSAGE\", "
                                 << "\"uid\":\"" << uid << "\", "
@@ -2559,8 +2579,7 @@ void worker_t::work()
                 return;
             }
 
-            if(featureStatus[Features::ENABLE_MYSQL_INTEGRATION] == 0){
-    
+            if(getFeatureStatus(Features::ENABLE_MYSQL_INTEGRATION) == 0){
                 if(!*isAborted){
                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -3084,7 +3103,7 @@ void worker_t::work()
             || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
             || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
             ){
-                if(webhookStatus[Webhooks::ON_VERIFICATION_REQUEST] == 1){
+                if(getWebhookStatus(Webhooks::ON_VERIFICATION_REQUEST) == 1){
                     std::ostringstream payload;
 
                     payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
