@@ -782,7 +782,7 @@ void init_env() {
         exit(-1);
     }
 
-    if (mdb_env_open(env, "./messages_db", MDB_WRITEMAP | MDB_NOTLS, 0664) != 0) {
+    if (mdb_env_open(env, "./messages_db", MDB_WRITEMAP, 0664) != 0) {
         std::cerr << "Failed to open LMDB environment.\n";
         exit(-1);
     }
@@ -796,7 +796,7 @@ void write_worker(const std::string& room_id, const std::string& message_content
     MDB_dbi dbi;
 
     /** Batch to store messages before writing them to the database */
-    static std::vector<std::tuple<std::string, std::string>> batch;
+    thread_local std::vector<std::tuple<std::string, std::string>> batch;
 
     /** Collect writes in a batch if commit is not immediately required */
     if (!needsCommit) {
@@ -846,7 +846,7 @@ void write_worker(const std::string& room_id, const std::string& message_content
         if (mdb_txn_commit(txn) != 0) {
             std::cerr << "Failed to commit transaction.\n";
             batch.clear();  // Clear batch on error
-            // mdb_txn_abort(txn);
+            mdb_txn_abort(txn);
             return;
         }
 
