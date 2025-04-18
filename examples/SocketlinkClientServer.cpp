@@ -3157,7 +3157,7 @@ void worker_t::work()
                 } 
             }
 
-            openConnection(ws, worker, rid, roomType);
+            // openConnection(ws, worker, rid, roomType);
 
             if(!*isAborted){
                 totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
