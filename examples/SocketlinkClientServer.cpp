@@ -1743,12 +1743,12 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 }
 
                 /** Check if the uid map has the value true, make it false else ignore */
-                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-                if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
-                    if (uid_outer_accessor->second) { 
-                        uid_outer_accessor->second = false;
-                    }
-                }
+                // tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                // if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
+                //     if (uid_outer_accessor->second) { 
+                //         uid_outer_accessor->second = false;
+                //     }
+                // }
             }
         } else {
             /** Try inserting the UID into uidToRoomMapping */
