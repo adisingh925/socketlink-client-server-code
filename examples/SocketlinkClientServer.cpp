@@ -2878,18 +2878,18 @@ void worker_t::work()
             }
         }
 	}).get("/api/v1/users/subscribe/room/:rid", [this](auto *res, auto *req) {
-        auto isAborted = std::make_shared<bool>(false);
+        std::atomic<bool> isAborted = false;
         std::string rid = std::string(req->getParameter("rid"));  /** Extract the room ID from the request */
         std::string uid = std::string(req->getHeader("uid"));  /** Extract the user ID from the request */
 
-        res->onAborted([isAborted]() { 
-            *isAborted = true; 
+        res->onAborted([&isAborted]() { 
+            isAborted.store(true); 
             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
         });
 
         try {
             if (req->getHeader("api-key") != UserData::getInstance().clientApiKey) {
-                if(!*isAborted){
+                if(!isAborted.load()){
                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                     res->cork([res]() {
@@ -2913,7 +2913,7 @@ void worker_t::work()
                 if (!ThreadSafe::connections.find(accessor, uid)) {
 
                     /** Ensure the response is sent only once */
-                    if(!*isAborted){
+                    if(!isAborted.load()){
                         /** Atomically increment the rejected request counter */
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2933,7 +2933,7 @@ void worker_t::work()
                 worker = accessor->second.worker;
             } else {
                 if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
-                    if(!*isAborted){
+                    if(!isAborted.load()){
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                         res->cork([res]() {
@@ -2952,7 +2952,7 @@ void worker_t::work()
             /** Validate the room ID (rid) length constraints */
             if (rid.empty() || rid.size() > 160) {
                 /** Ensure the response is sent only once */
-                if(!*isAborted){
+                if(!isAborted.load()){
                     /** Atomically increment the rejected request counter */
                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -3004,7 +3004,7 @@ void worker_t::work()
             }
             else
             {                        
-                if(!*isAborted){
+                if(!isAborted.load()){
                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                     res->cork([res]() {
@@ -3032,7 +3032,7 @@ void worker_t::work()
                         
 
                         /** Ensure response is not sent multiple times */
-                        if(!*isAborted){
+                        if(!isAborted.load()){
                             /** Increment rejected request counter in a relaxed memory order for efficiency */
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -3051,7 +3051,7 @@ void worker_t::work()
                 auto it = SingleThreaded::uidToRoomMapping.find(uid);
                 if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) != it->second.end()) {
 
-                    if(!*isAborted){
+                    if(!isAborted.load()){
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                         res->cork([res]() {
@@ -3070,7 +3070,7 @@ void worker_t::work()
                 
                 if (ThreadSafe::bannedConnections.find(outer_accessor, rid) && outer_accessor->second.count(uid)) {
 
-                    if(!*isAborted){
+                    if(!isAborted.load()){
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                         res->cork([res]() {
@@ -3086,7 +3086,7 @@ void worker_t::work()
                 auto it = SingleThreaded::bannedConnections.find(rid);
                 if (it != SingleThreaded::bannedConnections.end() && it->second.count(uid)) {
 
-                    if(!*isAborted){
+                    if(!isAborted.load()){
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                         res->cork([res]() {
@@ -3130,7 +3130,7 @@ void worker_t::work()
                     );
 
                     if(status != 200){                                
-                        if(!*isAborted){
+                        if(!isAborted.load()){
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                             res->cork([res]() {
@@ -3143,7 +3143,7 @@ void worker_t::work()
                         return;
                     }
                 } else {    
-                    if(!*isAborted){
+                    if(!isAborted.load()){
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                         res->cork([res]() {
@@ -3159,7 +3159,7 @@ void worker_t::work()
 
             // openConnection(ws, worker, rid, roomType);
 
-            if(!*isAborted){
+            if(!isAborted.load()){
                 totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                 res->cork([res]() {
@@ -3169,7 +3169,7 @@ void worker_t::work()
                 });
             }
         } catch (std::exception &e) {
-            if(!*isAborted){
+            if(!isAborted.load()){
                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                 res->cork([res]() {
