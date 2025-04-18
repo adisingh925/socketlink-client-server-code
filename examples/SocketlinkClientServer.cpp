@@ -1671,52 +1671,52 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         int size = 0;
 
-        // if(isMultiThread) {
-        //     /** Acquire an accessor for the outer map (topics) */
-        //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
+        if(isMultiThread) {
+            /** Acquire an accessor for the outer map (topics) */
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
         
-        //     /** Check if the room ID (rid) already exists in the topics map */
-        //     if (ThreadSafe::topics.find(topicsAccessor, rid)) {
-        //         /** Room exists, retrieve the inner map containing user IDs */
-        //         auto& innerMap = topicsAccessor->second;
+            /** Check if the room ID (rid) already exists in the topics map */
+            if (ThreadSafe::topics.find(topicsAccessor, rid)) {
+                /** Room exists, retrieve the inner map containing user IDs */
+                auto& innerMap = topicsAccessor->second;
         
-        //         /** Acquire an accessor for the inner map */
-        //         tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
+                /** Acquire an accessor for the inner map */
+                tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
                 
-        //         /** Insert UID into the inner map if not already present */
-        //         if (innerMap.insert(innerAccessor, uid)) {
-        //             /** Set the value to true, indicating user presence */
-        //             innerAccessor->second = true;
-        //         }
+                /** Insert UID into the inner map if not already present */
+                if (innerMap.insert(innerAccessor, uid)) {
+                    /** Set the value to true, indicating user presence */
+                    innerAccessor->second = true;
+                }
         
-        //         /** Update the size variable with the total number of users in the room */
-        //         size = innerMap.size();
-        //     } else {
-        //         /** Room does not exist, create a new inner map */
-        //         tbb::concurrent_hash_map<std::string, bool> newInnerMap;
+                /** Update the size variable with the total number of users in the room */
+                size = innerMap.size();
+            } else {
+                /** Room does not exist, create a new inner map */
+                tbb::concurrent_hash_map<std::string, bool> newInnerMap;
         
-        //         /** Insert the UID into the newly created inner map */
-        //         newInnerMap.emplace(uid, true);
+                /** Insert the UID into the newly created inner map */
+                newInnerMap.emplace(uid, true);
         
-        //         /** Insert the new inner map into the topics map */
-        //         if (ThreadSafe::topics.insert(topicsAccessor, rid)) {
-        //             /** Move the newly created inner map to avoid unnecessary copies */
-        //             topicsAccessor->second = std::move(newInnerMap);
-        //         }
+                /** Insert the new inner map into the topics map */
+                if (ThreadSafe::topics.insert(topicsAccessor, rid)) {
+                    /** Move the newly created inner map to avoid unnecessary copies */
+                    topicsAccessor->second = std::move(newInnerMap);
+                }
         
-        //         /** Since this is a new room, its size is 1 (only the current user) */
-        //         size = 1;
-        //     }
-        // } else {
-        //     auto [it, inserted] = SingleThreaded::topics.try_emplace(rid);
-        //     auto& inner_set = it->second; 
+                /** Since this is a new room, its size is 1 (only the current user) */
+                size = 1;
+            }
+        } else {
+            auto [it, inserted] = SingleThreaded::topics.try_emplace(rid);
+            auto& inner_set = it->second; 
 
-        //     /** Insert the user into the inner set */
-        //     inner_set.emplace(std::move(uid));
+            /** Insert the user into the inner set */
+            inner_set.emplace(std::move(uid));
 
-        //     /** Store the new size */
-        //     size = inner_set.size();
-        // }   
+            /** Store the new size */
+            size = inner_set.size();
+        }   
 
         // if(isMultiThread) {
         //     /** Acquire an accessor for the outer map */ 
