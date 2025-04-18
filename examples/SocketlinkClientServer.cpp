@@ -847,6 +847,7 @@ void write_worker(const std::string& room_id, const std::string& message_content
             std::cerr << "Failed to commit transaction.\n";
             batch.clear();  // Clear batch on error
             mdb_txn_abort(txn);
+            return;
         }
 
         /** Clear the batch after a successful commit */
