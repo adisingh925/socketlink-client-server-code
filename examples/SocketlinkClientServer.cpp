@@ -1659,13 +1659,14 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         const auto& uid = ws->getUserData()->uid;
         auto currentThreadId = std::this_thread::get_id();
         auto workerThreadId = worker->thread_->get_id();
+        auto wsCopy = ws;
 
         /** Subscribe to the room in the same thread where the ws instance was created */
         if (workerThreadId == currentThreadId) {
             ws->subscribe(rid);
         } else {
-            worker->loop_->defer([ws, rid]() {
-                ws->subscribe(rid);
+            worker->loop_->defer([wsCopy, rid]() {
+                wsCopy->subscribe(rid);
             });
         }
 
@@ -1767,8 +1768,8 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         if (workerThreadId == currentThreadId) {
             ws->send(selfMessage, uWS::OpCode::TEXT, true);
         } else {
-            worker->loop_->defer([ws, selfMessage]() {
-                ws->send(selfMessage, uWS::OpCode::TEXT, true);
+            worker->loop_->defer([wsCopy, selfMessage]() {
+                wsCopy->send(selfMessage, uWS::OpCode::TEXT, true);
             });
         }
 
@@ -1784,7 +1785,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if (workerThreadId == w.thread_->get_id()) {
                     ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
                 } else {
-                    w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
+                    w.loop_->defer([&w, rid, broadcastMessage]() {
                         w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
                     });
                 }
