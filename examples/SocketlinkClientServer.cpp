@@ -1671,83 +1671,95 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         int size = 0;
 
-        if (isMultiThread) {
+        if(isMultiThread) {
+            /** Acquire an accessor for the outer map (topics) */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
         
+            /** Check if the room ID (rid) already exists in the topics map */
             if (ThreadSafe::topics.find(topicsAccessor, rid)) {
+                /** Room exists, retrieve the inner map containing user IDs */
                 auto& innerMap = topicsAccessor->second;
-                innerMap.emplace(uid, true);
+        
+                /** Acquire an accessor for the inner map */
+                tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
+                
+                /** Insert UID into the inner map if not already present */
+                if (innerMap.insert(innerAccessor, uid)) {
+                    /** Set the value to true, indicating user presence */
+                    innerAccessor->second = true;
+                }
+        
+                /** Update the size variable with the total number of users in the room */
                 size = innerMap.size();
             } else {
+                /** Room does not exist, create a new inner map */
                 tbb::concurrent_hash_map<std::string, bool> newInnerMap;
+        
+                /** Insert the UID into the newly created inner map */
                 newInnerMap.emplace(uid, true);
+        
+                /** Insert the new inner map into the topics map */
                 if (ThreadSafe::topics.insert(topicsAccessor, rid)) {
+                    /** Move the newly created inner map to avoid unnecessary copies */
                     topicsAccessor->second = std::move(newInnerMap);
                 }
+        
+                /** Since this is a new room, its size is 1 (only the current user) */
                 size = 1;
             }
         } else {
             auto [it, inserted] = SingleThreaded::topics.try_emplace(rid);
-            auto& inner_set = it->second;
-            inner_set.emplace(std::move(uid));
-            size = inner_set.size();
-        }           
+            auto& inner_set = it->second; 
 
-        if (isMultiThread) {
-            /** Flag to track if the UID mapping was inserted */
-            bool inserted = false;
+            /** Insert the user into the inner set */
+            inner_set.emplace(std::move(uid));
+
+            /** Store the new size */
+            size = inner_set.size();
+        }   
+
+        if(isMultiThread) {
+            /** Acquire an accessor for the outer map */ 
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
         
-            /** Attempt to find the UID in the mapping */
-            {
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outerAccessor;
-        
-                /** If UID exists, copy and update the inner map */
-                if (ThreadSafe::uidToRoomMapping.find(outerAccessor, uid)) {
-                    auto innerMap = outerAccessor->second;
-                    innerMap.emplace(rid, roomType);
-        
-                    /** Release the accessor before reinserting */
-                    outerAccessor.release();
-        
-                    /** Reinsert the updated inner map */
-                    if (ThreadSafe::uidToRoomMapping.insert(outerAccessor, uid)) {
-                        outerAccessor->second = std::move(innerMap);
-                        inserted = true;
-                    }
+            /** Check if UID exists */ 
+            if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                auto& innerMap = uid_to_rid_outer_accessor->second;
+                
+                /** Acquire an accessor for the inner map */ 
+                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+
+                if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
+                    /** Only set roomType if insertion was successful */ 
+                    uid_to_rid_inner_accessor->second = roomType;
                 }
-            }
-        
-            /** If UID not found, create and insert a new inner map */
-            if (!inserted) {
+            } else {
+                /** Create and insert a new inner map directly */ 
                 tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
                 newInnerMap.emplace(rid, roomType);
         
-                /** Insert the new inner map into uidToRoomMapping */
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor insertAccessor;
-                if (ThreadSafe::uidToRoomMapping.insert(insertAccessor, uid)) {
-                    insertAccessor->second = std::move(newInnerMap);
+                if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
+                    uid_to_rid_outer_accessor->second = std::move(newInnerMap);
                 }
-            }
-        
-            /** Check and update UID's boolean flag if needed */
-            {
-                tbb::concurrent_hash_map<std::string, bool>::accessor uidOuterAccessor;
-                if (ThreadSafe::uid.find(uidOuterAccessor, uid)) {
-                    if (uidOuterAccessor->second) {
-                        uidOuterAccessor->second = false;
+
+                /** Check if the uid map has the value true, make it false else ignore */
+                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
+                    if (uid_outer_accessor->second) { 
+                        uid_outer_accessor->second = false;
                     }
                 }
             }
         } else {
-            /** Insert UID and its mapping into single-threaded map */
+            /** Try inserting the UID into uidToRoomMapping */
             auto result = SingleThreaded::uidToRoomMapping.try_emplace(uid);
-            result.first->second.emplace(rid, roomType);
-        
-            /** Check and update UID flag in single-threaded map */
+            result.first->second.emplace(rid, roomType); 
+
+            /** Check if UID exists in SingleThreaded::uid and update if needed */
             if (auto it2 = SingleThreaded::uid.find(uid); it2 != SingleThreaded::uid.end() && it2->second) {
                 it2->second = false;
             }
-        }          
+        }   
     
         /** Send a message to self */
         std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
@@ -2231,7 +2243,7 @@ void worker_t::work()
                     || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
                     ) {
                         /** write the data in the local storage */
-                        write_worker(rid, std::string(message));
+                        // write_worker(rid, std::string(message));
 
                         /** update the LMDB write count */
                         totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
@@ -4948,7 +4960,7 @@ void watchCertChanges(std::string_view domain) {
 int main() {
     /** Fetch and populated data before starting the threads */
     fetchAndPopulateUserData();
-    init_env();
+    // init_env();
 
     if(UserData::getInstance().subdomain.empty()){
         /** something is wrong with the data, restarting the server */
