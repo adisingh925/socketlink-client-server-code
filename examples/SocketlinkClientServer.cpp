@@ -1718,66 +1718,48 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             size = inner_set.size();
         }   
 
-        // if(isMultiThread) {
-        //     log("going inside the multi-threaded block");
-
-        //     /** Acquire an accessor for the outer map */ 
-        //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+        if(isMultiThread) {
+            /** Acquire an accessor for the outer map */ 
+            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
         
-        //     /** Check if UID exists */ 
-        //     if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-        //         log("uid exists");
-
-        //         auto& innerMap = uid_to_rid_outer_accessor->second;
+            /** Check if UID exists */ 
+            if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+                auto& innerMap = uid_to_rid_outer_accessor->second;
                 
-        //         /** Acquire an accessor for the inner map */ 
-        //         tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                /** Acquire an accessor for the inner map */ 
+                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
 
-        //         if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
-        //             log("inserting the rid");
-
-        //             /** Only set roomType if insertion was successful */ 
-        //             uid_to_rid_inner_accessor->second = roomType;
-        //         }
-        //     } else {
-        //         log("uid does not exist");
-
-        //         /** Create and insert a new inner map directly */ 
-        //         tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
-        //         newInnerMap.emplace(rid, roomType);
+                if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
+                    /** Only set roomType if insertion was successful */ 
+                    uid_to_rid_inner_accessor->second = roomType;
+                }
+            } else {
+                /** Create and insert a new inner map directly */ 
+                tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
+                newInnerMap.emplace(rid, roomType);
         
-        //         if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
-        //             log("inserting the uid");
+                if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
+                    uid_to_rid_outer_accessor->second = std::move(newInnerMap);
+                }
 
-        //             uid_to_rid_outer_accessor->second = std::move(newInnerMap);
-        //         }
+                /** Check if the uid map has the value true, make it false else ignore */
+                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
+                    if (uid_outer_accessor->second) { 
+                        uid_outer_accessor->second = false;
+                    }
+                }
+            }
+        } else {
+            /** Try inserting the UID into uidToRoomMapping */
+            auto result = SingleThreaded::uidToRoomMapping.try_emplace(uid);
+            result.first->second.emplace(rid, roomType); 
 
-        //         /** Check if the uid map has the value true, make it false else ignore */
-        //         tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-        //         if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
-        //             log("uid exists in uid map");
-
-        //             if (uid_outer_accessor->second) { 
-        //                 log("setting the uid to false");
-
-        //                 uid_outer_accessor->second = false;
-        //             }
-        //         } else {
-        //             log("uid does not exist in uid map");
-        //         }
-        //     }
-        // } else {
-        //     /** Try inserting the UID into uidToRoomMapping */
-        //     auto result = SingleThreaded::uidToRoomMapping.try_emplace(uid);
-        //     result.first->second.emplace(rid, roomType); 
-
-        //     /** Check if UID exists in SingleThreaded::uid and update if needed */
-        //     if (auto it2 = SingleThreaded::uid.find(uid); it2 != SingleThreaded::uid.end() && it2->second) {
-        //         it2->second = false;
-        //     }
-        // }   
-
-        log("finished inserting the uid and rid");
+            /** Check if UID exists in SingleThreaded::uid and update if needed */
+            if (auto it2 = SingleThreaded::uid.find(uid); it2 != SingleThreaded::uid.end() && it2->second) {
+                it2->second = false;
+            }
+        }   
     
         /** Send a message to self */
         std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
@@ -1789,8 +1771,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 ws->send(selfMessage, uWS::OpCode::TEXT, true);
             });
         }
-
-        log("finished sending the self message");
 
         /** Broadcast the message to others if the room is public/private */
         if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
@@ -1804,8 +1784,8 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 if (workerThreadId == w.thread_->get_id()) {
                     ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
                 } else {
-                    w.loop_->defer([app = w.app_, rid, broadcastMessage]() {
-                        app->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                    w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
+                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
                     });
                 }
             }
@@ -1847,8 +1827,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 );
             }
         }
-
-        log("finished sending the webhooks");
     }
 }
 
