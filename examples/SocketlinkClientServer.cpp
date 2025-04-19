@@ -1779,20 +1779,17 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
             roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
             roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
-
-            auto sharedBroadcast = std::make_shared<std::string>(
-                "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + 
-                "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}"
-            );
+            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        ) {
+            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
             for (auto& w : ::workers) {
                 if (workerThreadId == w.thread_->get_id()) {
-                    ws->publish(rid, *sharedBroadcast, uWS::OpCode::TEXT, true);
+                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
                 } else {
-                    w.loop_->defer([app = w.app_, sharedBroadcast, rid]() {
-                        app->publish(rid, *sharedBroadcast, uWS::OpCode::TEXT, true);
-                    });
+                    // w.loop_->defer([w, rid, broadcastMessage]() {
+                    //     w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                    // });
                 }
             }
         }
