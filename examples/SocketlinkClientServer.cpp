@@ -1773,23 +1773,23 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
 
         /** Broadcast the message to others if the room is public/private */
-        if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
-            roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-        ) {
-            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+        // if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
+        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
+        //     roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
+        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        // ) {
+        //     std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
-            for (auto& w : ::workers) {
-                if (workerThreadId == w.thread_->get_id()) {
-                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                } else {
-                    w.loop_->defer([&w, rid, broadcastMessage]() {
-                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                    });
-                }
-            }
-        }
+        //     for (auto& w : ::workers) {
+        //         if (workerThreadId == w.thread_->get_id()) {
+        //             ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+        //         } else {
+        //             w.loop_->defer([&w, rid, broadcastMessage]() {
+        //                 w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+        //             });
+        //         }
+        //     }
+        // }
 
         /** fire connection open webhook */
         if(getWebhookStatus(Webhooks::ON_SUBSCRIBE) == 1){
