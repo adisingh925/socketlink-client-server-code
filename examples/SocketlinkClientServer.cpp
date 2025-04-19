@@ -1776,23 +1776,35 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
 
         /** Broadcast the message to others if the room is public/private */
-        // if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
-        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
-        //     roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-        // ) {
-        //     std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+        if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
+            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
+            roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
+            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        ) {
+            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
-        //     for (auto& w : ::workers) {
-        //         if (workerThreadId == w.thread_->get_id()) {
-        //             ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-        //         } else {
-        //             w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
-        //                 w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-        //             });
-        //         }
-        //     }
-        // }
+            std::for_each(::workers.begin(), ::workers.end(), [rid, broadcastMessage, workerThreadId, ws](worker_t &w) {
+                /** Check if the current thread ID matches the worker's thread ID */ 
+                if (workerThreadId != w.thread_->get_id()) {
+                    /** Defer the message publishing to the worker's loop */ 
+                    w.loop_->defer([&w, broadcastMessage, rid, ws]() {
+                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                    });
+                } else {
+                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                }
+            });
+
+            /* for (auto& w : ::workers) {
+                if (workerThreadId == w.thread_->get_id()) {
+                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                } else {
+                    w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
+                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                    });
+                }
+            } */
+        }
 
         /** fire connection open webhook */
         if(getWebhookStatus(Webhooks::ON_SUBSCRIBE) == 1){
@@ -2128,21 +2140,6 @@ void worker_t::work()
                         return;
                     }
 
-                    int64_t timeInMs = 0;
-                    if (auto timeField = parsedData["timestamp"]; timeField.error() == simdjson::SUCCESS) {
-                        timeInMs = timeField.get_int64().value();  
-
-                        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()
-                        ).count();
-      
-                        int64_t latency = now - timeInMs;
-
-                        update_ema(latency);
-                    } else {
-                        /** no error */
-                    }
-
                     uint8_t roomType = 255;
 
                     if(isMultiThread) {
@@ -2245,7 +2242,7 @@ void worker_t::work()
                     || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
                     ) {
                         /** write the data in the local storage */
-                        // write_worker(rid, std::string(message));
+                        write_worker(rid, std::string(message));
 
                         /** update the LMDB write count */
                         totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
