@@ -2213,15 +2213,18 @@ void worker_t::work()
                     std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
                     ws->publish(rid, data, opCode, true);
 
-                    std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
-                        /** Check if the current thread ID matches the worker's thread ID */ 
-                        if (std::this_thread::get_id() != w.thread_->get_id()) {
-                            /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w, data, opCode, rid]() {
-                                w.app_->publish(rid, data, opCode, true);
+                    auto currentThreadId = std::this_thread::get_id();
+
+                    for (auto& w : ::workers) {
+                        if (w.thread_->get_id() != currentThreadId) {
+                            /** Copy required data to avoid dangling references */ 
+                            std::string copiedData = data;
+                            std::string copiedRid = rid;
+                            w.loop_->defer([app = w.app_, copiedData, opCode, copiedRid]() {
+                                app->publish(copiedRid, copiedData, opCode, true);
                             });
                         }
-                    });
+                    }
 
                     unsigned int subscribers = app_->numSubscribers(rid);
                     globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
