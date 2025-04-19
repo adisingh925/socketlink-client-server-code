@@ -1762,15 +1762,15 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         // }   
     
         /** Send a message to self */
-        // std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+        std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
-        // if (workerThreadId == currentThreadId) {
-        //     ws->send(selfMessage, uWS::OpCode::TEXT, true);
-        // } else {
-        //     worker->loop_->defer([ws, selfMessage]() {
-        //         ws->send(selfMessage, uWS::OpCode::TEXT, true);
-        //     });
-        // }
+        if (workerThreadId == currentThreadId) {
+            ws->send(selfMessage, uWS::OpCode::TEXT, true);
+        } else {
+            worker->loop_->defer([ws, selfMessage]() {
+                ws->send(selfMessage, uWS::OpCode::TEXT, true);
+            });
+        }
 
         /** Broadcast the message to others if the room is public/private */
         // if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
