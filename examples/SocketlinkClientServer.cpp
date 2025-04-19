@@ -1776,23 +1776,23 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
 
         /** Broadcast the message to others if the room is public/private */
-        if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
-            roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-        ) {
-            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+        // if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
+        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
+        //     roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
+        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        // ) {
+        //     std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
-            for (auto& w : ::workers) {
-                if (workerThreadId == w.thread_->get_id()) {
-                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                } else {
-                    w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
-                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                    });
-                }
-            }
-        }
+        //     for (auto& w : ::workers) {
+        //         if (workerThreadId == w.thread_->get_id()) {
+        //             ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+        //         } else {
+        //             w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
+        //                 w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+        //             });
+        //         }
+        //     }
+        // }
 
         /** fire connection open webhook */
         if(getWebhookStatus(Webhooks::ON_SUBSCRIBE) == 1){
@@ -2155,6 +2155,7 @@ void worker_t::work()
                     
                             /** Check if the room (RID) exists under the given UID */
                             tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
+                            
                             if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                 /** Room not found under this UID, send response and return */
                                 ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
@@ -2246,7 +2247,7 @@ void worker_t::work()
                     || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
                     ) {
                         /** write the data in the local storage */
-                        write_worker(rid, std::string(message));
+                        // write_worker(rid, std::string(message));
 
                         /** update the LMDB write count */
                         totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
