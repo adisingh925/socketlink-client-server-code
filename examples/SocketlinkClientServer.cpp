@@ -1720,7 +1720,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         if(isMultiThread) {
             log("going inside the multi-threaded block");
-            
+
             /** Acquire an accessor for the outer map */ 
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
         
@@ -1776,6 +1776,8 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 it2->second = false;
             }
         }   
+
+        log("finished inserting the uid and rid");
     
         /** Send a message to self */
         std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
