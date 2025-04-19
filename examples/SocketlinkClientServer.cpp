@@ -1723,17 +1723,17 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
         
             /** Check if UID exists */ 
-            if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                // auto& innerMap = uid_to_rid_outer_accessor->second;
+            // if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+            //     // auto& innerMap = uid_to_rid_outer_accessor->second;
                 
-                // /** Acquire an accessor for the inner map */ 
-                // tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+            //     // /** Acquire an accessor for the inner map */ 
+            //     // tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
 
-                // if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
-                //     /** Only set roomType if insertion was successful */ 
-                //     uid_to_rid_inner_accessor->second = roomType;
-                // }
-            } else {
+            //     // if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
+            //     //     /** Only set roomType if insertion was successful */ 
+            //     //     uid_to_rid_inner_accessor->second = roomType;
+            //     // }
+            // } else {
                 if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
                     /** Create the new inner map */ 
                     tbb::concurrent_hash_map<std::string, uint8_t>& innerMap = uid_to_rid_outer_accessor->second;
@@ -1752,7 +1752,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 //         uid_outer_accessor->second = false;
                 //     }
                 // }
-            }
+            // }
         } else {
             /** Try inserting the UID into uidToRoomMapping */
             auto result = SingleThreaded::uidToRoomMapping.try_emplace(uid);
