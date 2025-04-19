@@ -1776,23 +1776,27 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
 
         /** Broadcast the message to others if the room is public/private */
-        // if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
-        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
-        //     roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-        // ) {
-        //     std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+        if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
+            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
+            roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
+            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        ) {
+            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
-        //     for (auto& w : ::workers) {
-        //         if (workerThreadId == w.thread_->get_id()) {
-        //             ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-        //         } else {
-        //             w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
-        //                 w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-        //             });
-        //         }
-        //     }
-        // }
+            for (auto& w : ::workers) {
+                auto appCopy = w.app_;
+                std::string messageCopy = broadcastMessage;
+                std::string ridCopy = rid;
+
+                if (workerThreadId == w.thread_->get_id()) {
+                    ws->publish(rid, messageCopy, uWS::OpCode::TEXT, true);
+                } else {
+                    w.loop_->defer([appCopy, ridCopy, messageCopy]() {
+                        appCopy->publish(ridCopy, messageCopy, uWS::OpCode::TEXT, true);
+                    });
+                }
+            }
+        }
 
         /** fire connection open webhook */
         if(getWebhookStatus(Webhooks::ON_SUBSCRIBE) == 1){
@@ -1861,7 +1865,7 @@ void worker_t::work()
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
-    .compression = uWS::SHARED_COMPRESSOR,
+    .compression = uWS::DISABLED,
     .maxPayloadLength = UserData::getInstance().msgSizeAllowedInBytes,
     .idleTimeout = UserData::getInstance().idleTimeoutInSeconds,
     .maxBackpressure = UserData::getInstance().maxBackpressureInBytes,
@@ -2128,21 +2132,6 @@ void worker_t::work()
                         return;
                     }
 
-                    int64_t timeInMs = 0;
-                    if (auto timeField = parsedData["timestamp"]; timeField.error() == simdjson::SUCCESS) {
-                        timeInMs = timeField.get_int64().value();  
-
-                        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()
-                        ).count();
-      
-                        int64_t latency = now - timeInMs;
-
-                        update_ema(latency);
-                    } else {
-                        /** no error */
-                    }
-
                     uint8_t roomType = 255;
 
                     if(isMultiThread) {
@@ -2155,7 +2144,7 @@ void worker_t::work()
                     
                             /** Check if the room (RID) exists under the given UID */
                             tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
-
+                            
                             if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                 /** Room not found under this UID, send response and return */
                                 ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
@@ -2221,8 +2210,6 @@ void worker_t::work()
                     }
 
                     /** publishing message */
-                    /* ws->publish(rid, message, opCode, true); */
-                    
                     std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
                     ws->publish(rid, data, opCode, true);
 
