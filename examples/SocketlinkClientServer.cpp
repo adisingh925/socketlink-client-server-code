@@ -2243,7 +2243,7 @@ void worker_t::work()
                     || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
                     ) {
                         /** write the data in the local storage */
-                        // write_worker(rid, std::string(message));
+                        write_worker(rid, std::string(message));
 
                         /** update the LMDB write count */
                         totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
@@ -3017,52 +3017,52 @@ void worker_t::work()
                 return;
             }
 
-            if(isMultiThread) {
-                /** checking if the user is already subscribed to the given room */
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
+            // if(isMultiThread) {
+            //     /** checking if the user is already subscribed to the given room */
+            //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
 
-                /** Check if the UID is present in the mapping */
-                if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                    /** Retrieve reference to the inner map containing room IDs */
-                    auto& inner_map = uid_to_rid_outer_accessor->second;
+            //     /** Check if the UID is present in the mapping */
+            //     if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+            //         /** Retrieve reference to the inner map containing room IDs */
+            //         auto& inner_map = uid_to_rid_outer_accessor->second;
 
-                    /** Check if the room is already associated with the UID */
-                    tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
-                    if (inner_map.find(inner_accessor, rid)) {
+            //         /** Check if the room is already associated with the UID */
+            //         tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
+            //         if (inner_map.find(inner_accessor, rid)) {
                         
 
-                        /** Ensure response is not sent multiple times */
-                        if(!isAborted.load()){
-                            /** Increment rejected request counter in a relaxed memory order for efficiency */
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+            //             /** Ensure response is not sent multiple times */
+            //             if(!isAborted.load()){
+            //                 /** Increment rejected request counter in a relaxed memory order for efficiency */
+            //                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                            /** Use `cork` to optimize response writing */
-                            res->cork([res]() {
-                                res->writeStatus("400 Bad Request"); /** Set HTTP status */
-                                res->writeHeader("Content-Type", "application/json"); /** Set response type */
-                                res->end(R"({"message": "You are already subscribed to the given room!"})"); /** Send error message */
-                            });
-                        }
+            //                 /** Use `cork` to optimize response writing */
+            //                 res->cork([res]() {
+            //                     res->writeStatus("400 Bad Request"); /** Set HTTP status */
+            //                     res->writeHeader("Content-Type", "application/json"); /** Set response type */
+            //                     res->end(R"({"message": "You are already subscribed to the given room!"})"); /** Send error message */
+            //                 });
+            //             }
 
-                        return; /** Exit early since user is already subscribed */
-                    }
-                }
-            } else {
-                auto it = SingleThreaded::uidToRoomMapping.find(uid);
-                if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) != it->second.end()) {
+            //             return; /** Exit early since user is already subscribed */
+            //         }
+            //     }
+            // } else {
+            //     auto it = SingleThreaded::uidToRoomMapping.find(uid);
+            //     if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) != it->second.end()) {
 
-                    if(!isAborted.load()){
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+            //         if(!isAborted.load()){
+            //             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "You are already subscribed to the given room!"})");
-                        });
-                    }
-                    return;
-                }
-            }
+            //             res->cork([res]() {
+            //                 res->writeStatus("400 Bad Request");
+            //                 res->writeHeader("Content-Type", "application/json");
+            //                 res->end(R"({"message": "You are already subscribed to the given room!"})");
+            //             });
+            //         }
+            //         return;
+            //     }
+            // }
             
             /** checking if the user is banned from the given room */
             if(isMultiThread) {
@@ -4960,7 +4960,7 @@ void watchCertChanges(std::string_view domain) {
 int main() {
     /** Fetch and populated data before starting the threads */
     fetchAndPopulateUserData();
-    // init_env();
+    init_env();
 
     if(UserData::getInstance().subdomain.empty()){
         /** something is wrong with the data, restarting the server */
