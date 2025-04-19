@@ -2242,7 +2242,7 @@ void worker_t::work()
                     || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
                     ) {
                         /** write the data in the local storage */
-                        write_worker(rid, std::string(message));
+                        /* write_worker(rid, std::string(message)); */
 
                         /** update the LMDB write count */
                         totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
