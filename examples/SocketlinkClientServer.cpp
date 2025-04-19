@@ -2221,6 +2221,8 @@ void worker_t::work()
                     std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
                     ws->publish(rid, data, opCode, true);
 
+                    log("opcode : " + std::to_string(opCode));
+
                     std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
                         /** Check if the current thread ID matches the worker's thread ID */ 
                         if (std::this_thread::get_id() != w.thread_->get_id()) {
