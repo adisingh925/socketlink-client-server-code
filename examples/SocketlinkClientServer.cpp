@@ -1861,7 +1861,7 @@ void worker_t::work()
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
-    .compression = uWS::DISABLED,
+    .compression = uWS::SHARED_COMPRESSOR,
     .maxPayloadLength = UserData::getInstance().msgSizeAllowedInBytes,
     .idleTimeout = UserData::getInstance().idleTimeoutInSeconds,
     .maxBackpressure = UserData::getInstance().maxBackpressureInBytes,
@@ -2155,7 +2155,7 @@ void worker_t::work()
                     
                             /** Check if the room (RID) exists under the given UID */
                             tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
-                            
+
                             if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                 /** Room not found under this UID, send response and return */
                                 ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
