@@ -1776,27 +1776,23 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         }
 
         /** Broadcast the message to others if the room is public/private */
-        if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
-            roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-        ) {
-            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+        // if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
+        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
+        //     roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
+        //     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        // ) {
+        //     std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
-            for (auto& w : ::workers) {
-                auto appCopy = w.app_;
-                std::string messageCopy = broadcastMessage;
-                std::string ridCopy = rid;
-
-                if (workerThreadId == w.thread_->get_id()) {
-                    ws->publish(rid, messageCopy, uWS::OpCode::TEXT, true);
-                } else {
-                    w.loop_->defer([appCopy, ridCopy, messageCopy]() {
-                        appCopy->publish(ridCopy, messageCopy, uWS::OpCode::TEXT, true);
-                    });
-                }
-            }
-        }
+        //     for (auto& w : ::workers) {
+        //         if (workerThreadId == w.thread_->get_id()) {
+        //             ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+        //         } else {
+        //             w.loop_->defer([&w, &ws, rid, broadcastMessage]() {
+        //                 w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+        //             });
+        //         }
+        //     }
+        // }
 
         /** fire connection open webhook */
         if(getWebhookStatus(Webhooks::ON_SUBSCRIBE) == 1){
@@ -2132,6 +2128,21 @@ void worker_t::work()
                         return;
                     }
 
+                    int64_t timeInMs = 0;
+                    if (auto timeField = parsedData["timestamp"]; timeField.error() == simdjson::SUCCESS) {
+                        timeInMs = timeField.get_int64().value();  
+
+                        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()
+                        ).count();
+      
+                        int64_t latency = now - timeInMs;
+
+                        update_ema(latency);
+                    } else {
+                        /** no error */
+                    }
+
                     uint8_t roomType = 255;
 
                     if(isMultiThread) {
@@ -2213,18 +2224,15 @@ void worker_t::work()
                     std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
                     ws->publish(rid, data, opCode, true);
 
-                    auto currentThreadId = std::this_thread::get_id();
-
-                    for (auto& w : ::workers) {
-                        if (w.thread_->get_id() != currentThreadId) {
-                            /** Copy required data to avoid dangling references */ 
-                            std::string copiedData = data;
-                            std::string copiedRid = rid;
-                            w.loop_->defer([app = w.app_, copiedData, opCode, copiedRid]() {
-                                app->publish(copiedRid, copiedData, opCode, true);
+                    std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
+                        /** Check if the current thread ID matches the worker's thread ID */ 
+                        if (std::this_thread::get_id() != w.thread_->get_id()) {
+                            /** Defer the message publishing to the worker's loop */ 
+                            w.loop_->defer([&w, data, opCode, rid]() {
+                                w.app_->publish(rid, data, opCode, true);
                             });
                         }
-                    }
+                    });
 
                     unsigned int subscribers = app_->numSubscribers(rid);
                     globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
