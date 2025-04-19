@@ -1734,15 +1734,15 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                     uid_to_rid_inner_accessor->second = roomType;
                 }
             } else {
-                /** Create and insert a new inner map directly */ 
-                tbb::concurrent_hash_map<std::string, uint8_t> newInnerMap;
-                newInnerMap.emplace(rid, roomType);
-        
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outer_accessor;
-                bool inserted = ThreadSafe::uidToRoomMapping.insert(outer_accessor, uid);
-
-                if (inserted) {
-                    outer_accessor->second = std::move(newInnerMap);
+                if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
+                    /** Create the new inner map */ 
+                    tbb::concurrent_hash_map<std::string, uint8_t>& innerMap = uid_to_rid_outer_accessor->second;
+            
+                    /** Insert the rid with its roomType */ 
+                    tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                    if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
+                        uid_to_rid_inner_accessor->second = roomType;
+                    }
                 }
 
                 /** Check if the uid map has the value true, make it false else ignore */
