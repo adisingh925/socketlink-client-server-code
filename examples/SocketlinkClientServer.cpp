@@ -1779,28 +1779,19 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
             roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
             roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-        ) {
-            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
 
-            // std::for_each(::workers.begin(), ::workers.end(), [rid, broadcastMessage, workerThreadId, ws](worker_t &w) {
-            //     /** Check if the current thread ID matches the worker's thread ID */ 
-            //     if (workerThreadId != w.thread_->get_id()) {
-            //         /** Defer the message publishing to the worker's loop */ 
-            //         w.loop_->defer([&w, broadcastMessage, rid, ws]() {
-            //             w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-            //         });
-            //     } else {
-            //         ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-            //     }
-            // });
+            auto sharedBroadcast = std::make_shared<std::string>(
+                "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + 
+                "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}"
+            );
 
             for (auto& w : ::workers) {
                 if (workerThreadId == w.thread_->get_id()) {
-                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                    ws->publish(rid, *sharedBroadcast, uWS::OpCode::TEXT, true);
                 } else {
-                    w.loop_->defer([&w, rid, broadcastMessage]() {
-                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                    w.loop_->defer([app = w.app_, sharedBroadcast, rid]() {
+                        app->publish(rid, *sharedBroadcast, uWS::OpCode::TEXT, true);
                     });
                 }
             }
@@ -2220,8 +2211,6 @@ void worker_t::work()
                     /** publishing message */
                     std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
                     ws->publish(rid, data, opCode, true);
-
-                    log("opcode : " + std::to_string(opCode));
 
                     std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
                         /** Check if the current thread ID matches the worker's thread ID */ 
