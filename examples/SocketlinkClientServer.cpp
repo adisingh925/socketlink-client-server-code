@@ -1783,16 +1783,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         ) {
             std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
-            /* for (auto& w : ::workers) {
-                if (workerThreadId == w.thread_->get_id()) {
-                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                } else {
-                    w.loop_->defer([w, rid, broadcastMessage]() {
-                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                    });
-                }
-            } */
-
             if(workerThreadId == currentThreadId) {
                 ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
             }
