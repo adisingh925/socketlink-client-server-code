@@ -1718,51 +1718,51 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             size = inner_set.size();
         }   
 
-        if(isMultiThread) {
-            /** Acquire an accessor for the outer map */ 
-            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+        // if(isMultiThread) {
+        //     /** Acquire an accessor for the outer map */ 
+        //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
         
-            /** Check if UID exists */ 
-            if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                auto& innerMap = uid_to_rid_outer_accessor->second;
+        //     /** Check if UID exists */ 
+        //     if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+        //         auto& innerMap = uid_to_rid_outer_accessor->second;
                 
-                /** Acquire an accessor for the inner map */ 
-                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+        //         /** Acquire an accessor for the inner map */ 
+        //         tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
 
-                if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
-                    /** Only set roomType if insertion was successful */ 
-                    uid_to_rid_inner_accessor->second = roomType;
-                }
-            } else {
-                if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
-                    /** Create the new inner map */ 
-                    tbb::concurrent_hash_map<std::string, uint8_t>& innerMap = uid_to_rid_outer_accessor->second;
+        //         if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
+        //             /** Only set roomType if insertion was successful */ 
+        //             uid_to_rid_inner_accessor->second = roomType;
+        //         }
+        //     } else {
+        //         if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
+        //             /** Create the new inner map */ 
+        //             tbb::concurrent_hash_map<std::string, uint8_t>& innerMap = uid_to_rid_outer_accessor->second;
             
-                    /** Insert the rid with its roomType */ 
-                    tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                    if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
-                        uid_to_rid_inner_accessor->second = roomType;
-                    }
-                }
+        //             /** Insert the rid with its roomType */ 
+        //             tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+        //             if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
+        //                 uid_to_rid_inner_accessor->second = roomType;
+        //             }
+        //         }
 
-                /** Check if the uid map has the value true, make it false else ignore */
-                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-                if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
-                    if (uid_outer_accessor->second) { 
-                        uid_outer_accessor->second = false;
-                    }
-                }
-            }
-        } else {
-            /** Try inserting the UID into uidToRoomMapping */
-            auto result = SingleThreaded::uidToRoomMapping.try_emplace(uid);
-            result.first->second.emplace(rid, roomType); 
+        //         /** Check if the uid map has the value true, make it false else ignore */
+        //         tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+        //         if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
+        //             if (uid_outer_accessor->second) { 
+        //                 uid_outer_accessor->second = false;
+        //             }
+        //         }
+        //     }
+        // } else {
+        //     /** Try inserting the UID into uidToRoomMapping */
+        //     auto result = SingleThreaded::uidToRoomMapping.try_emplace(uid);
+        //     result.first->second.emplace(rid, roomType); 
 
-            /** Check if UID exists in SingleThreaded::uid and update if needed */
-            if (auto it2 = SingleThreaded::uid.find(uid); it2 != SingleThreaded::uid.end() && it2->second) {
-                it2->second = false;
-            }
-        }   
+        //     /** Check if UID exists in SingleThreaded::uid and update if needed */
+        //     if (auto it2 = SingleThreaded::uid.find(uid); it2 != SingleThreaded::uid.end() && it2->second) {
+        //         it2->second = false;
+        //     }
+        // }   
     
         /** Send a message to self */
         std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
@@ -3533,40 +3533,39 @@ void worker_t::work()
             }
 
             /** checking if the user is already unsubscribed to the given room */
-            if(isMultiThread) {
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+            if (isMultiThread) {
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
+                
                 if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                    auto& inner_map = uid_to_rid_outer_accessor->second;
-
-                    /** check if the room is already present under the UID */
-                    {
-                        tbb::concurrent_hash_map<std::string, uint8_t>::accessor inner_accessor;
-                        if (!inner_map.find(inner_accessor, rid)) {
-
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("400 Bad Request");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "You are not subscribed to the given room!"})");
-                                });
-                            }
-
-                            return;
-                        } 
-                    }
+                    const auto& inner_map = uid_to_rid_outer_accessor->second;
+            
+                    /** Check if the room is already present under the UID */
+                    tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
+                    if (!inner_map.find(inner_accessor, rid)) {
+            
+                        if (!*isAborted) {
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+            
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "You are not subscribed to the given room!"})");
+                            });
+                        }
+            
+                        return;
+                    }                    
                 } else {
-                    if(!*isAborted){
+                    if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
+            
                         res->cork([res]() {
                             res->writeStatus("400 Bad Request");
                             res->writeHeader("Content-Type", "application/json");
                             res->end(R"({"message": "You are not subscribed to the given room!"})");
                         });
                     }
-
+            
                     return;
                 }
             } else {
