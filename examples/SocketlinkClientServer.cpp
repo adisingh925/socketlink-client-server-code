@@ -1783,19 +1783,19 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         ) {
             std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
-            std::for_each(::workers.begin(), ::workers.end(), [rid, broadcastMessage, workerThreadId, ws](worker_t &w) {
-                /** Check if the current thread ID matches the worker's thread ID */ 
-                if (workerThreadId != w.thread_->get_id()) {
-                    /** Defer the message publishing to the worker's loop */ 
-                    w.loop_->defer([&w, broadcastMessage, rid, ws]() {
-                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                    });
-                } else {
-                    ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                }
-            });
+            // std::for_each(::workers.begin(), ::workers.end(), [rid, broadcastMessage, workerThreadId, ws](worker_t &w) {
+            //     /** Check if the current thread ID matches the worker's thread ID */ 
+            //     if (workerThreadId != w.thread_->get_id()) {
+            //         /** Defer the message publishing to the worker's loop */ 
+            //         w.loop_->defer([&w, broadcastMessage, rid, ws]() {
+            //             w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+            //         });
+            //     } else {
+            //         ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+            //     }
+            // });
 
-            /* for (auto& w : ::workers) {
+            for (auto& w : ::workers) {
                 if (workerThreadId == w.thread_->get_id()) {
                     ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
                 } else {
@@ -1803,7 +1803,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                         w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
                     });
                 }
-            } */
+            }
         }
 
         /** fire connection open webhook */
