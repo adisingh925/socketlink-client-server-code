@@ -2059,216 +2059,216 @@ void worker_t::work()
         ws->subscribe(BROADCAST);
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
-        auto& userData = *ws->getUserData();
-        auto uid = userData.uid;
+        // auto& userData = *ws->getUserData();
+        // auto uid = userData.uid;
 
-        /** checking if the message sending is disabled globally at the server level */
-        if(isMessagingDisabled.load(std::memory_order_relaxed)) {
-            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-            return;
-        }
+        // /** checking if the message sending is disabled globally at the server level */
+        // if(isMessagingDisabled.load(std::memory_order_relaxed)) {
+        //     ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+        //     return;
+        // }
 
-        /** checking if the messaging is disabled for a particular connection at global level */
-        if(isMultiThread) {
-            /** Check if messaging is disabled for the user */
-            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
-            tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
+        // /** checking if the messaging is disabled for a particular connection at global level */
+        // if(isMultiThread) {
+        //     /** Check if messaging is disabled for the user */
+        //     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
+        //     tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
 
-            if (ThreadSafe::disabledConnections.find(outer_accessor, "global") &&
-                outer_accessor->second.find(inner_accessor, uid)) {
+        //     if (ThreadSafe::disabledConnections.find(outer_accessor, "global") &&
+        //         outer_accessor->second.find(inner_accessor, uid)) {
                 
-                ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+        //         ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
 
-                return;
-            }
-        } else {
-            /** Check if messaging is disabled for the user */
-            auto globalIt = SingleThreaded::disabledConnections.find("global");
+        //         return;
+        //     }
+        // } else {
+        //     /** Check if messaging is disabled for the user */
+        //     auto globalIt = SingleThreaded::disabledConnections.find("global");
 
-            if (globalIt != SingleThreaded::disabledConnections.end() && 
-                globalIt->second.find(uid) != globalIt->second.end()) {
+        //     if (globalIt != SingleThreaded::disabledConnections.end() && 
+        //         globalIt->second.find(uid) != globalIt->second.end()) {
 
-                /** Send a message to the user indicating messaging is disabled */
-                ws->send(std::string_view{"{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}"}, uWS::OpCode::TEXT, true);
+        //         /** Send a message to the user indicating messaging is disabled */
+        //         ws->send(std::string_view{"{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}"}, uWS::OpCode::TEXT, true);
 
-                return;
-            }
-        }
+        //         return;
+        //     }
+        // }
 
-        if (ws->getUserData()->sendingAllowed)
-        {
-            if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes) {
-                ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                droppedMessages.fetch_add(1, std::memory_order_relaxed);
-                ws->getUserData()->sendingAllowed = false;
-            } else {
-                try {
-                    /** Parsing the message */
-                    // simdjson::padded_string jsonMessage(message.data(), message.size());
-                    // simdjson::ondemand::parser parser;
-                    // simdjson::ondemand::document parsedData;
+        // if (ws->getUserData()->sendingAllowed)
+        // {
+        //     if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes) {
+        //         ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+        //         droppedMessages.fetch_add(1, std::memory_order_relaxed);
+        //         ws->getUserData()->sendingAllowed = false;
+        //     } else {
+        //         try {
+        //             /** Parsing the message */
+        //             // simdjson::padded_string jsonMessage(message.data(), message.size());
+        //             // simdjson::ondemand::parser parser;
+        //             // simdjson::ondemand::document parsedData;
 
-                    // /** Parse JSON and handle potential errors */
-                    // if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
-                    //     ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                    //     return;
-                    // }
+        //             // /** Parse JSON and handle potential errors */
+        //             // if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
+        //             //     ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+        //             //     return;
+        //             // }
 
-                    /** Retrieve 'rid' */
-                    std::string rid = "pub-state-cache-test-0";
-                    // if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
-                    //     rid = std::string(ridField.get_string().value());  
-                    // } else {
-                    //     ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                    //     return;
-                    // }
+        //             /** Retrieve 'rid' */
+        //             std::string rid = "pub-state-cache-test-0";
+        //             // if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
+        //             //     rid = std::string(ridField.get_string().value());  
+        //             // } else {
+        //             //     ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+        //             //     return;
+        //             // }
 
-                    /** Retrieve 'message' */
-                    std::string message = "test";
-                    // if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
-                    //     message = std::string(msgField.get_string().value());  
-                    // } else {
-                    //     ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                    //     return;
-                    // }
+        //             /** Retrieve 'message' */
+        //             std::string message = "test";
+        //             // if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
+        //             //     message = std::string(msgField.get_string().value());  
+        //             // } else {
+        //             //     ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+        //             //     return;
+        //             // }
 
-                    uint8_t roomType = 255;
+        //             uint8_t roomType = 255;
 
-                    if(isMultiThread) {
-                        /** Acquire an accessor for the outer map (UID to Room Mapping) */
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
+        //             if(isMultiThread) {
+        //                 /** Acquire an accessor for the outer map (UID to Room Mapping) */
+        //                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
                     
-                        /** Check if the user (UID) exists in the mapping */
-                        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                            auto& inner_map = uid_to_rid_outer_accessor->second;
+        //                 /** Check if the user (UID) exists in the mapping */
+        //                 if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
+        //                     auto& inner_map = uid_to_rid_outer_accessor->second;
                     
-                            /** Check if the room (RID) exists under the given UID */
-                            tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
+        //                     /** Check if the room (RID) exists under the given UID */
+        //                     tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
                             
-                            if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
-                                /** Room not found under this UID, send response and return */
-                                ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
-                                return;
-                            }
+        //                     if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
+        //                         /** Room not found under this UID, send response and return */
+        //                         ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+        //                         return;
+        //                     }
                     
-                            /** Room exists, retrieve the room type */
-                            roomType = uid_to_rid_inner_accessor->second;
-                        } else {
-                            /** No subscription found for the given UID, send response */
-                            ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
-                            return;
-                        }
-                    } else {
-                        /** 
-                         * Attempt to find the user (UID) in the room mapping.
-                         * The map stores room associations for each user.
-                         */
-                        if (auto uidIt = SingleThreaded::uidToRoomMapping.find(uid); uidIt != SingleThreaded::uidToRoomMapping.end()) {
-                            /** Get reference to the inner map containing room associations for this UID */
-                            auto& roomMap = uidIt->second;
+        //                     /** Room exists, retrieve the room type */
+        //                     roomType = uid_to_rid_inner_accessor->second;
+        //                 } else {
+        //                     /** No subscription found for the given UID, send response */
+        //                     ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+        //                     return;
+        //                 }
+        //             } else {
+        //                 /** 
+        //                  * Attempt to find the user (UID) in the room mapping.
+        //                  * The map stores room associations for each user.
+        //                  */
+        //                 if (auto uidIt = SingleThreaded::uidToRoomMapping.find(uid); uidIt != SingleThreaded::uidToRoomMapping.end()) {
+        //                     /** Get reference to the inner map containing room associations for this UID */
+        //                     auto& roomMap = uidIt->second;
 
-                            /** Attempt to find the given room (RID) */
-                            if (auto ridIt = roomMap.find(rid); ridIt != roomMap.end()) {
-                                /** Room exists, retrieve the room type */
-                                roomType = ridIt->second;
-                            } else {
-                                /** Room not found under this UID, send error response */
-                                ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
-                                return;
-                            }
-                        } else {
-                            /** No subscription found for the given UID, send error response */
-                            ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
-                            return;
-                        }
-                    }                     
+        //                     /** Attempt to find the given room (RID) */
+        //                     if (auto ridIt = roomMap.find(rid); ridIt != roomMap.end()) {
+        //                         /** Room exists, retrieve the room type */
+        //                         roomType = ridIt->second;
+        //                     } else {
+        //                         /** Room not found under this UID, send error response */
+        //                         ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+        //                         return;
+        //                     }
+        //                 } else {
+        //                     /** No subscription found for the given UID, send error response */
+        //                     ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+        //                     return;
+        //                 }
+        //             }                     
 
-                    if(isMultiThread) {
-                        /** Check if messaging is disabled for the user */
-                        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
-                        tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
+        //             if(isMultiThread) {
+        //                 /** Check if messaging is disabled for the user */
+        //                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
+        //                 tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
 
-                        if((ThreadSafe::disabledConnections.find(outer_accessor, rid) &&
-                            outer_accessor->second.find(inner_accessor, uid))) {
-                            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                            return;
-                        } 
-                    } else {
-                        /** 
-                         * Check if messaging is disabled for the user.
-                         * The outer map stores disabled rooms (RID), and the inner set stores users (UIDs) who are blocked.
-                         */
-                        auto ridIt = SingleThreaded::disabledConnections.find(rid);
+        //                 if((ThreadSafe::disabledConnections.find(outer_accessor, rid) &&
+        //                     outer_accessor->second.find(inner_accessor, uid))) {
+        //                     ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+        //                     return;
+        //                 } 
+        //             } else {
+        //                 /** 
+        //                  * Check if messaging is disabled for the user.
+        //                  * The outer map stores disabled rooms (RID), and the inner set stores users (UIDs) who are blocked.
+        //                  */
+        //                 auto ridIt = SingleThreaded::disabledConnections.find(rid);
 
-                        /** If the room exists in the disabledConnections map */
-                        if (ridIt != SingleThreaded::disabledConnections.end() && 
-                            ridIt->second.find(uid) != ridIt->second.end()) {
-                            /** Messaging is disabled, send error response */
-                            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                            return;
-                        }
-                    }
+        //                 /** If the room exists in the disabledConnections map */
+        //                 if (ridIt != SingleThreaded::disabledConnections.end() && 
+        //                     ridIt->second.find(uid) != ridIt->second.end()) {
+        //                     /** Messaging is disabled, send error response */
+        //                     ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+        //                     return;
+        //                 }
+        //             }
 
-                    /** publishing message */
-                    std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
-                    // ws->publish(rid, data, opCode, true);
+        //             /** publishing message */
+        //             std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
+        //             // ws->publish(rid, data, opCode, true);
 
-                    // std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
-                    //     /** Check if the current thread ID matches the worker's thread ID */ 
-                    //     if (std::this_thread::get_id() != w.thread_->get_id()) {
-                    //         /** Defer the message publishing to the worker's loop */ 
-                    //         w.loop_->defer([&w, data, opCode, rid]() {
-                    //             w.app_->publish(rid, data, opCode, true);
-                    //         });
-                    //     }
-                    // });
+        //             // std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
+        //             //     /** Check if the current thread ID matches the worker's thread ID */ 
+        //             //     if (std::this_thread::get_id() != w.thread_->get_id()) {
+        //             //         /** Defer the message publishing to the worker's loop */ 
+        //             //         w.loop_->defer([&w, data, opCode, rid]() {
+        //             //             w.app_->publish(rid, data, opCode, true);
+        //             //         });
+        //             //     }
+        //             // });
 
-                    unsigned int subscribers = app_->numSubscribers(rid);
-                    globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
-                    totalPayloadSent.fetch_add(static_cast<unsigned long long>(data.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
+        //             unsigned int subscribers = app_->numSubscribers(rid);
+        //             globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
+        //             totalPayloadSent.fetch_add(static_cast<unsigned long long>(data.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
 
-                    /** Writing data to the LMDB */
-                    if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
-                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
-                    || roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
-                    || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
-                    ) {
-                        /** write the data in the local storage */
-                        /* write_worker(rid, std::string(message)); */
+        //             /** Writing data to the LMDB */
+        //             if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
+        //             || roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) 
+        //             || roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) 
+        //             || roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
+        //             ) {
+        //                 /** write the data in the local storage */
+        //                 /* write_worker(rid, std::string(message)); */
 
-                        /** update the LMDB write count */
-                        totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
+        //                 /** update the LMDB write count */
+        //                 totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
 
-                        /** SQL integration works in cache channels only */
-                        if(getFeatureStatus(Features::ENABLE_MYSQL_INTEGRATION) == 1){
-                            db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid, rid);
-                        }
-                    }
+        //                 /** SQL integration works in cache channels only */
+        //                 if(getFeatureStatus(Features::ENABLE_MYSQL_INTEGRATION) == 1){
+        //                     db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid, rid);
+        //                 }
+        //             }
 
-                    if(getWebhookStatus(Webhooks::ON_MESSAGE) == 1) {
-                        std::ostringstream payload;
-                        payload << "{\"event\":\"ON_MESSAGE\", "
-                                << "\"uid\":\"" << uid << "\", "
-                                << "\"rid\":\"" << rid << "\", "
-                                << "\"message\":\"" << message << "\"}"; 
+        //             if(getWebhookStatus(Webhooks::ON_MESSAGE) == 1) {
+        //                 std::ostringstream payload;
+        //                 payload << "{\"event\":\"ON_MESSAGE\", "
+        //                         << "\"uid\":\"" << uid << "\", "
+        //                         << "\"rid\":\"" << rid << "\", "
+        //                         << "\"message\":\"" << message << "\"}"; 
 
-                        std::string body = payload.str(); 
+        //                 std::string body = payload.str(); 
                         
-                        sendHTTPSPOSTRequestFireAndForget(
-                            UserData::getInstance().webHookBaseUrl,
-                            UserData::getInstance().webhookPath,
-                            body,
-                            {}
-                        );
-                    }
-                } catch (const simdjson::simdjson_error &e) {
-                    ws->send("{\"data\":\"INVALID_JSON\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                }
-            }
-        } else {
-            ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-            droppedMessages.fetch_add(1, std::memory_order_relaxed);
-        }    
+        //                 sendHTTPSPOSTRequestFireAndForget(
+        //                     UserData::getInstance().webHookBaseUrl,
+        //                     UserData::getInstance().webhookPath,
+        //                     body,
+        //                     {}
+        //                 );
+        //             }
+        //         } catch (const simdjson::simdjson_error &e) {
+        //             ws->send("{\"data\":\"INVALID_JSON\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+        //         }
+        //     }
+        // } else {
+        //     ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+        //     droppedMessages.fetch_add(1, std::memory_order_relaxed);
+        // }    
     },
     .dropped = [](auto *ws, std::string_view message, uWS::OpCode /*opCode*/) {
         droppedMessages.fetch_add(1, std::memory_order_relaxed);
