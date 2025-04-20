@@ -1837,14 +1837,14 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
     }
 }
 
-void parseMessageToStrings(std::string_view input, std::string& roomId, std::string& message) {
+void parseMessage(std::string_view input, std::string_view& roomId, std::string_view& message) {
     size_t pos = input.find("##");
     if (pos != std::string_view::npos) {
-        roomId = std::string(input.substr(0, pos));        
-        message = std::string(input.substr(pos + 2));      
+        roomId = input.substr(0, pos);           
+        message = input.substr(pos + 2);         
     } else {
-        roomId.clear();
-        message = std::string(input);
+        roomId = {};
+        message = input;
     }
 }
 
@@ -2115,33 +2115,11 @@ void worker_t::work()
             } else {
                 try {
                     /** Parsing the message */
-                    simdjson::padded_string jsonMessage(message.data(), message.size());
-                    simdjson::ondemand::parser parser;
-                    simdjson::ondemand::document parsedData;
+                    std::string_view roomId, parsedMessage;
+                    parseMessage(message, roomId, parsedMessage);
 
-                    /** Parse JSON and handle potential errors */
-                    if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
-                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                        return;
-                    }
-
-                    /** Retrieve 'rid' */
-                    std::string rid;
-                    if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
-                        rid = std::string(ridField.get_string().value());  
-                    } else {
-                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                        return;
-                    }
-
-                    /** Retrieve 'message' */
-                    std::string message;
-                    if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
-                        message = std::string(msgField.get_string().value());  
-                    } else {
-                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                        return;
-                    }
+                    std::string rid = std::string(roomId);
+                    std::string message = std::string(parsedMessage);
 
                     uint8_t roomType = 255;
 
@@ -2222,7 +2200,7 @@ void worker_t::work()
 
                     /** publishing message */
                     std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
-                    // ws->publish(rid, data, opCode, true);
+                    ws->publish(rid, data, opCode, true);
 
                     // std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
                     //     /** Check if the current thread ID matches the worker's thread ID */ 
