@@ -2200,7 +2200,7 @@ void worker_t::work()
 
                     /** publishing message */
                     std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
-                    ws->publish(rid, data, opCode, true);
+                    // ws->publish(rid, data, opCode, true);
 
                     // std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
                     //     /** Check if the current thread ID matches the worker's thread ID */ 
