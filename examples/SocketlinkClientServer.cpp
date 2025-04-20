@@ -1837,6 +1837,17 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
     }
 }
 
+void parseMessageToStrings(std::string_view input, std::string& roomId, std::string& message) {
+    size_t pos = input.find("##");
+    if (pos != std::string_view::npos) {
+        roomId = std::string(input.substr(0, pos));        
+        message = std::string(input.substr(pos + 2));      
+    } else {
+        roomId.clear();
+        message = std::string(input);
+    }
+}
+
 /** calculate latency for each thread */
 void update_ema(double newLatency) {
     localEma = alpha * newLatency + (1 - alpha) * localEma;
@@ -2211,7 +2222,7 @@ void worker_t::work()
 
                     /** publishing message */
                     std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
-                    ws->publish(rid, data, opCode, true);
+                    // ws->publish(rid, data, opCode, true);
 
                     // std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
                     //     /** Check if the current thread ID matches the worker's thread ID */ 
