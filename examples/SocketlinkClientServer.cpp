@@ -2104,33 +2104,33 @@ void worker_t::work()
             } else {
                 try {
                     /** Parsing the message */
-                    simdjson::padded_string jsonMessage(message.data(), message.size());
-                    simdjson::ondemand::parser parser;
-                    simdjson::ondemand::document parsedData;
+                    // simdjson::padded_string jsonMessage(message.data(), message.size());
+                    // simdjson::ondemand::parser parser;
+                    // simdjson::ondemand::document parsedData;
 
-                    /** Parse JSON and handle potential errors */
-                    if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
-                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                        return;
-                    }
+                    // /** Parse JSON and handle potential errors */
+                    // if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
+                    //     ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                    //     return;
+                    // }
 
                     /** Retrieve 'rid' */
-                    std::string rid;
-                    if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
-                        rid = std::string(ridField.get_string().value());  
-                    } else {
-                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                        return;
-                    }
+                    std::string rid = "pub-state-cache-test-0";
+                    // if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
+                    //     rid = std::string(ridField.get_string().value());  
+                    // } else {
+                    //     ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                    //     return;
+                    // }
 
                     /** Retrieve 'message' */
-                    std::string message;
-                    if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
-                        message = std::string(msgField.get_string().value());  
-                    } else {
-                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
-                        return;
-                    }
+                    std::string message = "test";
+                    // if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
+                    //     message = std::string(msgField.get_string().value());  
+                    // } else {
+                    //     ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                    //     return;
+                    // }
 
                     uint8_t roomType = 255;
 
