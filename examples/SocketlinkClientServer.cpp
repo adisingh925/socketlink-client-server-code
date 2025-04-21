@@ -5002,10 +5002,14 @@ int main() {
     }
 
     workers.resize(numThreads);
-    
-    for (int i = 0; i < numThreads; ++i) {
+
+    std::vector<int> indices(numThreads);
+    std::iota(indices.begin(), indices.end(), 0);
+    std::shuffle(indices.begin(), indices.end(), std::mt19937{std::random_device{}()});
+
+    for (int i : indices) {
         workers[i].thread_ = std::make_shared<std::thread>([i, &w = workers[i]]() {
-            pin_thread_to_core(i); /** Bind thread to core i */ 
+            pin_thread_to_core(i);
             w.work();
         });
     }
