@@ -4957,8 +4957,7 @@ void pin_thread_to_core(int core_id)
     int result = pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
     if (result != 0)
     {
-        std::cerr << "Failed to pin thread to core " << core_id << ": "
-                  << strerror(errno) << "\n";
+        std::cerr << "Failed to pin thread to core " << core_id << ": " << strerror(errno) << "\n";
     }
 }
 
