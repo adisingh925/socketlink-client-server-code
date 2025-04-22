@@ -1763,17 +1763,6 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 it2->second = false;
             }
         }   
-    
-        /** Send a message to self, Commented because seems useless */
-        /* std::string selfMessage = "{\"data\":\"CONNECTED_TO_ROOM\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
-
-        if (workerThreadId == currentThreadId) {
-            ws->send(selfMessage, uWS::OpCode::TEXT, true);
-        } else {
-            worker->loop_->defer([ws, selfMessage]() {
-                ws->send(selfMessage, uWS::OpCode::TEXT, true);
-            });
-        } */
 
         /** Broadcast the message to others if the room is public/private */
         if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
@@ -4881,7 +4870,7 @@ bool isCertificateValid(std::string_view domain) {
  */
 void createCertificate(std::string_view domain) {
     std::cout << "Creating a new SSL certificate for " << domain << "...\n";
-    std::string createCmd = "certbot certonly --standalone --non-interactive --agree-tos "
+    std::string createCmd = "certbot certonly --staging --standalone --non-interactive --agree-tos "
     "--email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain) + 
     " --config-dir /home/socketlink/certbot-config "
     "--work-dir /home/socketlink/certbot-work "
