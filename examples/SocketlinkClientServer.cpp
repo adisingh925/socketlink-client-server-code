@@ -659,7 +659,7 @@ thread_local boost::asio::io_context io_context;                                
 thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);                     // Thread-local ssl_context
 thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr; // Thread-local ssl_socket
 thread_local double localEma = 0.0;
-thread_local std::chrono::time_point<std::chrono::high_resolution_clock> threadTimestamp;                  // Thread-local variable to store timestamp
+thread_local std::chrono::time_point<std::chrono::high_resolution_clock> threadTimestamp = std::chrono::high_resolution_clock::now();   // Thread-local variable to store timestamp
 
 /** Internal Constants */
 constexpr const char* INTERNAL_IP = "169.254.169.254";
@@ -2103,6 +2103,8 @@ void worker_t::work()
                         int64_t elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::high_resolution_clock::now() - threadTimestamp
                         ).count();
+
+                        log("Elapsed time : " + std::to_string(elapsed) + " ms");
 
                         update_ema(elapsed);
 
