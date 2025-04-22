@@ -654,18 +654,12 @@ std::shared_mutex featureMutex; /** shared mutex for features */
 /* uWebSocket workers. */
 std::vector<worker_t> workers;
 
-/** cooldown timer */
-std::atomic<std::chrono::steady_clock::time_point> globalCooldownEnd(std::chrono::steady_clock::now());
-
-/** Configuration parameters */ 
-constexpr double k = 0.05;      /** Scaling factor */ 
-constexpr double M = 1000.0;    /** Normalization constant for payload size */ 
-
 /** Thread local variables */
 thread_local boost::asio::io_context io_context;                                                           // Thread-local io_context
 thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);                     // Thread-local ssl_context
 thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr; // Thread-local ssl_socket
 thread_local double localEma = 0.0;
+thread_local std::chrono::time_point<std::chrono::high_resolution_clock> threadTimestamp;                  // Thread-local variable to store timestamp
 
 /** Internal Constants */
 constexpr const char* INTERNAL_IP = "169.254.169.254";
@@ -2103,6 +2097,18 @@ void worker_t::work()
                         return;
                     }
 
+                    /** if timestamp field is present that means it is a response for timestamp */
+                    if (auto timeField = parsedData["timestamp"]; timeField.error() == simdjson::SUCCESS) {
+                        /** Get the current time */ 
+                        int64_t elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::high_resolution_clock::now() - threadTimestamp
+                        ).count();
+
+                        update_ema(elapsed);
+
+                        return;
+                    }
+
                     /** Retrieve 'rid' */
                     std::string rid;
                     if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
@@ -2211,6 +2217,15 @@ void worker_t::work()
                             });
                         }
                     });
+
+                    auto now = std::chrono::high_resolution_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - threadTimestamp).count();
+
+                    if(elapsed > 10){
+                        std::string data = "{\"source\":\"latency\"}";
+                        ws->send(data, uWS::OpCode::TEXT, true);
+                        threadTimestamp = now;
+                    }
 
                     unsigned int subscribers = app_->numSubscribers(rid);
                     globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
