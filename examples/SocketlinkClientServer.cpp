@@ -2104,8 +2104,6 @@ void worker_t::work()
                             std::chrono::high_resolution_clock::now() - threadTimestamp
                         ).count();
 
-                        log("Elapsed time : " + std::to_string(elapsed) + " ms");
-
                         update_ema(elapsed);
 
                         return;
