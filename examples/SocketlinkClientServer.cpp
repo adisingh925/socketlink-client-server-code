@@ -660,6 +660,7 @@ thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::ss
 thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr; // Thread-local ssl_socket
 thread_local double localEma = 0.0;
 thread_local std::chrono::time_point<std::chrono::high_resolution_clock> threadTimestamp = std::chrono::high_resolution_clock::now();   // Thread-local variable to store timestamp
+static thread_local simdjson::ondemand::parser parser;
 
 /** Internal Constants */
 constexpr const char* INTERNAL_IP = "169.254.169.254";
@@ -2085,20 +2086,22 @@ void worker_t::work()
                 droppedMessages.fetch_add(1, std::memory_order_relaxed);
                 ws->getUserData()->sendingAllowed = false;
             } else {
+                auto sendInvalidJson = [&]() {
+                    ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                };
+
                 try {
                     /** Parsing the message */
-                    simdjson::padded_string jsonMessage(message.data(), message.size());
-                    simdjson::ondemand::parser parser;
                     simdjson::ondemand::document parsedData;
 
                     /** Parse JSON and handle potential errors */
-                    if (auto error = parser.iterate(jsonMessage).get(parsedData); error) {
-                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                    if (auto error = parser.iterate(message.data(), message.size(), message.size() + simdjson::SIMDJSON_PADDING).get(parsedData); error) {
+                        sendInvalidJson();
                         return;
                     }
 
                     /** if timestamp field is present that means it is a response for timestamp */
-                    if (auto timeField = parsedData["timestamp"]; timeField.error() == simdjson::SUCCESS) {
+                    if (auto timeField = parsedData["timestamp"]; !timeField.error()) {
                         /** Get the current time */ 
                         int64_t elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::high_resolution_clock::now() - threadTimestamp
@@ -2111,19 +2114,19 @@ void worker_t::work()
 
                     /** Retrieve 'rid' */
                     std::string rid;
-                    if (auto ridField = parsedData["rid"]; ridField.error() == simdjson::SUCCESS) {
+                    if (auto ridField = parsedData["rid"]; !ridField.error()) {
                         rid = std::string(ridField.get_string().value());  
                     } else {
-                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                        sendInvalidJson();
                         return;
                     }
 
                     /** Retrieve 'message' */
                     std::string message;
-                    if (auto msgField = parsedData["message"]; msgField.error() == simdjson::SUCCESS) {
+                    if (auto msgField = parsedData["message"]; !msgField.error()) {
                         message = std::string(msgField.get_string().value());  
                     } else {
-                        ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
+                        sendInvalidJson();
                         return;
                     }
 
@@ -2218,6 +2221,7 @@ void worker_t::work()
                         }
                     });
 
+                    /** send latency message to the current websocket, random selection */
                     auto now = std::chrono::high_resolution_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - threadTimestamp).count();
 
@@ -2266,7 +2270,7 @@ void worker_t::work()
                         );
                     }
                 } catch (const simdjson::simdjson_error &e) {
-                    ws->send("{\"data\":\"INVALID_JSON\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+                    sendInvalidJson();
                 }
             }
         } else {
