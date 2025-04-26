@@ -1879,6 +1879,13 @@ int create_socket_with_ebpf(int port) {
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
 
+    /** Attach the eBPF program to the socket if it's available */
+    if (prog_fd >= 0) {
+        /** Lock the mutex to ensure thread-safe access to the prog_fd */
+        std::lock_guard<std::mutex> lock(prog_fd_mutex);
+        setsockopt(sock, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF, &prog_fd, sizeof(prog_fd));
+    }
+
     /** Set up the sockaddr_in structure for binding */
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -1892,13 +1899,6 @@ int create_socket_with_ebpf(int port) {
         close(sock);
         return -1;
     }
-
-    /** Attach the eBPF program to the socket if it's available */
-    // if (prog_fd >= 0) {
-    //     /** Lock the mutex to ensure thread-safe access to the prog_fd */
-    //     std::lock_guard<std::mutex> lock(prog_fd_mutex);
-    //     setsockopt(sock, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF, &prog_fd, sizeof(prog_fd));
-    // }
 
     /** Set the socket to listen for incoming connections */
     if (listen(sock, 512) < 0) {
