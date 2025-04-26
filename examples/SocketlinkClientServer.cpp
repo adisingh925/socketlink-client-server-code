@@ -5137,12 +5137,12 @@ int main() {
     }   
 
     /** loading the ebpf program */
-    const char *ebpf_program_path = "rr.o";  
+    /* const char *ebpf_program_path = "rr.o";  
 
     if (load_ebpf_program(ebpf_program_path) < 0) {
         std::cerr << "Failed to load eBPF program\n";
         return 1;
-    }
+    } */
 
     std::string domain = UserData::getInstance().subdomain + ".socketlink.io";
     waitForCorrectDNS(domain, UserData::getInstance().ip);  
