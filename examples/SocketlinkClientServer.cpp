@@ -1867,40 +1867,47 @@ int load_ebpf_program(const char *filename) {
 
 /** Create socket and attach eBPF program */
 int create_socket_with_ebpf(int port) {
+    /** Create a socket for communication */
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("socket");
         return -1;
     }
 
+    /** Set socket options to allow reuse of address and port */
     int one = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
 
-    /** Attach the eBPF program to the socket */
+    /** Attach the eBPF program to the socket if it's available */
     if (prog_fd >= 0) {
+        /** Lock the mutex to ensure thread-safe access to the prog_fd */
         std::lock_guard<std::mutex> lock(prog_fd_mutex);
         setsockopt(sock, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF, &prog_fd, sizeof(prog_fd));
     }
 
+    /** Set up the sockaddr_in structure for binding */
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
+    /** Bind the socket to the given port */
     if (bind(sock, (sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind");
         close(sock);
         return -1;
     }
 
+    /** Set the socket to listen for incoming connections */
     if (listen(sock, 512) < 0) {
         perror("listen");
         close(sock);
         return -1;
     }
 
+    /** Return the socket file descriptor for further use */
     return sock;
 }
 
