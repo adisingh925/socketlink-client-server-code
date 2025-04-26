@@ -1965,7 +1965,7 @@ void worker_t::work()
     const std::string keyFilePath = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
     const std::string certFileName = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
 
-    int sock = create_socket_with_ebpf(PORT);
+    int sock = create_socket(PORT);
 
     if (sock < 0) {
         std::cerr << "Failed to create socket for port " << PORT << std::endl;
@@ -5099,6 +5099,21 @@ void watchCertChanges(std::string_view domain) {
     }
 }
 
+/** Set CPU affinity */ 
+void pin_thread_to_core(int core_id)
+{
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+
+    pthread_t current_thread = pthread_self();
+    int result = pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
+    if (result != 0)
+    {
+        std::cerr << "Failed to pin thread to core " << core_id << ": " << strerror(errno) << "\n";
+    }
+}
+
 /* Main */
 int main() {
     /** Fetch and populated data before starting the threads */
@@ -5149,14 +5164,12 @@ int main() {
 
     workers.resize(numThreads);
     
-    std::transform(workers.begin(), workers.end(), workers.begin(), [](worker_t &w) {
-        w.thread_ = std::make_shared<std::thread>([&w]() {
-            /* create uWebSocket worker and capture uWS::Loop, uWS::App objects. */
+    for (int i = 0; i < numThreads; ++i) {
+        workers[i].thread_ = std::make_shared<std::thread>([i, &w = workers[i]]() {
+            pin_thread_to_core(i); /** Bind thread to core i */ 
             w.work();
         });
-
-        return w;
-    });
+    }
     
     std::for_each(workers.begin(), workers.end(), [](worker_t &w) {
         w.thread_->join();
