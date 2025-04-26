@@ -664,7 +664,6 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 thread_local double localEma = 0.0;
 thread_local std::chrono::time_point<std::chrono::high_resolution_clock> threadTimestamp = std::chrono::high_resolution_clock::now();   // Thread-local variable to store timestamp
 static thread_local simdjson::ondemand::parser parser;
-thread_local std::atomic<int> threadConnectionCounter(0); /** Thread-local connection counter */
 
 /** Internal Constants */
 constexpr const char* INTERNAL_IP = "169.254.169.254";
@@ -1959,13 +1958,6 @@ int create_socket(int port) {
     return sock;
 }
 
-std::string getThreadIdAsString() {
-    std::thread::id this_id = std::this_thread::get_id();
-    std::ostringstream oss;
-    oss << this_id;
-    return oss.str();
-}
-
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
@@ -2025,10 +2017,6 @@ void worker_t::work()
             context,
             res
         };
-
-        threadConnectionCounter.fetch_add(1, std::memory_order_relaxed);
-
-        log("connection counter : " + std::to_string(threadConnectionCounter.load(std::memory_order_relaxed)) + "on thread : " + getThreadIdAsString());
 
         res->onAborted([=]() {
             upgradeData->aborted = true;
@@ -5164,8 +5152,8 @@ int main() {
     }
 
     /** running the file change watcher thread */
-    std::thread watcher(watchCertChanges, domain);
-    watcher.detach();
+    /* std::thread watcher(watchCertChanges, domain);
+    watcher.detach(); */
 
     int numThreads = std::thread::hardware_concurrency();
 
