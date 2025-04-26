@@ -1965,7 +1965,7 @@ void worker_t::work()
     const std::string keyFilePath = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
     const std::string certFileName = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
 
-    int sock = create_socket(PORT);
+    int sock = create_socket_with_ebpf(PORT);
 
     if (sock < 0) {
         std::cerr << "Failed to create socket for port " << PORT << std::endl;
