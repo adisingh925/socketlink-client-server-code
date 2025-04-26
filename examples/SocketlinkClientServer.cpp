@@ -13,6 +13,8 @@
 #include <tbb/concurrent_hash_map.h>
 #include <filesystem>
 #include "simdjson.h"
+#include <linux/bpf.h>
+#include <bpf/libbpf.h>
 
 /** is logs enabled */
 constexpr bool LOGS_ENABLED = true;
@@ -520,7 +522,8 @@ struct PerSocketData {
     /* Define your user data */
     std::string key;
     std::string uid;
-
+    std::string metadata;
+    
     /**
      * true - sending allowed
      * false - sending not allowed
@@ -1826,11 +1829,93 @@ void update_ema(double newLatency) {
     localEma = alpha * newLatency + (1 - alpha) * localEma;
 }
 
+std::mutex prog_fd_mutex;
+int prog_fd = -1;  /** Shared across threads */ 
+
+/** Load eBPF program from file */
+int load_ebpf_program(const char *filename) {
+    struct bpf_object *obj;
+    prog_fd = -1;
+
+    obj = bpf_object__open_file(filename, nullptr);
+    if (!obj) {
+        std::cerr << "Failed to open BPF object file\n";
+        return -1;
+    }
+
+    if (bpf_object__load(obj)) {
+        std::cerr << "Failed to load BPF object\n";
+        return -1;
+    }
+
+    struct bpf_program *prog = nullptr;
+    bpf_object__for_each_program(prog, obj) {
+        /** Use the first program found */
+        if (prog) {
+            prog_fd = bpf_program__fd(prog);
+            break;
+        }
+    }
+
+    if (prog_fd < 0) {
+        std::cerr << "No BPF program found\n";
+        return -1;
+    }
+
+    return prog_fd;
+}
+
+/** Create socket and attach eBPF program */
+int create_socket_with_ebpf(int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    int one = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+
+    /** Attach the eBPF program to the socket */
+    if (prog_fd >= 0) {
+        std::lock_guard<std::mutex> lock(prog_fd_mutex);
+        setsockopt(sock, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF, &prog_fd, sizeof(prog_fd));
+    }
+
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(sock, (sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(sock);
+        return -1;
+    }
+
+    if (listen(sock, 512) < 0) {
+        perror("listen");
+        close(sock);
+        return -1;
+    }
+
+    return sock;
+}
+
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
     const std::string keyFilePath = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
     const std::string certFileName = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
+
+    int sock = create_socket_with_ebpf(PORT);
+
+    if (sock < 0) {
+        std::cerr << "Failed to create socket for port " << PORT << std::endl;
+        return;
+    }
 
   /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/ 
   loop_ = uWS::Loop::get();
@@ -2046,9 +2131,13 @@ void worker_t::work()
         auto& userData = *ws->getUserData();
         auto uid = userData.uid;
 
+        auto sendMessagingDisabled = [&]() {
+            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+        };
+
         /** checking if the message sending is disabled globally at the server level */
         if(isMessagingDisabled.load(std::memory_order_relaxed)) {
-            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
+            sendMessagingDisabled();
             return;
         }
 
@@ -2060,9 +2149,7 @@ void worker_t::work()
 
             if (ThreadSafe::disabledConnections.find(outer_accessor, "global") &&
                 outer_accessor->second.find(inner_accessor, uid)) {
-                
-                ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-
+                sendMessagingDisabled();
                 return;
             }
         } else {
@@ -2073,14 +2160,14 @@ void worker_t::work()
                 globalIt->second.find(uid) != globalIt->second.end()) {
 
                 /** Send a message to the user indicating messaging is disabled */
-                ws->send(std::string_view{"{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}"}, uWS::OpCode::TEXT, true);
-
+                sendMessagingDisabled();
                 return;
             }
         }
 
         if (ws->getUserData()->sendingAllowed)
         {
+            /** check if the backpressure exceeded the given limit */
             if(ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes) {
                 ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
                 droppedMessages.fetch_add(1, std::memory_order_relaxed);
@@ -2132,6 +2219,10 @@ void worker_t::work()
 
                     uint8_t roomType = 255;
 
+                    auto sendNoSubscriptionFound = [&]() {
+                        ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                    };
+
                     if(isMultiThread) {
                         /** Acquire an accessor for the outer map (UID to Room Mapping) */
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
@@ -2145,7 +2236,7 @@ void worker_t::work()
                             
                             if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                 /** Room not found under this UID, send response and return */
-                                ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                                sendNoSubscriptionFound();
                                 return;
                             }
                     
@@ -2153,7 +2244,7 @@ void worker_t::work()
                             roomType = uid_to_rid_inner_accessor->second;
                         } else {
                             /** No subscription found for the given UID, send response */
-                            ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                            sendNoSubscriptionFound();
                             return;
                         }
                     } else {
@@ -2171,12 +2262,12 @@ void worker_t::work()
                                 roomType = ridIt->second;
                             } else {
                                 /** Room not found under this UID, send error response */
-                                ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                                sendNoSubscriptionFound();
                                 return;
                             }
                         } else {
                             /** No subscription found for the given UID, send error response */
-                            ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
+                            sendNoSubscriptionFound();
                             return;
                         }
                     }                     
@@ -2211,6 +2302,7 @@ void worker_t::work()
                     std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
                     ws->publish(rid, data, opCode, true);
 
+                    /** publish the message to every other thread on the required room */
                     std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
                         /** Check if the current thread ID matches the worker's thread ID */ 
                         if (std::this_thread::get_id() != w.thread_->get_id()) {
@@ -4770,15 +4862,13 @@ void worker_t::work()
                 });
             }
         }
-	}).listen(PORT, [this](auto *token) {
-    listen_socket_ = token;
-    if (listen_socket_) {
-        std::cout << "Thread " << std::this_thread::get_id() << " listening on port " << PORT << std::endl;
-    }
-    else {
-        std::cout << "Thread " << std::this_thread::get_id() << " failed to listen on port " << PORT << std::endl;
-    }
-  });
+    }).listen(sock, [](auto *token) {
+        if (token) {
+            std::cout << "Thread " << std::this_thread::get_id() << " listening on port " << PORT << std::endl;
+        } else {
+            std::cerr << "Thread " << std::this_thread::get_id() << " failed to listen on port " << PORT << std::endl;
+        }
+    });
 
   app_->run();
 
@@ -4963,6 +5053,14 @@ int main() {
     if(UserData::getInstance().subdomain.empty()){
         /** something is wrong with the data, restarting the server */
         std::exit(0);
+    }   
+
+    /** loading the ebpf program */
+    const char *ebpf_program_path = "rr.o";  
+
+    if (load_ebpf_program(ebpf_program_path) < 0) {
+        std::cerr << "Failed to load eBPF program\n";
+        return 1;
     }
 
     std::string domain = UserData::getInstance().subdomain + ".socketlink.io";
