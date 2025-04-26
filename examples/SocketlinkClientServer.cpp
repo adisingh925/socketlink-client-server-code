@@ -1894,11 +1894,11 @@ int create_socket_with_ebpf(int port) {
     }
 
     /** Attach the eBPF program to the socket if it's available */
-    if (prog_fd >= 0) {
-        /** Lock the mutex to ensure thread-safe access to the prog_fd */
-        std::lock_guard<std::mutex> lock(prog_fd_mutex);
-        setsockopt(sock, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF, &prog_fd, sizeof(prog_fd));
-    }
+    // if (prog_fd >= 0) {
+    //     /** Lock the mutex to ensure thread-safe access to the prog_fd */
+    //     std::lock_guard<std::mutex> lock(prog_fd_mutex);
+    //     setsockopt(sock, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF, &prog_fd, sizeof(prog_fd));
+    // }
 
     /** Set the socket to listen for incoming connections */
     if (listen(sock, 512) < 0) {
