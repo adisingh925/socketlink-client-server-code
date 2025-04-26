@@ -534,7 +534,7 @@ struct PerSocketData {
 /** uWebSocket worker runs in a separate thread */
 struct worker_t
 {
-  void work(int sock);
+  void work();
   
   /* uWebSocket worker listens on separate port, or share the same port (works on Linux). */
   struct us_listen_socket_t *listen_socket_;
@@ -1912,10 +1912,17 @@ int create_socket_with_ebpf(int port) {
 }
 
 /* uWebSocket worker thread function. */
-void worker_t::work(int sock)
+void worker_t::work()
 {
     const std::string keyFilePath = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
     const std::string certFileName = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
+
+    int sock = create_socket_with_ebpf(PORT);
+
+    if (sock < 0) {
+        std::cerr << "Failed to create socket for port " << PORT << std::endl;
+        return;
+    }
 
   /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/ 
   loop_ = uWS::Loop::get();
@@ -5093,21 +5100,15 @@ int main() {
     }
 
     workers.resize(numThreads);
-
-    std::vector<int> sockets(numThreads);
-    for (int i = 0; i < numThreads; ++i) {
-        sockets[i] = create_socket_with_ebpf(PORT);
-        if (sockets[i] < 0) {
-            std::cerr << "Failed to create socket for port " << PORT << std::endl;
-            return 1;
-        }
-    }
     
-    for (int i = 0; i < numThreads; ++i) {
-        workers[i].thread_ = std::make_shared<std::thread>([&, i]() {
-            workers[i].work(sockets[i]);
+    std::transform(workers.begin(), workers.end(), workers.begin(), [](worker_t &w) {
+        w.thread_ = std::make_shared<std::thread>([&w]() {
+            /* create uWebSocket worker and capture uWS::Loop, uWS::App objects. */
+            w.work();
         });
-    }
+
+        return w;
+    });
     
     std::for_each(workers.begin(), workers.end(), [](worker_t &w) {
         w.thread_->join();
