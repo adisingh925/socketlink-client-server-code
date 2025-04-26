@@ -1958,7 +1958,6 @@ int create_socket(int port) {
     return sock;
 }
 
-
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
