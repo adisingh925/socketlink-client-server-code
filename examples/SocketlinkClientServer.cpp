@@ -1972,12 +1972,12 @@ void worker_t::work()
     const std::string keyFilePath = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
     const std::string certFileName = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
 
-    int sock = create_socket_with_ebpf(PORT);
+    /* int sock = create_socket_with_ebpf(PORT);
 
     if (sock < 0) {
         std::cerr << "Failed to create socket for port " << PORT << std::endl;
         return;
-    }
+    } */
 
   /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/ 
   loop_ = uWS::Loop::get();
@@ -4928,11 +4928,12 @@ void worker_t::work()
                 });
             }
         }
-    }).listen(sock, [](auto *token) {
-        if (token) {
+    }).listen(PORT, [this](auto *token) {
+        listen_socket_ = token;
+        if (listen_socket_) {
             std::cout << "Thread " << std::this_thread::get_id() << " listening on port " << PORT << std::endl;
         } else {
-            std::cerr << "Thread " << std::this_thread::get_id() << " failed to listen on port " << PORT << std::endl;
+            std::cout << "Thread " << std::this_thread::get_id() << " failed to listen on port " << PORT << std::endl;
         }
     });
 
