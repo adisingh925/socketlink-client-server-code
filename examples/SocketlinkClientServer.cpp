@@ -5091,6 +5091,8 @@ bool isDNSResolvedToIP(std::string_view domain, std::string_view expectedIP) {
         if (expectedIP == resolvedIP) {
             matched = true;
             break;
+        } else {
+            log(LogLevel::INFO, "Resolved IP : ", resolvedIP, " does not match expected IP : ", expectedIP);
         }
     }
 
