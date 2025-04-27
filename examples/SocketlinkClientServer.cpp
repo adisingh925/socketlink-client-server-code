@@ -4101,6 +4101,9 @@ void worker_t::work()
                             else if (rid.rfind("pri-", 0) == 0)
                             {
                                 roomType = static_cast<uint8_t>(Rooms::PRIVATE);
+                            } 
+                            else if (rid == "global") {
+                                /** do nothing */
                             }
                             else
                             {                        
