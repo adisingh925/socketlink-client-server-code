@@ -21,11 +21,41 @@ constexpr bool LOGS_ENABLED = true;
 
 std::atomic<unsigned long long> totalMysqlDBWrites{0}; /** Total writes to the MySQL database */
 
-/** log the sata in the console */
-void log(const std::string& message) {
-    if (LOGS_ENABLED) {
-        std::cout << message << std::endl;
-    }
+/**
+ * Base case for recursion: does nothing when no parameters are passed.
+ */
+void log() {
+    /** Nothing to log */ 
+}
+
+/**
+ * Logs multiple parameters with a timestamp if logging is enabled.
+ * 
+ * @tparam First The type of the first parameter.
+ * @tparam Rest The types of the remaining parameters.
+ * @param first The first message part.
+ * @param rest The remaining message parts.
+ */
+template<typename First, typename... Rest>
+void log(const First& first, const Rest&... rest) {
+    if (!LOGS_ENABLED) return;
+
+    /** Get the current time */
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+
+    /** Build the timestamp */
+    std::ostringstream oss;
+    oss << "[" << std::put_time(std::localtime(&now_c), "%Y-%m-%d %H:%M:%S") << "] ";
+
+    /** Add the first part of the message */
+    oss << first;
+
+    /** Add the remaining parts */
+    ((oss << " " << rest), ...); // Fold expression to add all other arguments
+
+    /** Output the complete log message in one cout call */
+    std::cout << oss.str() << std::endl;
 }
 
 /******************************************************************************************************************************************************************************/
@@ -5118,7 +5148,7 @@ bool isCertificateValid(std::string_view domain) {
  */
 void createCertificate(std::string_view domain) {
     std::cout << "Creating a new SSL certificate for " << domain << "...\n";
-    std::string createCmd = "certbot certonly --standalone --non-interactive --agree-tos "
+    std::string createCmd = "certbot certonly --staging --standalone --non-interactive --agree-tos "
     "--email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain) + 
     " --config-dir /home/socketlink/certbot-config "
     "--work-dir /home/socketlink/certbot-work "
@@ -5183,33 +5213,22 @@ void watchCertChanges(std::string_view domain) {
     }
 }
 
-/** Set CPU affinity */ 
-void pin_thread_to_core(int core_id)
-{
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
-
-    pthread_t current_thread = pthread_self();
-    int result = pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
-    if (result != 0)
-    {
-        std::cerr << "Failed to pin thread to core " << core_id << " : " << strerror(errno) << "\n";
-    }
-}
-
 /* Main */
 int main() {
-    std::cout << "Main thread ID : " << std::this_thread::get_id() << std::endl;
+    log("Main thread Id : ", std::this_thread::get_id());
 
     /** Fetch and populated data before starting the threads */
     fetchAndPopulateUserData();
     init_env();
 
-    if(UserData::getInstance().subdomain.empty()){
-        /** something is wrong with the data, restarting the server */
-        std::exit(0);
-    }   
+    /** Keep retrying if subdomain is empty */
+    while (UserData::getInstance().subdomain.empty()) {
+        log("Subdomain is empty, retrying fetch in 10 seconds...\n");
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        fetchAndPopulateUserData();
+    }
+
+    log("Successfully fetched user data!");
 
     /** loading the ebpf program */
     /* const char *ebpf_program_path = "rr.o";  
@@ -5224,17 +5243,17 @@ int main() {
 
     if (!doesCertificateExist(domain))
     {
-        std::cout << "No SSL certificate found. Creating a new one...\n";
+        log("Creating a new SSL certificate for domain : ", domain);
         createCertificate(domain);
     }
     else if (!isCertificateValid(domain))
     {
-        std::cout << "SSL certificate is expired. Renewing...\n";
+        log("Renewing SSL certificate for domain : ", domain);
         renewCertificate(domain);
     }
     else
     {
-        std::cout << "SSL certificate is valid. No renewal needed.\n";
+        log("SSL certificate is valid. No renewal needed.");
     }
 
     /** running the file change watcher thread */
@@ -5243,7 +5262,7 @@ int main() {
 
     int numThreads = std::thread::hardware_concurrency();
 
-    log("Number of threads available : " + std::to_string(numThreads));
+    log("Number of threads available : ", numThreads);
 
     if (numThreads > 1)
     {
@@ -5252,12 +5271,14 @@ int main() {
 
     workers.resize(numThreads);
     
-    for (int i = 0; i < numThreads; ++i) {
-        workers[i].thread_ = std::make_shared<std::thread>([i, &w = workers[i]]() {
-            pin_thread_to_core(i); /** Bind thread to core i */ 
+    std::transform(workers.begin(), workers.end(), workers.begin(), [](worker_t &w) {
+        w.thread_ = std::make_shared<std::thread>([&w]() {
+            /* create uWebSocket worker and capture uWS::Loop, uWS::App objects. */
             w.work();
         });
-    }
+
+        return w;
+    });
     
     std::for_each(workers.begin(), workers.end(), [](worker_t &w) {
         w.thread_->join();
