@@ -28,34 +28,63 @@ void log() {
     /** Nothing to log */ 
 }
 
+enum class LogLevel {
+    INFO,
+    ERROR
+};
+
 /**
- * Logs multiple parameters with a timestamp if logging is enabled.
+ * Logs messages with timestamp and severity level.
  * 
- * @tparam First The type of the first parameter.
- * @tparam Rest The types of the remaining parameters.
- * @param first The first message part.
- * @param rest The remaining message parts.
+ * @tparam Args Types of the message parts.
+ * @param level Log severity (INFO or ERROR).
+ * @param args Message parts to log.
  */
-template<typename First, typename... Rest>
-void log(const First& first, const Rest&... rest) {
+template<typename... Args>
+void log(LogLevel level, const Args&... args) {
     if (!LOGS_ENABLED) return;
 
-    /** Get the current time */
+    /** Get current time */
     auto now = std::chrono::system_clock::now();
     std::time_t now_c = std::chrono::system_clock::to_time_t(now);
 
-    /** Build the timestamp */
+    /** Prepare log stream */
     std::ostringstream oss;
     oss << "[" << std::put_time(std::localtime(&now_c), "%Y-%m-%d %H:%M:%S") << "] ";
 
-    /** Add the first part of the message */
-    oss << first;
+    /** Add log level */
+    if (level == LogLevel::ERROR) {
+        oss << "[ERROR] ";
+    } else {
+        oss << "[INFO] ";
+    }
 
-    /** Add the remaining parts */
-    ((oss << " " << rest), ...); // Fold expression to add all other arguments
+    /** Add all message parts */
+    (oss << ... << args);
 
-    /** Output the complete log message in one cout call */
-    std::cout << oss.str() << std::endl;
+    /** Output to correct stream */
+    if (level == LogLevel::ERROR) {
+        std::cerr << oss.str() << std::endl;
+    } else {
+        std::cout << oss.str() << std::endl;
+    }
+}
+
+/** Features */
+enum class Features : uint32_t {
+    ENABLE_MYSQL_INTEGRATION = 1 << 0,
+};
+
+std::unordered_map<Features, int> featureStatus;
+std::shared_mutex featureMutex; /** shared mutex for features */
+
+/** read features, thread safe */
+int getFeatureStatus(Features feature)
+{
+    std::shared_lock<std::shared_mutex> lock(featureMutex);  /** Shared lock for reading */ 
+
+    auto it = featureStatus.find(feature);
+    return (it != featureStatus.end()) ? it->second : 0;
 }
 
 /******************************************************************************************************************************************************************************/
@@ -132,6 +161,10 @@ private:
      */
     void createConnection() {
         try {
+            if(getFeatureStatus(Features::ENABLE_MYSQL_INTEGRATION) == 0) {
+                return;
+            }
+
             if (conn) {
                 mysql_close(conn);  /**< Close existing connection */
                 conn = nullptr;
@@ -139,7 +172,7 @@ private:
 
             conn = mysql_init(NULL);  /**< Initialize a new MySQL connection */
             if (!conn) {
-                log("MySQL Initialization Error");
+                log(LogLevel::ERROR, "MySQL Initialization Error");
             }
 
             /** Set timeout for MySQL connection (in seconds) */
@@ -155,7 +188,7 @@ private:
                 UserData::getInstance().dbName.c_str(),
                 UserData::getInstance().dbPort, NULL, 0
             )) {
-                log("MySQL Connection Error : " + std::string(mysql_error(conn)));
+                log(LogLevel::ERROR, "MySQL Connection Error : " + std::string(mysql_error(conn)));
                 mysql_close(conn);  /**< Close the connection on error */
                 conn = nullptr;
             } else {
@@ -163,7 +196,7 @@ private:
                 createTableIfNotExists();  /**< Create the table if it doesn't exist */
             }
         } catch (const MySQLException& e) {
-            std::cerr << "MySQL Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "MySQL Error : ", std::string(e.what()));
         }
     }
 
@@ -177,7 +210,7 @@ private:
                 createConnection();  /**< Create a new connection if not present */
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Connection Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "Connection Error : ", std::string(e.what()));
         }
     }
 
@@ -202,7 +235,7 @@ private:
                 throw MySQLException("Table creation failed : " + std::string(mysql_error(conn)));
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Table Creation Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "Table Creation Error : ", std::string(e.what()));
         }
     }
 
@@ -228,7 +261,7 @@ private:
             MYSQL_STMT* stmt = mysql_stmt_init(conn);  /**< Initialize the prepared statement */
             if (!stmt || mysql_stmt_prepare(stmt, query.c_str(), query.length())) {
                 mysql_stmt_close(stmt);  /**< Close the statement on exception */
-                log("Batch Insertion Error : " + std::string(mysql_stmt_error(stmt)));
+                log(LogLevel::ERROR, "Batch Insertion Error : " + std::string(mysql_stmt_error(stmt)));
                 return false;
             }
 
@@ -263,7 +296,7 @@ private:
             /** Bind the parameters to the statement and execute */
             if (mysql_stmt_bind_param(stmt, bind) || mysql_stmt_execute(stmt)) {
                 mysql_stmt_close(stmt);  /**< Close the statement on exception */
-                log("Batch Insertion Error : " + std::string(mysql_stmt_error(stmt)));
+                log(LogLevel::ERROR, "Batch Insertion Error : " + std::string(mysql_stmt_error(stmt)));
                 return false;
             }
 
@@ -272,7 +305,7 @@ private:
             totalMysqlDBWrites.fetch_add(1, std::memory_order_relaxed);  /**< Increment the total write count */
             return true;
         } catch (const MySQLException& e) {
-            std::cerr << "Batch Insertion Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "Batch Insertion Error : ", std::string(e.what()));
 
             return false;
         }
@@ -286,7 +319,7 @@ public:
         try {
             createConnection();  /**< Create the initial connection */
         } catch (const MySQLException& e) {
-            std::cerr << "Constructor Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "Constructor Error : ", std::string(e.what()));
         }
     }
 
@@ -299,7 +332,7 @@ public:
                 mysql_close(conn);  /**< Close the connection if it exists */
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Destructor Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "Destructor Error : ", std::string(e.what()));
         }
     }
 
@@ -325,7 +358,7 @@ public:
                 batch_data.clear();
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Insert Data Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "Insert Data Error : ", std::string(e.what()));
         }
     }
 
@@ -338,7 +371,7 @@ public:
                 insertBatchData();  /**< Insert the remaining data in the batch */
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Flush Data Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "Flush Data Error : ", std::string(e.what()));
         }
     }
 
@@ -349,7 +382,7 @@ public:
         try {
             createConnection();  /**< Manually create a connection to the database */
         } catch (const MySQLException& e) {
-            std::cerr << "Manual Connection Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "Manual Connection Error : ", std::string(e.what()));
         }
     }
 
@@ -363,7 +396,7 @@ public:
                 conn = NULL;
             }
         } catch (const MySQLException& e) {
-            std::cerr << "Disconnect Error : " << e.what() << std::endl;
+            log(LogLevel::ERROR, "Disconnect Error : ", std::string(e.what()));
         }
     }
 };
@@ -613,11 +646,6 @@ enum class Webhooks : uint8_t {
     ON_ROOM_VACATED = 1 << 6                   /** value 64 */
 };
 
-/** Features */
-enum class Features : uint32_t {
-    ENABLE_MYSQL_INTEGRATION = 1 << 0,
-};
-
 /** Rooms */
 enum class Rooms : uint8_t {
     PUBLIC = 0,
@@ -680,9 +708,6 @@ namespace SingleThreaded {
 /** map to store enabled webhooks and features (no need to make it thread safe) */
 std::unordered_map<Webhooks, int> webhookStatus;
 std::shared_mutex webhookMutex; /** shared mutex for webhook */
-
-std::unordered_map<Features, int> featureStatus;
-std::shared_mutex featureMutex; /** shared mutex for features */
 
 /* uWebSocket workers. */
 std::vector<worker_t> workers;
@@ -790,32 +815,32 @@ std::string getCurrentSQLTime() {
 /** Initialize LMDB environment */ 
 void init_env() {
     if (mdb_env_create(&env) != 0) {
-        std::cerr << "Failed to create LMDB environment.\n";
+        log(LogLevel::ERROR, "Failed to create LMDB environment.");
         exit(-1);
     }
 
     /** map size is 10 GB */
     if (mdb_env_set_mapsize(env, UserData::getInstance().lmdbDatabaseSizeInBytes) != 0) { 
-        std::cerr << "Failed to set map size.\n";
+        log(LogLevel::ERROR, "Failed to set map size.");
         exit(-1);
     }
 
     if (mdb_env_set_maxreaders(env, 128) != 0) {
-        std::cerr << "Failed to set max readers.\n";
+        log(LogLevel::ERROR, "Failed to set max readers.");
         exit(-1);
     }
 
     if (mdb_env_set_maxdbs(env, 1) != 0) {
-        std::cerr << "Failed to set max databases.\n";
+        log(LogLevel::ERROR, "Failed to set max databases.");
         exit(-1);
     }
 
     if (mdb_env_open(env, "./messages_db", MDB_WRITEMAP, 0664) != 0) {
-        std::cerr << "Failed to open LMDB environment.\n";
+        log(LogLevel::ERROR, "Failed to open LMDB environment.");
         exit(-1);
     }
 
-    std::cout << "Environment initialized successfully.\n";
+    log(LogLevel::INFO, "LMDB environment initialized successfully.");
 }
 
 /** write the data to the LMDB, LMDB has internal locking mechanish so no need to mutexes */
@@ -836,14 +861,14 @@ void write_worker(const std::string& room_id, const std::string& message_content
     if (batch.size() >= UserData::getInstance().lmdbCommitBatchSize || (needsCommit && batch.size() > 0)) {
         /** Begin a new write transaction */
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-            std::cerr << "Failed to begin write transaction.\n";
+            log(LogLevel::ERROR, "Failed to begin write transaction.");
             batch.clear();  // Clear batch on error
             return;
         }
 
         /** Open the database (common for all rooms) */
         if (mdb_dbi_open(txn, "messages_db", MDB_CREATE, &dbi) != 0) {
-            std::cerr << "Failed to open database.\n";
+            log(LogLevel::ERROR, "Failed to open database.");
             batch.clear();  // Clear batch on error
             mdb_txn_abort(txn);
             return;
@@ -863,7 +888,7 @@ void write_worker(const std::string& room_id, const std::string& message_content
 
             /** Insert the key-value pair into the database */
             if (mdb_put(txn, dbi, &key, &value, 0) != 0) {
-                std::cerr << "Write failed.\n";
+                log(LogLevel::ERROR, "Failed to write key : ", key_str);
                 batch.clear();  // Clear batch on error
                 mdb_txn_abort(txn);
                 return;
@@ -872,7 +897,7 @@ void write_worker(const std::string& room_id, const std::string& message_content
 
         /** Commit the transaction after writing the batch */
         if (mdb_txn_commit(txn) != 0) {
-            std::cerr << "Failed to commit transaction.\n";
+            log(LogLevel::ERROR, "Failed to commit transaction.");
             batch.clear();  // Clear batch on error
             mdb_txn_abort(txn);
             return;
@@ -897,13 +922,13 @@ void delete_worker(const std::string& room_id) {
 
     /** Begin a write transaction */
     if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-        std::cerr << "Failed to begin delete transaction.\n";
+        log(LogLevel::ERROR, "Failed to begin delete transaction.");
         return;
     }
 
     /** Open the database */
     if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
-        std::cerr << "Failed to open database.\n";
+        log(LogLevel::ERROR, "Failed to open database.");
         mdb_txn_abort(txn);
         return;
     }
@@ -914,14 +939,14 @@ void delete_worker(const std::string& room_id) {
 
     /** Delete the entry with the exact room_id key */
     if (mdb_del(txn, dbi, &key, nullptr) != 0) {
-        std::cerr << "Failed to delete key: " << room_id << "\n";
+        log(LogLevel::ERROR, "Failed to delete key : ", room_id);
         mdb_txn_abort(txn);
         return;
     }
 
     /** Commit the transaction after deletion */
     if (mdb_txn_commit(txn) != 0) {
-        std::cerr << "Failed to commit delete transaction.\n";
+        log(LogLevel::ERROR, "Failed to commit delete transaction.");
     }
 
     /** Close database handle */
@@ -935,13 +960,13 @@ std::string read_worker(const std::string& room_id) {
 
     /** Start a read-only transaction */
     if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
-        std::cerr << "Failed to begin read transaction: " << mdb_strerror(errno) << "\n";
+        log(LogLevel::ERROR, "Failed to begin read transaction : ", mdb_strerror(errno));
         return "{}";  /** Return empty JSON object on failure */
     }
 
     /** Open the common database for all rooms */
     if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
-        std::cerr << "Failed to open database: " << mdb_strerror(errno) << "\n";
+        log(LogLevel::ERROR, "Failed to open database : ", mdb_strerror(errno));
         mdb_txn_abort(txn);
         return "{}";  /** Return empty JSON object on failure */
     }
@@ -969,7 +994,7 @@ std::string read_worker(const std::string& room_id) {
     }
 
     /** No message found for the given room_id */
-    std::cerr << "No message found for room_id: " << room_id << "\n";
+    log(LogLevel::ERROR, "No message found for room_id : ", room_id);
     mdb_dbi_close(env, dbi);
     mdb_txn_abort(txn);
     return "{}";  /** Return empty JSON object if no message exists */
@@ -1009,15 +1034,6 @@ void populateFeatureStatus(uint32_t bitmask)
         Features feature = static_cast<Features>(1 << i);
         featureStatus[feature] = (bitmask & (1 << i)) ? 1 : 0;
     }
-}
-
-/** read features, thread safe */
-int getFeatureStatus(Features feature)
-{
-    std::shared_lock<std::shared_mutex> lock(featureMutex);  /** Shared lock for reading */ 
-
-    auto it = featureStatus.find(feature);
-    return (it != featureStatus.end()) ? it->second : 0;
 }
 
 /**
@@ -1179,7 +1195,7 @@ int sendHTTPSPOSTRequestFireAndForget(
             
                     /** Ensure the line is properly read */
                     if (status_line.empty()) {
-                        log("Error : Empty response line!");
+                        log(LogLevel::INFO, "Empty response line!");
                         return 0;
                     }
             
@@ -1202,7 +1218,7 @@ int sendHTTPSPOSTRequestFireAndForget(
                         
                     return status_code;
                 } else {
-                    log("Error reading response : " + ec.message());
+                    log(LogLevel::ERROR, "Error reading response : ", ec.message());
                     return 0;
                 }
             }
@@ -1212,7 +1228,7 @@ int sendHTTPSPOSTRequestFireAndForget(
 
             break;
         } catch (const boost::system::system_error& e) {
-            log("Error in sendHTTPSPOSTRequestFireAndForget : " + std::string(e.what()));
+            log(LogLevel::ERROR, "Error in sendHTTPSPOSTRequestFireAndForget : ", e.what());
 
             ssl_socket = nullptr;
 
@@ -1273,7 +1289,7 @@ void resolveAndStoreIPAddress(const std::string& hostname) {
     int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &res);
     if (status != 0) {
         /** Print an error message if resolution fails */
-        std::cerr << "getaddrinfo error : " << gai_strerror(status) << std::endl;
+        log(LogLevel::ERROR, "getaddrinfo error : ", gai_strerror(status));
         return;
     }
 
@@ -1488,16 +1504,16 @@ void fetchAndPopulateUserData() {
         populateUserData(userData);
     } catch (const nlohmann::json::parse_error& e) {
         /**  Handle JSON parsing errors */
-        std::cerr << "JSON Parse Error : " << e.what() << std::endl;
+        log(LogLevel::ERROR, "JSON Parse Error : ", e.what());
     } catch (const nlohmann::json::type_error& e) {
         /** Handle type mismatches in the JSON */ 
-        std::cerr << "JSON Type Error : " << e.what() << std::endl;
+        log(LogLevel::ERROR, "JSON Type Error : ", e.what());
     } catch (const std::exception& e) {
         /** Catch any other standard exceptions */ 
-        std::cerr << "Exception : " << e.what() << std::endl;
+        log(LogLevel::ERROR, "Exception : ", e.what());
     } catch (...) {
         /** Catch any unknown exceptions */ 
-        std::cerr << "An unknown error occurred." << std::endl;
+        log(LogLevel::ERROR, "An unknown error occurred.");
     }
 }
 
@@ -5033,9 +5049,9 @@ void worker_t::work()
     }).listen(PORT, [this](auto *token) {
         listen_socket_ = token;
         if (listen_socket_) {
-            std::cout << "Thread " << std::this_thread::get_id() << " listening on port " << PORT << std::endl;
+            log(LogLevel::INFO, "Thread ", std::this_thread::get_id(), " listening on port ", PORT);
         } else {
-            std::cout << "Thread " << std::this_thread::get_id() << " failed to listen on port " << PORT << std::endl;
+            log(LogLevel::ERROR, "Thread ", std::this_thread::get_id(), " failed to listen on port ", PORT);
         }
     });
 
@@ -5044,7 +5060,7 @@ void worker_t::work()
   /** cleanup */
   io_context.stop();
 
-  std::cout << "Thread " << std::this_thread::get_id() << " exiting" << std::endl;
+  log(LogLevel::INFO, "Thread ", std::this_thread::get_id(), " exiting");
 }
 
 /**
@@ -5090,15 +5106,16 @@ bool isDNSResolvedToIP(std::string_view domain, std::string_view expectedIP) {
  * @param expectedIP The expected IP address.
  */
 void waitForCorrectDNS(std::string_view domain, std::string_view expectedIP) {
-    std::cout << "Waiting for DNS resolution of " << domain << " to match " << expectedIP << "...\n";
+    log(LogLevel::INFO, "Waiting for DNS resolution of ", domain, " to match ", expectedIP, "...");
 
     /** Keep checking until the DNS resolves correctly */
     while (!isDNSResolvedToIP(domain, expectedIP)) {
-        std::cout << "DNS not resolved correctly. Retrying in 10 seconds...\n";
+        log(LogLevel::INFO, "DNS not resolved correctly. Retrying in 10 seconds...");
+
         std::this_thread::sleep_for(std::chrono::seconds(10)); /** Avoid excessive CPU usage */ 
     }
 
-    std::cout << "DNS correctly resolved for " << domain << " to " << expectedIP << "!\n";
+    log(LogLevel::INFO, "DNS correctly resolved for ", domain, " to ", expectedIP, "!");
 }
 
 /**
@@ -5128,13 +5145,13 @@ bool isCertificateValid(std::string_view domain) {
     /** Execute the command using popen */
     std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(checkCmd.c_str(), "r"), pclose);
     if (!pipe) {
-        std::cerr << "Failed to check certificate validity.\n";
+        log(LogLevel::ERROR, "Failed to check certificate validity.");
         return false;
     }
 
     /** Read the command output */
     if (fgets(buffer.data(), buffer.size(), pipe.get()) == nullptr) {
-        std::cout << "Certificate expired or invalid for " << domain << ".\n";
+        log(LogLevel::ERROR, "Certificate expired or invalid for ", domain);
         return false;
     }
 
@@ -5147,7 +5164,8 @@ bool isCertificateValid(std::string_view domain) {
  * @param domain The domain name.
  */
 void createCertificate(std::string_view domain) {
-    std::cout << "Creating a new SSL certificate for " << domain << "...\n";
+    log(LogLevel::INFO, "Creating a new SSL certificate for ", domain);
+
     std::string createCmd = "certbot certonly --staging --standalone --non-interactive --agree-tos "
     "--email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain) + 
     " --config-dir /home/socketlink/certbot-config "
@@ -5162,7 +5180,8 @@ void createCertificate(std::string_view domain) {
  * @param domain The domain name.
  */
 void renewCertificate(std::string_view domain) {
-    std::cout << "Renewing SSL certificate for " << domain << "...\n";
+    log(LogLevel::INFO, "Renewing SSL certificate for ", domain);
+
     std::string renewCmd = 
     "certbot renew --quiet --non-interactive --preferred-challenges http "
     "--config-dir /home/socketlink/certbot-config "
@@ -5203,7 +5222,7 @@ void watchCertChanges(std::string_view domain) {
          * If the file has been modified since the last check, restart the service.
          */
         if (currentModifiedTime != lastModifiedTime) {
-            std::cout << "Certificate changed, restarting service...\n";
+            log(LogLevel::INFO, "Certificate changed, restarting service...");
 
             /** 
              * Restart the server using systemd user service.
@@ -5215,7 +5234,7 @@ void watchCertChanges(std::string_view domain) {
 
 /* Main */
 int main() {
-    log("Main thread Id : ", std::this_thread::get_id());
+    log(LogLevel::INFO, "Main thread Id : ", std::this_thread::get_id());
 
     /** Fetch and populated data before starting the threads */
     fetchAndPopulateUserData();
@@ -5223,12 +5242,12 @@ int main() {
 
     /** Keep retrying if subdomain is empty */
     while (UserData::getInstance().subdomain.empty()) {
-        log("Subdomain is empty, retrying fetch in 10 seconds...\n");
+        log(LogLevel::INFO, "Subdomain is empty, retrying fetch in 10 seconds...\n");
         std::this_thread::sleep_for(std::chrono::seconds(10));
         fetchAndPopulateUserData();
     }
 
-    log("Successfully fetched user data!");
+    log(LogLevel::INFO, "Successfully fetched user data!");
 
     /** loading the ebpf program */
     /* const char *ebpf_program_path = "rr.o";  
@@ -5243,17 +5262,17 @@ int main() {
 
     if (!doesCertificateExist(domain))
     {
-        log("Creating a new SSL certificate for domain : ", domain);
+        log(LogLevel::INFO, "Creating a new SSL certificate for domain : ", domain);
         createCertificate(domain);
     }
     else if (!isCertificateValid(domain))
     {
-        log("Renewing SSL certificate for domain : ", domain);
+        log(LogLevel::INFO, "Renewing SSL certificate for domain : ", domain);
         renewCertificate(domain);
     }
     else
     {
-        log("SSL certificate is valid. No renewal needed.");
+        log(LogLevel::INFO, "SSL certificate is valid. No renewal needed.");
     }
 
     /** running the file change watcher thread */
@@ -5262,7 +5281,7 @@ int main() {
 
     int numThreads = std::thread::hardware_concurrency();
 
-    log("Number of threads available : ", numThreads);
+    log(LogLevel::INFO, "Number of threads available : ", numThreads);
 
     if (numThreads > 1)
     {
