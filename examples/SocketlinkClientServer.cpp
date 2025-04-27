@@ -2034,7 +2034,7 @@ void worker_t::work()
             });
         }
 
-        if(upgradeData->metadata.length() < 1024) {
+        if(upgradeData->metadata.length() > 1024) {
             totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
             res->cork([res]() {
