@@ -1604,7 +1604,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
     };
 
     if (validRoomTypes.count(roomType)) {
-        std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"uid\":\"" + ws->getUserData()->uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+        std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"metadata\":\"" + ws->getUserData()->metadata + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
         /** Publish message to all workers */
         for (auto& w : ::workers) {
@@ -1768,7 +1768,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
             roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
         ) {
-            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"uid\":\"" + uid + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"metadata\":\"" + ws->getUserData()->metadata + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
 
             if(workerThreadId == currentThreadId) {
                 ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
@@ -2005,6 +2005,7 @@ void worker_t::work()
             std::string secWebSocketExtensions;
             std::string key;
             std::string uid;
+            std::string metadata;
             struct us_socket_context_t *context;
             decltype(res) httpRes;
             bool aborted = false;
@@ -2014,6 +2015,7 @@ void worker_t::work()
             std::string(req->getHeader("sec-websocket-extensions")),
             std::string(req->getHeader("api-key")),
             std::string(req->getHeader("uid").data() ? req->getHeader("uid") : ""),
+            std::string(req->getHeader("metadata").data() ? req->getHeader("metadata") : ""),
             context,
             res
         };
@@ -2029,6 +2031,16 @@ void worker_t::work()
                 res->writeStatus("400 Bad Request");
                 res->writeHeader("Content-Type", "application/json");
                 res->end("INVALID_UID");
+            });
+        }
+
+        if(upgradeData->metadata.length() < 1024) {
+            totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("400 Bad Request");
+                res->writeHeader("Content-Type", "application/json");
+                res->end("INVALID_METADATA");
             });
         }
 
@@ -2128,6 +2140,7 @@ void worker_t::work()
                     /* We initialize PerSocketData struct here */
                     .key = upgradeData->key,
                     .uid = upgradeData->uid,
+                    .metadata = upgradeData->metadata,
                 }, upgradeData->secWebSocketKey,
                     upgradeData->secWebSocketProtocol,
                     upgradeData->secWebSocketExtensions,
@@ -2526,7 +2539,7 @@ void worker_t::work()
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"message": "Unauthorized access. Invalid API key!"})");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                     });
                 }
     
@@ -2718,7 +2731,7 @@ void worker_t::work()
                     res->cork([res]() {
                         res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
-                        res->end(R"({"message": "Unauthorized access. Invalid API key!"})");
+                        res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                     });
                 }
     
@@ -4053,7 +4066,58 @@ void worker_t::work()
                             /** Extract `rid` and `uid` from each item in the request */ 
                             std::string rid = item["rid"];
                             std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
+
+                            uint8_t roomType = 255;
+
+                            /** checking if the correct room type is received */
+                            if (rid.rfind("pub-state-cache-", 0) == 0)
+                            {
+                                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
+                            }
+                            else if (rid.rfind("pri-state-cache-", 0) == 0)
+                            {
+                                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
+                            }
+                            else if (rid.rfind("pub-cache-", 0) == 0)
+                            {
+                                roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
+                            }
+                            else if (rid.rfind("pri-cache-", 0) == 0)
+                            {
+                                roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
+                            }
+                            else if (rid.rfind("pub-state-", 0) == 0)
+                            {
+                                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
+                            }
+                            else if (rid.rfind("pri-state-", 0) == 0)
+                            {
+                                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
+                            }
+                            else if (rid.rfind("pub-", 0) == 0)
+                            {
+                                roomType = static_cast<uint8_t>(Rooms::PUBLIC);
+                            }
+                            else if (rid.rfind("pri-", 0) == 0)
+                            {
+                                roomType = static_cast<uint8_t>(Rooms::PRIVATE);
+                            }
+                            else
+                            {                        
+                                if(!*isAborted){
+                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                                    res->cork([res]() {
+                                        res->writeStatus("400 Bad Request");
+                                        res->writeHeader("Content-Type", "application/json");
+                                        res->end("{\"message\": \"The provided room type is invalid!\"}");
+                                    });
+                                }
+
+                                return;
+                            }
                             
+                            /** banning the user */
                             if(isMultiThread) {
                                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
                                 tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
@@ -4076,9 +4140,17 @@ void worker_t::work()
                                             worker_t* worker = conn_accessor->second.worker; 
 
                                             /** Disconnect the WebSocket or perform any other disconnection logic */
-                                            worker->loop_->defer([ws]() {
-                                                ws->end(1008, "{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\"}");
-                                            });
+                                            if(rid == "global") {
+                                                worker->loop_->defer([ws]() {
+                                                    ws->end(1008, "{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\"}");
+                                                });
+                                            } else {
+                                                /** cloding the connection for the given rid */
+                                                closeConnection(ws, worker, rid, uid, roomType);
+
+                                                /** Tell the user in case of room ban */
+                                                ws->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\", \"rid\":\"" + rid + "\"}", uWS::OpCode::TEXT, true);
+                                            }
                                         }
                                     }
                                 }
@@ -4094,10 +4166,19 @@ void worker_t::work()
                                     /** Check if the UID exists in active connections */
                                     if (auto it = SingleThreaded::connections.find(uid); it != SingleThreaded::connections.end()) {
                                         /** Defer execution to properly close the WebSocket connection */
-                                        it->second.worker->loop_->defer([ws = it->second.ws]() {
-                                            /** Send a WebSocket close message with a ban notification */
-                                            ws->end(1008, R"({"data":"YOU_HAVE_BEEN_BANNED", "source":"admin"})");
-                                        });
+
+                                        if(rid == "global") {
+                                            it->second.worker->loop_->defer([ws = it->second.ws]() {
+                                                /** Send a WebSocket close message with a ban notification */
+                                                ws->end(1008, R"({"data":"YOU_HAVE_BEEN_BANNED", "source":"admin"})");
+                                            });
+                                        } else {
+                                            /** cloding the connection for the given rid */
+                                            closeConnection(it->second.ws, it->second.worker, rid, uid, roomType);
+
+                                            /** Tell the user in case of room ban */
+                                            it->second.ws->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\", \"rid\":\"" + rid + "\"}", uWS::OpCode::TEXT, true);
+                                        }
                                     }
                                 }
                             }
@@ -5110,12 +5191,14 @@ void pin_thread_to_core(int core_id)
     int result = pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
     if (result != 0)
     {
-        std::cerr << "Failed to pin thread to core " << core_id << ": " << strerror(errno) << "\n";
+        std::cerr << "Failed to pin thread to core " << core_id << " : " << strerror(errno) << "\n";
     }
 }
 
 /* Main */
 int main() {
+    std::cout << "Main thread ID : " << std::this_thread::get_id() << std::endl;
+
     /** Fetch and populated data before starting the threads */
     fetchAndPopulateUserData();
     init_env();
@@ -5152,10 +5235,12 @@ int main() {
     }
 
     /** running the file change watcher thread */
-    /* std::thread watcher(watchCertChanges, domain);
-    watcher.detach(); */
+    std::thread watcher(watchCertChanges, domain);
+    watcher.detach();
 
     int numThreads = std::thread::hardware_concurrency();
+
+    log("Number of threads available : " + std::to_string(numThreads));
 
     if (numThreads > 1)
     {
