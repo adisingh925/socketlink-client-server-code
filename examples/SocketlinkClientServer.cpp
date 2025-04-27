@@ -5168,7 +5168,7 @@ bool isCertificateValid(std::string_view domain) {
 void createCertificate(std::string_view domain) {
     log(LogLevel::INFO, "Creating a new SSL certificate for ", domain);
 
-    std::string createCmd = "certbot certonly --staging --standalone --non-interactive --agree-tos "
+    std::string createCmd = "certbot certonly --standalone --non-interactive --agree-tos "
     "--email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain) + 
     " --config-dir /home/socketlink/certbot-config "
     "--work-dir /home/socketlink/certbot-work "
