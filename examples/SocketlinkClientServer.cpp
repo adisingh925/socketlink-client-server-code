@@ -2084,7 +2084,7 @@ void worker_t::work()
             totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
             res->cork([res]() {
-                res->writeStatus("400 Bad Request");
+                res->writeStatus("413 Payload Too Large");
                 res->writeHeader("Content-Type", "application/json");
                 res->end("INVALID_METADATA");
             });
