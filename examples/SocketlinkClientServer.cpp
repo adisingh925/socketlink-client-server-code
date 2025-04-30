@@ -2034,7 +2034,7 @@ void worker_t::work()
   /* Very simple WebSocket broadcasting echo server */
   app_->ws<PerSocketData>("/*", {
     /* Settings */
-    .compression = uWS::CompressOptions(uWS::DEDICATED_COMPRESSOR | uWS::DEDICATED_DECOMPRESSOR),
+    .compression = uWS::DISABLED,
     .maxPayloadLength = UserData::getInstance().msgSizeAllowedInBytes,
     .idleTimeout = UserData::getInstance().idleTimeoutInSeconds,
     .maxBackpressure = UserData::getInstance().maxBackpressureInBytes,
