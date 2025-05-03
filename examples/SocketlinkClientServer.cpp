@@ -5292,14 +5292,11 @@ int main() {
 
     workers.resize(numThreads);
     
-    std::transform(workers.begin(), workers.end(), workers.begin(), [](worker_t &w) {
+    for (auto &w : workers) {
         w.thread_ = std::make_shared<std::thread>([&w]() {
-            /* create uWebSocket worker and capture uWS::Loop, uWS::App objects. */
             w.work();
         });
-
-        return w;
-    });
+    }    
     
     std::for_each(workers.begin(), workers.end(), [](worker_t &w) {
         w.thread_->join();
