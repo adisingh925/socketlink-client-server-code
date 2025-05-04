@@ -2416,15 +2416,15 @@ void worker_t::work()
                     ws->publish(rid, data, opCode, true);
 
                     /** publish the message to every other thread on the required room */
-                    // std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
-                    //     /** Check if the current thread ID matches the worker's thread ID */ 
-                    //     if (std::this_thread::get_id() != w.thread_->get_id()) {
-                    //         /** Defer the message publishing to the worker's loop */ 
-                    //         w.loop_->defer([&w, data, opCode, rid]() {
-                    //             w.app_->publish(rid, data, opCode, true);
-                    //         });
-                    //     }
-                    // });
+                    std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
+                        /** Check if the current thread ID matches the worker's thread ID */ 
+                        if (std::this_thread::get_id() != w.thread_->get_id()) {
+                            /** Defer the message publishing to the worker's loop */ 
+                            w.loop_->defer([&w, data, opCode, rid]() {
+                                w.app_->publish(rid, data, opCode, true);
+                            });
+                        }
+                    });
 
                     /** send latency message to the current websocket, random selection */
                     auto now = std::chrono::high_resolution_clock::now();
