@@ -719,7 +719,6 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 thread_local double localEma = 0.0;
 thread_local std::chrono::time_point<std::chrono::high_resolution_clock> threadTimestamp = std::chrono::high_resolution_clock::now();   // Thread-local variable to store timestamp
 static thread_local simdjson::ondemand::parser parser;
-thread_local std::atomic<int> messagesReceivedPerThread(0); /** Number of messages received in the current thread */
 
 /** Internal Constants */
 constexpr const char* INTERNAL_IP = "169.254.169.254";
@@ -2417,24 +2416,21 @@ void worker_t::work()
                     ws->publish(rid, data, opCode, true);
 
                     /** publish the message to every other thread on the required room */
-                    std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
-                        /** Check if the current thread ID matches the worker's thread ID */ 
-                        if (std::this_thread::get_id() != w.thread_->get_id()) {
-                            /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w, data, opCode, rid]() {
-                                w.app_->publish(rid, data, opCode, true);
-                            });
-                        }
-                    });
-
-                    messagesReceivedPerThread.fetch_add(1, std::memory_order_relaxed);
+                    // std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
+                    //     /** Check if the current thread ID matches the worker's thread ID */ 
+                    //     if (std::this_thread::get_id() != w.thread_->get_id()) {
+                    //         /** Defer the message publishing to the worker's loop */ 
+                    //         w.loop_->defer([&w, data, opCode, rid]() {
+                    //             w.app_->publish(rid, data, opCode, true);
+                    //         });
+                    //     }
+                    // });
 
                     /** send latency message to the current websocket, random selection */
                     auto now = std::chrono::high_resolution_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - threadTimestamp).count();
 
                     if(elapsed > 10){
-                        log(LogLevel::INFO, "Messages received in thread ", std::this_thread::get_id(), " : ", messagesReceivedPerThread.load(std::memory_order_relaxed));
                         std::string data = "{\"source\":\"latency\"}";
                         ws->send(data, uWS::OpCode::TEXT, true);
                         threadTimestamp = now;
