@@ -619,8 +619,13 @@ struct worker_t
 
 /******************************************************************************************************************************************************************************************/
 
-/** Global variables */ 
+/** Global variables */
 MDB_env* env;
+
+/** Single shared LMDB database handle, opened once in init_env and reused for the
+ *  lifetime of the process. LMDB DBI handles are meant to be opened once and shared;
+ *  opening/closing one inside every transaction takes a lock and is wasteful. */
+MDB_dbi g_dbi;
 
 /** Mutexes for thread-safety */
 std::mutex write_mutex;
@@ -883,13 +888,31 @@ void init_env() {
         exit(-1);
     }
 
+    /** Open the single shared database handle once and keep it for the process
+     *  lifetime (reused by all read/write/delete transactions). */
+    {
+        MDB_txn* txn;
+        if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
+            log(LogLevel::ERROR, "Failed to begin txn for dbi open.");
+            exit(-1);
+        }
+        if (mdb_dbi_open(txn, "messages_db", MDB_CREATE, &g_dbi) != 0) {
+            log(LogLevel::ERROR, "Failed to open LMDB database handle.");
+            mdb_txn_abort(txn);
+            exit(-1);
+        }
+        if (mdb_txn_commit(txn) != 0) {
+            log(LogLevel::ERROR, "Failed to commit dbi open txn.");
+            exit(-1);
+        }
+    }
+
     log(LogLevel::INFO, "LMDB environment initialized successfully.");
 }
 
 /** write the data to the LMDB, LMDB has internal locking mechanish so no need to mutexes */
 void write_worker(const std::string& room_id, const std::string& message_content, bool needsCommit = false) {
     MDB_txn* txn;
-    MDB_dbi dbi;
 
     /** Batch to store messages before writing them to the database */
     thread_local std::vector<std::tuple<std::string, std::string>> batch;
@@ -909,14 +932,6 @@ void write_worker(const std::string& room_id, const std::string& message_content
             return;
         }
 
-        /** Open the database (common for all rooms) */
-        if (mdb_dbi_open(txn, "messages_db", MDB_CREATE, &dbi) != 0) {
-            log(LogLevel::ERROR, "Failed to open database.");
-            batch.clear();  // Clear batch on error
-            mdb_txn_abort(txn);
-            return;
-        }
-
         /** Write each key-value pair from the batch into the database */
         for (const auto& [key_str, value_str] : batch) {
             MDB_val key, value;
@@ -930,7 +945,7 @@ void write_worker(const std::string& room_id, const std::string& message_content
             value.mv_data = (void*)value_str.data();
 
             /** Insert the key-value pair into the database */
-            if (mdb_put(txn, dbi, &key, &value, 0) != 0) {
+            if (mdb_put(txn, g_dbi, &key, &value, 0) != 0) {
                 log(LogLevel::ERROR, "Failed to write key : ", key_str);
                 batch.clear();  // Clear batch on error
                 mdb_txn_abort(txn);
@@ -948,16 +963,12 @@ void write_worker(const std::string& room_id, const std::string& message_content
 
         /** Clear the batch after a successful commit */
         batch.clear();
-
-        /** Close the database handle */
-        mdb_dbi_close(env, dbi);
     }
 }
 
 /** This function will delete the entry stored under the exact room_id key */
 void delete_worker(const std::string& room_id) {
     MDB_txn* txn;
-    MDB_dbi dbi;
     MDB_val key;
 
     /** Lock the mutex to ensure thread-safety for shared resources */
@@ -969,19 +980,12 @@ void delete_worker(const std::string& room_id) {
         return;
     }
 
-    /** Open the database */
-    if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
-        log(LogLevel::ERROR, "Failed to open database.");
-        mdb_txn_abort(txn);
-        return;
-    }
-
     /** Set up the key for deletion */
     key.mv_data = (void*)room_id.c_str();
     key.mv_size = room_id.size();
 
-    /** Delete the entry with the exact room_id key */
-    if (mdb_del(txn, dbi, &key, nullptr) != 0) {
+    /** Delete the entry with the exact room_id key (shared g_dbi handle) */
+    if (mdb_del(txn, g_dbi, &key, nullptr) != 0) {
         log(LogLevel::ERROR, "Failed to delete key : ", room_id);
         mdb_txn_abort(txn);
         return;
@@ -991,14 +995,10 @@ void delete_worker(const std::string& room_id) {
     if (mdb_txn_commit(txn) != 0) {
         log(LogLevel::ERROR, "Failed to commit delete transaction.");
     }
-
-    /** Close database handle */
-    mdb_dbi_close(env, dbi);
 }
 
 std::string read_worker(const std::string& room_id) {
     MDB_txn* txn;  /** Transaction handle */
-    MDB_dbi dbi;   /** Database handle */
     MDB_val key, value;  /** Key-value pair to store the retrieved data */
 
     /** Start a read-only transaction */
@@ -1007,38 +1007,22 @@ std::string read_worker(const std::string& room_id) {
         return "{}";  /** Return empty JSON object on failure */
     }
 
-    /** Open the common database for all rooms */
-    if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
-        log(LogLevel::ERROR, "Failed to open database : ", mdb_strerror(errno));
-        mdb_txn_abort(txn);
-        return "{}";  /** Return empty JSON object on failure */
-    }
-
     /** Prepare the key (room_id) */
     key.mv_size = room_id.size();
     key.mv_data = (void*)room_id.data();
 
-    /** Retrieve the value for the given room_id */
-    if (mdb_get(txn, dbi, &key, &value) == 0) {
+    /** Retrieve the value for the given room_id (shared g_dbi handle) */
+    if (mdb_get(txn, g_dbi, &key, &value) == 0) {
         std::string message_content((char*)value.mv_data, value.mv_size);
-        
-        /** Construct the JSON response */
-        /* std::ostringstream result;
-        result << "{\n";
-        result << "  \"message\": \"" << message_content << "\"\n";
-        result << "}"; */
 
-        /** Close the database handle and commit transaction */
-        mdb_dbi_close(env, dbi);
+        /** Commit (end) the read-only transaction */
         mdb_txn_commit(txn);
 
-        /* return result.str(); */
         return message_content;
     }
 
     /** No message found for the given room_id */
     log(LogLevel::ERROR, "No message found for room_id : ", room_id);
-    mdb_dbi_close(env, dbi);
     mdb_txn_abort(txn);
     return "{}";  /** Return empty JSON object if no message exists */
 }
@@ -5115,7 +5099,6 @@ void worker_t::work()
             }
 
             MDB_txn* txn = nullptr;  /** Pointer for LMDB transaction */
-            MDB_dbi dbi;  /** Handle for LMDB database */
 
             try {
                 /** Begin a write transaction, avoid creating a new txn each time for efficiency */
@@ -5123,14 +5106,8 @@ void worker_t::work()
                     throw std::runtime_error("Failed to begin transaction.");
                 }
 
-                /** Open the database only once and reuse the handle */
-                if (mdb_dbi_open(txn, "messages_db", 0, &dbi) != 0) {
-                    mdb_txn_abort(txn);  /** Abort transaction if database fails to open */
-                    throw std::runtime_error("Failed to open database.");
-                }
-
-                /** Drop all keys in the database while keeping its structure */
-                if (mdb_drop(txn, dbi, 0) != 0) {  /** Pass `0` to truncate the database */
+                /** Drop all keys in the shared database while keeping its structure */
+                if (mdb_drop(txn, g_dbi, 0) != 0) {  /** Pass `0` to truncate the database */
                     mdb_txn_abort(txn);  /** Abort transaction if drop operation fails */
                     throw std::runtime_error("Failed to drop database.");
                 }
