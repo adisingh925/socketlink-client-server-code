@@ -794,6 +794,45 @@ std::string to_hex(const unsigned char* data, size_t len) {
     return hex;  /**< Return hex string */
 }
 
+/**
+ * Appends `s` to `out` as the CONTENTS of a JSON string (without surrounding quotes),
+ * escaping per RFC 8259. All server envelopes and webhook payloads are built by
+ * concatenating raw strings, so any user-controlled field (message, rid, uid, metadata)
+ * containing a '"', '\\', or control character would otherwise break out of its JSON
+ * string and corrupt the envelope (or inject fields). This makes that impossible.
+ */
+void appendJsonEscaped(std::string& out, std::string_view s) {
+    static const char hex_digits[] = "0123456789abcdef";
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (c < 0x20) {
+                    /** Other control characters must be escaped as \u00XX */
+                    out += "\\u00";
+                    out += hex_digits[(c >> 4) & 0xF];
+                    out += hex_digits[c & 0xF];
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+}
+
+/** Convenience wrapper returning the JSON-escaped contents of `s` (no surrounding quotes). */
+std::string jsonEscape(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    appendJsonEscaped(out, s);
+    return out;
+}
+
 /** Fetch the current time in SQL compatible format */
 std::string getCurrentSQLTime() {
     /** Get the current time as a time_point */
@@ -1773,7 +1812,7 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
     };
 
     if (validRoomTypes.count(roomType)) {
-        std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"metadata\":\"" + ws->getUserData()->metadata + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+        std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"metadata\":\"" + jsonEscape(ws->getUserData()->metadata) + "\", \"source\":\"server\", \"rid\":\"" + jsonEscape(rid) + "\"}";
 
         /** Publish message to all workers */
         for (auto& w : ::workers) {
@@ -1786,9 +1825,9 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
     if(getWebhookStatus(Webhooks::ON_UNSUBSCRIBE) == 1){
         std::ostringstream payload;
         payload << "{\"event\":\"ON_UNSUBSCRIBE\", "
-        << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-        << "\"rid\":\"" << rid << "\", "
-        << "\"connections_in_room\":\"" << size << "\"}";    
+        << "\"uid\":\"" << jsonEscape(ws->getUserData()->uid) << "\", "
+        << "\"rid\":\"" << jsonEscape(rid) << "\", "
+        << "\"connections_in_room\":\"" << size << "\"}";
 
         std::string body = payload.str(); 
         
@@ -1805,8 +1844,8 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
         if(getWebhookStatus(Webhooks::ON_ROOM_VACATED) == 1){
             std::ostringstream payload;
             payload << "{\"event\":\"ON_ROOM_VACATED\", "
-            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-            << "\"rid\":\"" << rid << "\"}";             
+            << "\"uid\":\"" << jsonEscape(ws->getUserData()->uid) << "\", "
+            << "\"rid\":\"" << jsonEscape(rid) << "\"}";
 
             std::string body = payload.str(); 
             
@@ -1937,7 +1976,7 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
             roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)
         ) {
-            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"metadata\":\"" + ws->getUserData()->metadata + "\", \"source\":\"server\", \"rid\":\"" + rid + "\"}";
+            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"metadata\":\"" + jsonEscape(ws->getUserData()->metadata) + "\", \"source\":\"server\", \"rid\":\"" + jsonEscape(rid) + "\"}";
 
             if(workerThreadId == currentThreadId) {
                 ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
@@ -1958,9 +1997,9 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
         if(getWebhookStatus(Webhooks::ON_SUBSCRIBE) == 1){
             std::ostringstream payload;
             payload << "{\"event\":\"ON_SUBSCRIBE\", "
-            << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-            << "\"rid\":\"" << rid << "\", "
-            << "\"connections_in_room\":\"" << size << "\"}";    
+            << "\"uid\":\"" << jsonEscape(ws->getUserData()->uid) << "\", "
+            << "\"rid\":\"" << jsonEscape(rid) << "\", "
+            << "\"connections_in_room\":\"" << size << "\"}";
 
             std::string body = payload.str(); 
             
@@ -1977,8 +2016,8 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
             if(getWebhookStatus(Webhooks::ON_ROOM_OCCUPIED) == 1){
                 std::ostringstream payload;
                 payload << "{\"event\":\"ON_ROOM_OCCUPIED\", "
-                << "\"uid\":\"" << ws->getUserData()->uid << "\", "
-                << "\"rid\":\"" << rid << "\"}";             
+                << "\"uid\":\"" << jsonEscape(ws->getUserData()->uid) << "\", "
+                << "\"rid\":\"" << jsonEscape(rid) << "\"}";
 
                 std::string body = payload.str(); 
                 
@@ -2369,7 +2408,7 @@ void worker_t::work()
     },
     .message = [this](auto *ws, std::string_view message, uWS::OpCode opCode) {
         auto& userData = *ws->getUserData();
-        auto uid = userData.uid;
+        const auto& uid = userData.uid;
 
         auto sendMessagingDisabled = [&]() {
             ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
@@ -2547,34 +2586,43 @@ void worker_t::work()
                         }
                     }
 
-                    /** publishing message */
-                    std::string data = "{\"data\":\"" + message + "\",\"source\":\"user\",\"rid\":\"" + rid + "\"}";
-                    ws->publish(rid, data, opCode, true);
+                    /** Build the published envelope once, escaping the user-controlled
+                     *  message and room id so a quote/backslash/control char cannot break
+                     *  out of the JSON string or inject fields. */
+                    auto data = std::make_shared<std::string>();
+                    data->reserve(message.size() + rid.size() + 40);
+                    *data += "{\"data\":\"";
+                    appendJsonEscaped(*data, message);
+                    *data += "\",\"source\":\"user\",\"rid\":\"";
+                    appendJsonEscaped(*data, rid);
+                    *data += "\"}";
 
-                    /** publish the message to every other thread on the required room */
-                    std::for_each(::workers.begin(), ::workers.end(), [data, opCode, rid](worker_t &w) {
-                        /** Check if the current thread ID matches the worker's thread ID */ 
+                    /** Publish locally on this worker */
+                    ws->publish(rid, *data, opCode, true);
+
+                    /** Publish on every other worker's loop. The payload and room id are
+                     *  shared via shared_ptr so they are not copied once per worker thread. */
+                    auto ridShared = std::make_shared<std::string>(rid);
+                    for (auto &w : ::workers) {
                         if (std::this_thread::get_id() != w.thread_->get_id()) {
-                            /** Defer the message publishing to the worker's loop */ 
-                            w.loop_->defer([&w, data, opCode, rid]() {
-                                w.app_->publish(rid, data, opCode, true);
+                            w.loop_->defer([&w, data, ridShared, opCode]() {
+                                w.app_->publish(*ridShared, *data, opCode, true);
                             });
                         }
-                    });
+                    }
 
                     /** send latency message to the current websocket, random selection */
                     auto now = std::chrono::high_resolution_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - threadTimestamp).count();
 
                     if(elapsed > 10){
-                        std::string data = "{\"source\":\"latency\"}";
-                        ws->send(data, uWS::OpCode::TEXT, true);
+                        ws->send(R"({"source":"latency"})", uWS::OpCode::TEXT, true);
                         threadTimestamp = now;
                     }
 
                     unsigned int subscribers = app_->numSubscribers(rid);
                     globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
-                    totalPayloadSent.fetch_add(static_cast<unsigned long long>(data.size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);   
+                    totalPayloadSent.fetch_add(static_cast<unsigned long long>(data->size()) * static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
 
                     /** Writing data to the LMDB */
                     if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE)
@@ -2597,9 +2645,9 @@ void worker_t::work()
                     if(getWebhookStatus(Webhooks::ON_MESSAGE) == 1) {
                         std::ostringstream payload;
                         payload << "{\"event\":\"ON_MESSAGE\", "
-                                << "\"uid\":\"" << uid << "\", "
-                                << "\"rid\":\"" << rid << "\", "
-                                << "\"message\":\"" << message << "\"}"; 
+                                << "\"uid\":\"" << jsonEscape(uid) << "\", "
+                                << "\"rid\":\"" << jsonEscape(rid) << "\", "
+                                << "\"message\":\"" << jsonEscape(message) << "\"}";
 
                         std::string body = payload.str(); 
                         
@@ -3448,8 +3496,8 @@ void worker_t::work()
                     std::ostringstream payload;
 
                     payload << "{\"event\":\"ON_VERIFICATION_REQUEST\", "
-                    << "\"uid\":\"" << uid << "\", "
-                    << "\"rid\":\"" << rid << "\"}";
+                    << "\"uid\":\"" << jsonEscape(uid) << "\", "
+                    << "\"rid\":\"" << jsonEscape(rid) << "\"}";
 
                     std::string body = payload.str();
 
@@ -3980,7 +4028,7 @@ void worker_t::work()
                         nlohmann::json parsedJson = nlohmann::json::parse(body);
     
                         std::string message = parsedJson["message"].get<std::string>();
-                        std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"rid\":\"" + BROADCAST + "\"}";
+                        std::string messageToBroadcast = "{\"data\":\"" + jsonEscape(message) + "\",\"source\":\"admin\",\"rid\":\"" + BROADCAST + "\"}";
 
                         /** broadcast a message to all the rooms */
                         std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast](worker_t &w) {
@@ -4067,7 +4115,7 @@ void worker_t::work()
                         std::vector<std::string> rids = parsedJson["rid"].get<std::vector<std::string>>();
 
                         for (const auto& rid : rids) {
-                            std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"rid\":\"" + rid + "\"}";
+                            std::string messageToBroadcast = "{\"data\":\"" + jsonEscape(message) + "\",\"source\":\"admin\",\"rid\":\"" + jsonEscape(rid) + "\"}";
 
                             /** broadcast a message to a specific room */
                             std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast, rid](worker_t &w) {
@@ -4155,7 +4203,7 @@ void worker_t::work()
                         std::vector<std::string> uids = parsedJson["uid"].get<std::vector<std::string>>();
 
                         for (const auto& uid : uids) {
-                            std::string messageToBroadcast = "{\"data\":\"" + message + "\",\"source\":\"admin\",\"rid\":\"" + uid + "\"}";
+                            std::string messageToBroadcast = "{\"data\":\"" + jsonEscape(message) + "\",\"source\":\"admin\",\"rid\":\"" + jsonEscape(uid) + "\"}";
 
                             /** broadcast a message to a specific member of a room */
                             std::for_each(::workers.begin(), ::workers.end(), [messageToBroadcast, uid](worker_t &w) {
@@ -4330,7 +4378,7 @@ void worker_t::work()
                                                 closeConnection(ws, worker, rid, uid, roomType);
 
                                                 /** Tell the user in case of room ban */
-                                                ws->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\", \"rid\":\"" + rid + "\"}", uWS::OpCode::TEXT, true);
+                                                ws->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\", \"rid\":\"" + jsonEscape(rid) + "\"}", uWS::OpCode::TEXT, true);
                                             }
                                         }
                                     }
@@ -4358,7 +4406,7 @@ void worker_t::work()
                                             closeConnection(it->second.ws, it->second.worker, rid, uid, roomType);
 
                                             /** Tell the user in case of room ban */
-                                            it->second.ws->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\", \"rid\":\"" + rid + "\"}", uWS::OpCode::TEXT, true);
+                                            it->second.ws->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\", \"rid\":\"" + jsonEscape(rid) + "\"}", uWS::OpCode::TEXT, true);
                                         }
                                     }
                                 }
