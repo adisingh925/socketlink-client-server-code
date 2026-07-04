@@ -2214,7 +2214,12 @@ void worker_t::work()
             struct us_socket_context_t *context;
             decltype(res) httpRes;
             bool aborted = false;
-        } *upgradeData = new UpgradeData {
+        };
+
+        /** Owned for the (synchronous) lifetime of this handler; freed automatically
+         *  on every return path. Previously heap-allocated with `new` and never
+         *  deleted -> one leak per connection attempt. */
+        auto upgradeData = std::unique_ptr<UpgradeData>(new UpgradeData {
             std::string(req->getHeader("sec-websocket-key")),
             std::string(req->getHeader("sec-websocket-protocol")),
             std::string(req->getHeader("sec-websocket-extensions")),
@@ -2223,10 +2228,10 @@ void worker_t::work()
             std::string(req->getHeader("metadata").data() ? req->getHeader("metadata") : ""),
             context,
             res
-        };
+        });
 
-        res->onAborted([=]() {
-            upgradeData->aborted = true;
+        res->onAborted([ud = upgradeData.get()]() {
+            ud->aborted = true;
         });
 
         if(upgradeData->uid.empty() || upgradeData->uid.length() > 4096) {
@@ -2344,19 +2349,19 @@ void worker_t::work()
         }
 
         if (!upgradeData->aborted) {
-            upgradeData->httpRes->cork([upgradeData]() {
-                upgradeData->httpRes->template upgrade<PerSocketData>({
+            upgradeData->httpRes->cork([ud = upgradeData.get()]() {
+                ud->httpRes->template upgrade<PerSocketData>({
                     /* We initialize PerSocketData struct here */
-                    .key = upgradeData->key,
-                    .uid = upgradeData->uid,
-                    .metadata = upgradeData->metadata,
-                }, upgradeData->secWebSocketKey,
-                    upgradeData->secWebSocketProtocol,
-                    upgradeData->secWebSocketExtensions,
-                    upgradeData->context
+                    .key = ud->key,
+                    .uid = ud->uid,
+                    .metadata = ud->metadata,
+                }, ud->secWebSocketKey,
+                    ud->secWebSocketProtocol,
+                    ud->secWebSocketExtensions,
+                    ud->context
                 );
             });
-        } 
+        }
     },
     .open = [this](auto *ws) {
         WebSocketData data;
