@@ -1163,11 +1163,16 @@ static int sendWebhookBlocking(
                 /** if the request cannot be delivered immediately it will be dropped */
                 /* ssl_socket->lowest_layer().non_blocking(true); */  
 
-                /** Specify the endpoint using the IP address and port. 
+                /** Specify the endpoint using the IP address and port.
                  *  Ensure the IP address is correctly formatted. */
+#ifdef LOCAL_TEST
+                constexpr int webhookPort = 8443; /** unprivileged port for the local mock webhook */
+#else
+                constexpr int webhookPort = 443;
+#endif
                 boost::asio::ip::tcp::endpoint endpoint(
                     boost::asio::ip::make_address(UserData::getInstance().webhookIP),
-                    443
+                    webhookPort
                 );
 
                 /** Establish a connection to the endpoint. */
@@ -5444,6 +5449,17 @@ int main() {
         u.idleTimeoutInSeconds     = 120;
         u.subdomain = "localtest";
         /** webhooks and MySQL integration left disabled (empty status maps) */
+
+        /** Optional: enable an ON_MESSAGE webhook pointing at a local mock, to
+         *  demonstrate that fire-and-forget webhooks no longer block the event
+         *  loop. Enabled only when SL_TEST_WEBHOOK is set in the environment. */
+        if (std::getenv("SL_TEST_WEBHOOK")) {
+            u.webHookBaseUrl = "127.0.0.1";
+            u.webhookPath    = "/webhook";
+            u.webhookIP      = "127.0.0.1";
+            populateWebhookStatus(static_cast<uint8_t>(Webhooks::ON_MESSAGE));
+            log(LogLevel::INFO, "LOCAL_TEST: ON_MESSAGE webhook enabled -> 127.0.0.1:8443");
+        }
     }
     init_env();
     log(LogLevel::INFO, "LOCAL_TEST mode: cloud provisioning bypassed.");
