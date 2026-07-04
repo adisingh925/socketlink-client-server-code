@@ -1720,45 +1720,31 @@ void fetchAndPopulateUserData() {
 void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType, bool isClosed = false) {
     if(isClosed == false){
         /** removing the RID from the uid_to_rid mapping */
-        if(isMultiThread) {
-            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-            if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
-                auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
+        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
+        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
+            auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
 
-                /** Remove the rid from the inner map */
-                {
-                    tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                    if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
-                        inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
-                    }
-                }
-
-                /** Check if the inner map is now empty */
-                if (inner_uid_to_rid_map.empty()) {
-
-                    /** Check if the uid map has the value false, make it true (orphan) else ignore */
-                    tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-                    if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
-                        if (!uid_outer_accessor->second) { 
-                            uid_outer_accessor->second = true;
-                        }
-                    }
-
-                    ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
+            /** Remove the rid from the inner map */
+            {
+                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
+                if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
+                    inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
                 }
             }
-        } else {
-            if (auto it = SingleThreaded::uidToRoomMapping.find(uid); it != SingleThreaded::uidToRoomMapping.end()) {
-                it->second.erase(rid);
-                
-                if (it->second.empty()) {
-                    SingleThreaded::uidToRoomMapping.erase(it);
-            
-                    if (auto uidIt = SingleThreaded::uid.find(uid); uidIt != SingleThreaded::uid.end() && !uidIt->second) {
-                        uidIt->second = true;
+
+            /** Check if the inner map is now empty */
+            if (inner_uid_to_rid_map.empty()) {
+
+                /** Check if the uid map has the value false, make it true (orphan) else ignore */
+                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
+                if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
+                    if (!uid_outer_accessor->second) {
+                        uid_outer_accessor->second = true;
                     }
                 }
-            }                        
+
+                ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
+            }
         }
     }
 
@@ -1768,58 +1754,35 @@ void closeConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wo
     int size = 0;
 
     /** Check if the room exists in the topics map */
-    if(isMultiThread){
-        if (ThreadSafe::topics.find(outer_accessor, rid)) {
-            auto& inner_map = outer_accessor->second;
+    if (ThreadSafe::topics.find(outer_accessor, rid)) {
+        auto& inner_map = outer_accessor->second;
 
-            /** Remove user from the inner map */
-            {
-                tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
-                if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
-                    inner_map.erase(inner_accessor);
-                }
-            }
-
-            size = inner_map.size();
-
-            /** Remove room if empty */
-            if (size == 0) {
-                /** Remove room from topics */
-                ThreadSafe::topics.erase(outer_accessor);
-
-                /** Remove disabled and banned connections */
-                for (auto& map : {&ThreadSafe::disabledConnections, &ThreadSafe::bannedConnections}) {
-                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor map_accessor;
-
-                    if (map->find(map_accessor, rid)) {
-                        map->erase(map_accessor);
-                    }
-                }
+        /** Remove user from the inner map */
+        {
+            tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+            if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
+                inner_map.erase(inner_accessor);
             }
         }
-    } else {
-        auto it = SingleThreaded::topics.find(rid);
-        if (it != SingleThreaded::topics.end()) {
-            auto& inner_set = it->second; 
 
-            /** Removing the entry from the inner set */
-            inner_set.erase(ws->getUserData()->uid);
+        size = inner_map.size();
 
-            /** Store the new size */
-            size = inner_set.size();
+        /** Remove room if empty */
+        if (size == 0) {
+            /** Remove room from topics */
+            ThreadSafe::topics.erase(outer_accessor);
 
-            /** Remove the room if empty */
-            if (size == 0) {
-                SingleThreaded::topics.erase(it); 
+            /** Remove disabled and banned connections */
+            for (auto& map : {&ThreadSafe::disabledConnections, &ThreadSafe::bannedConnections}) {
+                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor map_accessor;
 
-                /** Remove disabled and banned connections */
-                for (auto& map : {&SingleThreaded::disabledConnections, &SingleThreaded::bannedConnections}) {
-                    map->erase(rid);
+                if (map->find(map_accessor, rid)) {
+                    map->erase(map_accessor);
                 }
             }
         }
     }
-    
+
     /** Unsubscribe on the correct thread */
     auto unsubscribe_fn = [ws, rid]() { ws->unsubscribe(rid); };
     if (worker->thread_->get_id() != std::this_thread::get_id()) {
@@ -1914,74 +1877,65 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
 
         int size = 0;
 
-        if(isMultiThread) {
+        {
             /** Acquire an accessor for the outer map (topics) */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
-        
+
             /** Check if the room ID (rid) already exists in the topics map */
             if (ThreadSafe::topics.find(topicsAccessor, rid)) {
                 /** Room exists, retrieve the inner map containing user IDs */
                 auto& innerMap = topicsAccessor->second;
-        
+
                 /** Acquire an accessor for the inner map */
                 tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
-                
+
                 /** Insert UID into the inner map if not already present */
                 if (innerMap.insert(innerAccessor, uid)) {
                     /** Set the value to true, indicating user presence */
                     innerAccessor->second = true;
                 }
-        
+
                 /** Update the size variable with the total number of users in the room */
                 size = innerMap.size();
             } else {
                 /** Room does not exist, create a new inner map */
                 tbb::concurrent_hash_map<std::string, bool> newInnerMap;
-        
+
                 /** Insert the UID into the newly created inner map */
                 newInnerMap.emplace(uid, true);
-        
+
                 /** Insert the new inner map into the topics map */
                 if (ThreadSafe::topics.insert(topicsAccessor, rid)) {
                     /** Move the newly created inner map to avoid unnecessary copies */
                     topicsAccessor->second = std::move(newInnerMap);
                 }
-        
+
                 /** Since this is a new room, its size is 1 (only the current user) */
                 size = 1;
             }
-        } else {
-            auto [it, inserted] = SingleThreaded::topics.try_emplace(rid);
-            auto& inner_set = it->second; 
+        }
 
-            /** Insert the user into the inner set */
-            inner_set.emplace(std::move(uid));
-
-            /** Store the new size */
-            size = inner_set.size();
-        }   
-
-        if(isMultiThread) {
-            /** Acquire an accessor for the outer map */ 
+        {
+            /** Acquire an accessor for the outer map */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor uid_to_rid_outer_accessor;
-        
-            /** Check if UID exists */ 
+
+            /** Check if UID exists */
             if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
                 auto& innerMap = uid_to_rid_outer_accessor->second;
-                
-                /** Acquire an accessor for the inner map */ 
+
+                /** Acquire an accessor for the inner map */
                 tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
 
                 if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
-                    /** Only set roomType if insertion was successful */ 
+                    /** Only set roomType if insertion was successful */
                     uid_to_rid_inner_accessor->second = roomType;
                 }
             } else {
                 if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
-                    /** Create the new inner map */ 
+                    /** Create the new inner map */
                     tbb::concurrent_hash_map<std::string, uint8_t>& innerMap = uid_to_rid_outer_accessor->second;
-            
-                    /** Insert the rid with its roomType */ 
+
+                    /** Insert the rid with its roomType */
                     tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
                     if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
                         uid_to_rid_inner_accessor->second = roomType;
@@ -1991,21 +1945,12 @@ void openConnection(uWS::WebSocket<true, true, PerSocketData>* ws, worker_t* wor
                 /** Check if the uid map has the value true, make it false else ignore */
                 tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
                 if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
-                    if (uid_outer_accessor->second) { 
+                    if (uid_outer_accessor->second) {
                         uid_outer_accessor->second = false;
                     }
                 }
             }
-        } else {
-            /** Try inserting the UID into uidToRoomMapping */
-            auto result = SingleThreaded::uidToRoomMapping.try_emplace(uid);
-            result.first->second.emplace(rid, roomType); 
-
-            /** Check if UID exists in SingleThreaded::uid and update if needed */
-            if (auto it2 = SingleThreaded::uid.find(uid); it2 != SingleThreaded::uid.end() && it2->second) {
-                it2->second = false;
-            }
-        }   
+        }
 
         /** Broadcast the message to others if the room is public/private */
         if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
