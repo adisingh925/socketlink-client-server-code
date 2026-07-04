@@ -2251,7 +2251,7 @@ void worker_t::work()
             return;
         }
 
-        if(isMultiThread) {
+        {
             /** Check if the user is banned and reject the connection */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor bannedAccessor;
             if (ThreadSafe::bannedConnections.find(bannedAccessor, "global")) {
@@ -2260,7 +2260,7 @@ void worker_t::work()
 
                 /** Accessor for the inner map */
                 tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
-                
+
                 /** Check if the user UID is banned in the inner map */
                 if (inner_map.find(innerAccessor, upgradeData->uid)) {
 
@@ -2275,40 +2275,13 @@ void worker_t::work()
                     return;
                 }
             }
-        } else {
-            /** Check if the user is banned and reject the connection */
-            if (SingleThreaded::bannedConnections.find("global") != SingleThreaded::bannedConnections.end() 
-            && SingleThreaded::bannedConnections["global"].find(upgradeData->uid) != SingleThreaded::bannedConnections["global"].end()) {
-                
-                totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
-                
-                res->cork([res]() {
-                    res->writeStatus("403 Forbidden");
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end("CONNECTION_BANNED");
-                });
-
-                return;
-            }
         }
 
-        if(isMultiThread) {
+        {
             /** check if a connection is already there with the same uid (thread safe) */
             tbb::concurrent_hash_map<std::string, bool>::const_accessor accessor;
             if(ThreadSafe::uid.find(accessor, upgradeData->uid)){
 
-                totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
-
-                res->cork([res]() {
-                    res->writeStatus("409 Conflict")->end("UID_ALREADY_EXIST");
-                });
-
-                return;
-            }
-        } else {
-            /** check if a connection is already there with the same uid (thread safe) */
-            if(SingleThreaded::uid.find(upgradeData->uid) != SingleThreaded::uid.end()) {
-                
                 totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
                 res->cork([res]() {
@@ -2366,7 +2339,7 @@ void worker_t::work()
         /** Increment global connection counter */
         globalConnectionCounter.fetch_add(1, std::memory_order_relaxed);
 
-        if(isMultiThread) {
+        {
             /** Thread-safe insertion into connections map */
             tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
             bool inserted = ThreadSafe::connections.insert(conn_accessor, userId);
@@ -2377,12 +2350,9 @@ void worker_t::work()
                 ws->end();
                 return;
             }
-        } else {
-            /** Single-threaded insertion into connections map */
-            SingleThreaded::connections.emplace(userId, std::move(data));
         }
 
-        if(isMultiThread) {
+        {
             /** Thread-safe insertion into uid map */
             tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
             if (ThreadSafe::uid.insert(user_accessor, userId)) {
@@ -2392,9 +2362,6 @@ void worker_t::work()
                 ws->end();
                 return;
             }
-        } else {
-            /** Single-threaded insertion into uid map */
-            SingleThreaded::uid.emplace(userId, true);
         }
 
         /** Subscribe to channels */
@@ -2416,24 +2383,13 @@ void worker_t::work()
         }
 
         /** checking if the messaging is disabled for a particular connection at global level */
-        if(isMultiThread) {
+        {
             /** Check if messaging is disabled for the user */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
             tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
 
             if (ThreadSafe::disabledConnections.find(outer_accessor, "global") &&
                 outer_accessor->second.find(inner_accessor, uid)) {
-                sendMessagingDisabled();
-                return;
-            }
-        } else {
-            /** Check if messaging is disabled for the user */
-            auto globalIt = SingleThreaded::disabledConnections.find("global");
-
-            if (globalIt != SingleThreaded::disabledConnections.end() && 
-                globalIt->second.find(uid) != globalIt->second.end()) {
-
-                /** Send a message to the user indicating messaging is disabled */
                 sendMessagingDisabled();
                 return;
             }
@@ -2506,23 +2462,23 @@ void worker_t::work()
                         ws->send(R"({"data":"NO_SUBSCRIPTION_FOUND","source":"server"})", uWS::OpCode::TEXT, true);
                     };
 
-                    if(isMultiThread) {
+                    {
                         /** Acquire an accessor for the outer map (UID to Room Mapping) */
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
-                    
+
                         /** Check if the user (UID) exists in the mapping */
                         if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
                             auto& inner_map = uid_to_rid_outer_accessor->second;
-                    
+
                             /** Check if the room (RID) exists under the given UID */
                             tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor uid_to_rid_inner_accessor;
-                            
+
                             if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
                                 /** Room not found under this UID, send response and return */
                                 sendNoSubscriptionFound();
                                 return;
                             }
-                    
+
                             /** Room exists, retrieve the room type */
                             roomType = uid_to_rid_inner_accessor->second;
                         } else {
@@ -2530,52 +2486,15 @@ void worker_t::work()
                             sendNoSubscriptionFound();
                             return;
                         }
-                    } else {
-                        /** 
-                         * Attempt to find the user (UID) in the room mapping.
-                         * The map stores room associations for each user.
-                         */
-                        if (auto uidIt = SingleThreaded::uidToRoomMapping.find(uid); uidIt != SingleThreaded::uidToRoomMapping.end()) {
-                            /** Get reference to the inner map containing room associations for this UID */
-                            auto& roomMap = uidIt->second;
+                    }
 
-                            /** Attempt to find the given room (RID) */
-                            if (auto ridIt = roomMap.find(rid); ridIt != roomMap.end()) {
-                                /** Room exists, retrieve the room type */
-                                roomType = ridIt->second;
-                            } else {
-                                /** Room not found under this UID, send error response */
-                                sendNoSubscriptionFound();
-                                return;
-                            }
-                        } else {
-                            /** No subscription found for the given UID, send error response */
-                            sendNoSubscriptionFound();
-                            return;
-                        }
-                    }                     
-
-                    if(isMultiThread) {
+                    {
                         /** Check if messaging is disabled for the user */
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
                         tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
 
                         if((ThreadSafe::disabledConnections.find(outer_accessor, rid) &&
                             outer_accessor->second.find(inner_accessor, uid))) {
-                            ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                            return;
-                        } 
-                    } else {
-                        /** 
-                         * Check if messaging is disabled for the user.
-                         * The outer map stores disabled rooms (RID), and the inner set stores users (UIDs) who are blocked.
-                         */
-                        auto ridIt = SingleThreaded::disabledConnections.find(rid);
-
-                        /** If the room exists in the disabledConnections map */
-                        if (ridIt != SingleThreaded::disabledConnections.end() && 
-                            ridIt->second.find(uid) != ridIt->second.end()) {
-                            /** Messaging is disabled, send error response */
                             ws->send("{\"data\":\"MESSAGING_DISABLED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
                             return;
                         }
@@ -2685,23 +2604,19 @@ void worker_t::work()
         globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
 
         /** Thread-safe removal from connections map */
-        if(isMultiThread) {
+        {
             tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
             if (ThreadSafe::connections.find(conn_accessor, userId)) {
-                ThreadSafe::connections.erase(conn_accessor);  
+                ThreadSafe::connections.erase(conn_accessor);
             }
-        } else {
-            SingleThreaded::connections.erase(userId);
         }
 
         /** Thread-safe removal from uid map */
-        if(isMultiThread) {
+        {
             tbb::concurrent_hash_map<std::string, bool>::accessor uid_accessor;
             if (ThreadSafe::uid.find(uid_accessor, userId)) {
-                ThreadSafe::uid.erase(uid_accessor);  
+                ThreadSafe::uid.erase(uid_accessor);
             }
-        } else {
-            SingleThreaded::uid.erase(userId);
         }
 
         /** Manually unsubscribing */
@@ -2709,40 +2624,24 @@ void worker_t::work()
         ws->unsubscribe(BROADCAST);
 
         /** fetching all the RID for the UID and removing the UID from the map */
-        if (isMultiThread) {
+        {
             /** Acquire access to the outer concurrent map */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outer_accessor;
-        
+
             /** Check if the user ID exists in the map */
             if (ThreadSafe::uidToRoomMapping.find(outer_accessor, userId)) {
                 /** Reference to the inner map (rooms associated with the user ID) */
                 auto& inner_map = outer_accessor->second;
-                
-                /** Iterate through the inner map and move data into `rids` */
+
+                /** Iterate through the inner map and close each subscription */
                 for (auto& entry : inner_map) {
-                    /** Close connection */
                     closeConnection(ws, this, entry.first, userId, entry.second, true);
                 }
-        
+
                 /** Remove the user ID entry from the outer map */
                 ThreadSafe::uidToRoomMapping.erase(outer_accessor);
             }
-        } else {
-            /** Check if the user ID exists in the map */
-            auto it = SingleThreaded::uidToRoomMapping.find(userId);
-            if (it != SingleThreaded::uidToRoomMapping.end()) {
-                /** Move the inner set directly */
-                auto& inner_set = it->second;
-
-                /** Move each element from the set to `rids` using a loop */
-                for (auto& entry : inner_set) {
-                    closeConnection(ws, this, entry.first, userId, entry.second, true);
-                }
-
-                /** Erase the user ID entry from the outer map */
-                SingleThreaded::uidToRoomMapping.erase(it);
-            }
-        }        
+        }
     }
     }).get("/api/v1/metrics", [](auto *res, auto *req) {
         /** fetch all the server metrics */
