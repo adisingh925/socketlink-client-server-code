@@ -2371,8 +2371,10 @@ void worker_t::work()
             return;
         }
 
-        /** checking if the messaging is disabled for a particular connection at global level */
-        {
+        /** checking if the messaging is disabled for a particular connection at global level.
+         *  Fast path: skip the hash lookup + bucket lock entirely when nobody is disabled
+         *  (empty() reads an O(1) size counter, no hashing/locking). */
+        if (!ThreadSafe::disabledConnections.empty()) {
             /** Check if messaging is disabled for the user */
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
             tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
@@ -2477,8 +2479,9 @@ void worker_t::work()
                         }
                     }
 
-                    {
-                        /** Check if messaging is disabled for the user */
+                    /** Fast path: skip the room-disabled lookup when nobody is disabled anywhere. */
+                    if (!ThreadSafe::disabledConnections.empty()) {
+                        /** Check if messaging is disabled for the user in this room */
                         tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
                         tbb::concurrent_hash_map<std::string, bool>::const_accessor inner_accessor;
 
