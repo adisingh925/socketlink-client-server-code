@@ -12,6 +12,8 @@
 #include <openssl/evp.h>
 #include <tbb/concurrent_hash_map.h>
 #include <filesystem>
+#include <deque>
+#include <condition_variable>
 #include "simdjson.h"
 #include <linux/bpf.h>
 #include <bpf/libbpf.h>
@@ -1092,13 +1094,18 @@ HTTPResponse sendHTTPSPOSTRequest(
     }
 }
 
-/** send a FIRE-AND-FOREGET http post request for webhook */
-int sendHTTPSPOSTRequestFireAndForget(
-    const std::string& baseURL, 
-    const std::string& path, 
-    const std::string& body, 
-    const std::map<std::string, std::string>& headers = {},
-    bool waitForResponse = false
+/** Synchronously send an HTTPS POST webhook on the CALLING thread. This blocks on
+ *  TCP connect / SSL handshake / write, so it must NOT be called directly from a
+ *  uWS event-loop thread for fire-and-forget events — use the
+ *  sendHTTPSPOSTRequestFireAndForget wrapper, which offloads to a dispatcher thread.
+ *  The synchronous path is used directly only when a status code is needed
+ *  (waitForResponse == true, e.g. private-room verification). */
+static int sendWebhookBlocking(
+    const std::string& baseURL,
+    const std::string& path,
+    const std::string& body,
+    const std::map<std::string, std::string>& headers,
+    bool waitForResponse
 ) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         try {
@@ -1243,6 +1250,120 @@ int sendHTTPSPOSTRequestFireAndForget(
         }
     }
 
+    return 0;
+}
+
+/**
+ * Background dispatcher for fire-and-forget webhooks.
+ *
+ * Previously every fire-and-forget webhook was sent synchronously from inside a
+ * uWS event-loop handler, which blocked that worker's entire reactor (all of its
+ * connections) on TCP connect / SSL handshake / write. This dispatcher moves that
+ * blocking I/O onto a dedicated thread: event-loop handlers only enqueue a job and
+ * return immediately.
+ *
+ * The dispatcher thread owns its own thread-local SSL socket (see sendWebhookBlocking),
+ * so it reuses a single persistent keep-alive connection to the customer's endpoint.
+ * The queue is bounded; if the customer's endpoint is slow/down, the oldest pending
+ * webhooks are dropped rather than growing memory without limit.
+ */
+class WebhookDispatcher {
+public:
+    static WebhookDispatcher& getInstance() {
+        static WebhookDispatcher instance;
+        return instance;
+    }
+
+    /** Enqueue a fire-and-forget webhook. Non-blocking; safe to call from event-loop threads. */
+    void enqueue(std::string baseURL, std::string path, std::string body,
+                 std::map<std::string, std::string> headers = {}) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            /** Bound the queue to protect memory when the endpoint is slow or unreachable */
+            if (queue_.size() >= maxQueueSize_) {
+                queue_.pop_front();
+                droppedWebhookCalls_.fetch_add(1, std::memory_order_relaxed);
+            }
+            queue_.push_back(Job{std::move(baseURL), std::move(path), std::move(body), std::move(headers)});
+        }
+        cv_.notify_one();
+    }
+
+    unsigned long long droppedCount() const {
+        return droppedWebhookCalls_.load(std::memory_order_relaxed);
+    }
+
+    WebhookDispatcher(const WebhookDispatcher&) = delete;
+    WebhookDispatcher& operator=(const WebhookDispatcher&) = delete;
+
+private:
+    struct Job {
+        std::string baseURL;
+        std::string path;
+        std::string body;
+        std::map<std::string, std::string> headers;
+    };
+
+    WebhookDispatcher() : worker_([this]() { run(); }) {}
+
+    ~WebhookDispatcher() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            running_ = false;
+        }
+        cv_.notify_all();
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    void run() {
+        while (true) {
+            Job job;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this]() { return !queue_.empty() || !running_; });
+                if (!running_ && queue_.empty()) {
+                    return;
+                }
+                job = std::move(queue_.front());
+                queue_.pop_front();
+            }
+            /** Blocking send happens on this dedicated thread, never on an event loop */
+            sendWebhookBlocking(job.baseURL, job.path, job.body, job.headers, false);
+        }
+    }
+
+    std::deque<Job> queue_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool running_ = true;
+    std::atomic<unsigned long long> droppedWebhookCalls_{0};
+    static constexpr size_t maxQueueSize_ = 100000;
+    std::thread worker_;
+};
+
+/**
+ * @brief Dispatch an HTTPS POST webhook.
+ *
+ * For fire-and-forget events (waitForResponse == false) the request is handed to a
+ * background dispatcher thread and this returns immediately, so the calling event loop
+ * never blocks on webhook I/O. When a status code is required (waitForResponse == true,
+ * e.g. private-room verification) the request is sent synchronously on the calling thread
+ * and the HTTP status is returned.
+ */
+int sendHTTPSPOSTRequestFireAndForget(
+    const std::string& baseURL,
+    const std::string& path,
+    const std::string& body,
+    const std::map<std::string, std::string>& headers = {},
+    bool waitForResponse = false
+) {
+    if (waitForResponse) {
+        return sendWebhookBlocking(baseURL, path, body, headers, true);
+    }
+
+    WebhookDispatcher::getInstance().enqueue(baseURL, path, body, headers);
     return 0;
 }
 
@@ -2300,8 +2421,17 @@ void worker_t::work()
                     /** Parsing the message */
                     simdjson::ondemand::document parsedData;
 
+                    /** simdjson (ondemand) reads up to SIMDJSON_PADDING bytes past the end of
+                     *  the document as scratch space. The incoming `message` is a string_view
+                     *  owned by uWebSockets and offers no such trailing padding, so parsing it
+                     *  in place would be an out-of-bounds read. Copy it into a reused thread-local
+                     *  buffer whose capacity always includes the required padding. */
+                    static thread_local std::string jsonBuffer;
+                    jsonBuffer.reserve(message.size() + simdjson::SIMDJSON_PADDING);
+                    jsonBuffer.assign(message.data(), message.size());
+
                     /** Parse JSON and handle potential errors */
-                    if (auto error = parser.iterate(message.data(), message.size(), message.size() + simdjson::SIMDJSON_PADDING).get(parsedData); error) {
+                    if (auto error = parser.iterate(jsonBuffer.data(), jsonBuffer.size(), jsonBuffer.capacity()).get(parsedData); error) {
                         sendInvalidJson();
                         return;
                     }
