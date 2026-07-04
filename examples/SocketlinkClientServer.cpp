@@ -265,9 +265,9 @@ private:
                 return false;
             }
 
-            /** Bind parameters to the prepared statement */
-            MYSQL_BIND bind[4 * batch_data.size()];
-            memset(bind, 0, sizeof(bind));
+            /** Bind parameters to the prepared statement (heap-allocated to avoid large VLA on the stack) */
+            std::vector<MYSQL_BIND> bind(4 * batch_data.size());
+            std::memset(bind.data(), 0, sizeof(MYSQL_BIND) * bind.size());
             int paramIndex = 0;
 
             /** Loop through batch data and bind values */
@@ -294,7 +294,7 @@ private:
             }
 
             /** Bind the parameters to the statement and execute */
-            if (mysql_stmt_bind_param(stmt, bind) || mysql_stmt_execute(stmt)) {
+            if (mysql_stmt_bind_param(stmt, bind.data()) || mysql_stmt_execute(stmt)) {
                 mysql_stmt_close(stmt);  /**< Close the statement on exception */
                 log(LogLevel::ERROR, "Batch Insertion Error : " + std::string(mysql_stmt_error(stmt)));
                 return false;
@@ -800,8 +800,10 @@ std::string getCurrentSQLTime() {
     /** Convert time_point to system_time, which represents seconds since epoch */
     std::time_t now_c = std::chrono::system_clock::to_time_t(now);
     
-    /** Convert to a tm struct (UTC time) */
-    std::tm tm = *std::gmtime(&now_c);  /** Use UTC time instead of local time */
+    /** Convert to a tm struct (UTC time). gmtime_r is used instead of gmtime because
+     *  gmtime returns a pointer to a shared static buffer and is not thread-safe. */
+    std::tm tm;
+    gmtime_r(&now_c, &tm);  /** Use UTC time instead of local time */
     
     /** Buffer to hold the formatted time string */
     char buffer[20]; /** 'YYYY-MM-DD HH:MM:SS' format */
@@ -2078,6 +2080,8 @@ void worker_t::work()
                 res->writeHeader("Content-Type", "application/json");
                 res->end("INVALID_UID");
             });
+
+            return;
         }
 
         if(upgradeData->metadata.length() > 1024) {
@@ -2088,6 +2092,8 @@ void worker_t::work()
                 res->writeHeader("Content-Type", "application/json");
                 res->end("INVALID_METADATA");
             });
+
+            return;
         }
 
         if(isMultiThread) {
@@ -3315,15 +3321,11 @@ void worker_t::work()
                     << "\"uid\":\"" << uid << "\", "
                     << "\"rid\":\"" << rid << "\"}";
 
-                    std::string body = payload.str(); 
-                    httplib::Headers headers = {};
+                    std::string body = payload.str();
 
-                    /** if the webhook secret is present add the hmac */
-                    if(UserData::getInstance().webhookSecret.length() > 0){
-                        unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
-                        hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
-                        headers = {{"X-HMAC-Signature", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}}; 
-                    }
+                    /** Note: the X-HMAC-Signature header is computed and added inside
+                     *  sendHTTPSPOSTRequestFireAndForget using the configured webhookSecret,
+                     *  so no signature needs to be built here. */
 
                     int status = sendHTTPSPOSTRequestFireAndForget(
                         UserData::getInstance().webHookBaseUrl,
