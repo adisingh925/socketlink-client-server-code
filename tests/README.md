@@ -29,24 +29,50 @@ Header-only + uWebSockets deps, staged under `$SL_DEPS` (default `~/sl-deps`):
 ## Build both binaries
 
 ```bash
-tests/build_local.sh          # -> /tmp/sl_new (this branch), /tmp/sl_orig (master)
+tests/build_local.sh          # -> ~/sl-bin/sl_new (this branch), ~/sl-bin/sl_orig (master)
 ```
+
+(`OUT_DIR` overrides the output dir; default `~/sl-bin`, which is persistent —
+`/tmp` is tmpfs and is wiped when the WSL VM restarts.)
 
 ## Run the tests
 
 Functional parity + latency + throughput (no webhooks):
 
 ```bash
-tests/run_test.sh /tmp/sl_new new
-tests/run_test.sh /tmp/sl_orig orig
+tests/run_test.sh ~/sl-bin/sl_new new
+tests/run_test.sh ~/sl-bin/sl_orig orig
 ```
 
 Async-webhook demonstration (mock endpoint stalls the TLS handshake ~1s):
 
 ```bash
-tests/run_webhook_demo.sh /tmp/sl_orig orig   # synchronous: delivery stalls ~1000 ms
-tests/run_webhook_demo.sh /tmp/sl_new  new    # async dispatch: delivery stays ~50 ms
+tests/run_webhook_demo.sh ~/sl-bin/sl_orig orig   # synchronous: delivery stalls ~1000 ms
+tests/run_webhook_demo.sh ~/sl-bin/sl_new  new    # async dispatch: delivery stays ~50 ms
 ```
+
+## Load test (many connections, fan-out throughput)
+
+`loadtest.py` opens N WebSocket connections across worker processes, subscribes
+each into a fan-out room of `--group`, then every connection sends at `--rate`
+msgs/sec for `--duration`. It scales past the ~28k ephemeral-port limit by
+binding client sockets across loopback source IPs (`--src-ips`).
+
+```bash
+tests/run_loadtest.sh ~/sl-bin/sl_new --conns 30000 --procs 16 --group 10 --rate 5 --duration 10
+```
+
+Reports connections established, client send/recv throughput, and the server's
+own `/api/v1/metrics` delta. `connections_reported_start` is the server-side
+confirmation of concurrent connections. Note `messages_sent` is *local-only*
+(the server's `numSubscribers` counts only same-worker subscribers), so
+`client.recv` is the truer fan-out delivery count.
+
+Observed on a 20-core / 15 GB WSL2 VM running **both** server and client:
+stable to ~45k connections (45k conns, ~3.2M deliveries/s, 0 drops); ~55k stalls
+during connection setup and ~60k destabilizes the VM (OOM). Reaching 100k needs
+client and server on separate hosts (or a larger box) — this is a host limit,
+not a server limit.
 
 ## Files
 
