@@ -727,28 +727,17 @@ std::atomic<unsigned long long> droppedMessages{0};
 std::atomic<unsigned int> messageCount(0);
 std::atomic<bool> isMessagingDisabled(false);
 
-bool isMultiThread = false;
-
-/** This will be used when the number of threads will be more than 1 */
+/** All connection/room state uses TBB concurrent maps unconditionally. (These work
+ *  fine single-threaded too, so the previous SingleThreaded std::unordered_map mirror
+ *  and the isMultiThread branching were removed to eliminate ~1000 lines of duplicate,
+ *  divergence-prone logic.) */
 namespace ThreadSafe {
-    /** Thread-safe variables using TBB */
     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> topics;
     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> bannedConnections;
     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> disabledConnections;
     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>> uidToRoomMapping;
     tbb::concurrent_hash_map<std::string, bool> uid;
     tbb::concurrent_hash_map<std::string, WebSocketData> connections;
-}
-
-/** This will be used when the number of threads will be one */
-namespace SingleThreaded {
-    /** Non-thread-safe variables using std::unordered_map */
-    std::unordered_map<std::string, std::unordered_set<std::string>> topics;
-    std::unordered_map<std::string, std::unordered_set<std::string>> bannedConnections;
-    std::unordered_map<std::string, std::unordered_set<std::string>> disabledConnections;
-    std::unordered_map<std::string, std::unordered_map<std::string, uint8_t>> uidToRoomMapping;
-    std::unordered_map<std::string, bool> uid;
-    std::unordered_map<std::string, WebSocketData> connections;
 }
 
 /** map to store enabled webhooks and features (no need to make it thread safe) */
@@ -2932,35 +2921,25 @@ void worker_t::work()
     
             nlohmann::json data = nlohmann::json::array(); 
             
-            if(isMultiThread) {
-                for (const auto& [rid, users] : ThreadSafe::topics) {  
-                    /** Create a JSON object for the room */
-                    nlohmann::json roomData;
-                    roomData["rid"] = rid;
-        
-                    /** Store only the keys from the inner map */
-                    std::vector<std::string> userKeys;
-                    
-                    for (const auto& [uid, _] : users) {  
-                        userKeys.push_back(uid);
-                    }
-        
-                    /** Convert vector to JSON array */
-                    roomData["uid"] = std::move(userKeys);
-        
-                    /** Store the room data in the final list */
-                    data.push_back(std::move(roomData));
+            for (const auto& [rid, users] : ThreadSafe::topics) {
+                /** Create a JSON object for the room */
+                nlohmann::json roomData;
+                roomData["rid"] = rid;
+
+                /** Store only the keys from the inner map */
+                std::vector<std::string> userKeys;
+
+                for (const auto& [uid, _] : users) {
+                    userKeys.push_back(uid);
                 }
-            } else {
-                for (const auto& [rid, users] : SingleThreaded::topics) {  
-                    /** Create a JSON object for the room */
-                    data.push_back({
-                        {"rid", rid},
-                        {"uid", nlohmann::json(users)}  
-                    });
-                }                
+
+                /** Convert vector to JSON array */
+                roomData["uid"] = std::move(userKeys);
+
+                /** Store the room data in the final list */
+                data.push_back(std::move(roomData));
             }
-            
+
             if(!*isAborted){
                 totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -3010,17 +2989,9 @@ void worker_t::work()
     
             std::vector<std::string> orphanUids;
 
-            if(isMultiThread) {
-                for (auto it = ThreadSafe::uid.begin(); it != ThreadSafe::uid.end(); ++it) {
-                    if (it->second) {  
-                        orphanUids.push_back(it->first);
-                    }
-                }
-            } else {
-                for (const auto& [uid, isOrphan] : SingleThreaded::uid) {  
-                    if (isOrphan) {  
-                        orphanUids.emplace_back(uid);
-                    }
+            for (auto it = ThreadSafe::uid.begin(); it != ThreadSafe::uid.end(); ++it) {
+                if (it->second) {
+                    orphanUids.push_back(it->first);
                 }
             }
             
@@ -3098,31 +3069,24 @@ void worker_t::work()
                             nlohmann::json roomData;
                             roomData["rid"] = rid;
 
-                            if(isMultiThread) {
+                            {
                                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
 
                                 if (ThreadSafe::topics.find(outer_accessor, rid)) {
                                     /** Convert the inner map to a JSON array */
                                     nlohmann::json uidArray = nlohmann::json::array();
-                                    
+
                                     /** Iterate over the inner map and add the uids to the JSON array */
                                     for (const auto& entry : outer_accessor->second) {
-                                        uidArray.push_back(entry.first);  /** entry.first is the uid */ 
+                                        uidArray.push_back(entry.first);  /** entry.first is the uid */
                                     }
-                                    
+
                                     roomData["uid"] = uidArray;
                                 } else {
                                     roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
                                 }
-                            } else {
-                                auto it = SingleThreaded::topics.find(rid);
-                                if (it != SingleThreaded::topics.end()) {
-                                    roomData["uid"] = nlohmann::json(it->second);
-                                } else {
-                                    roomData["uid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
-                                }
                             }
-                            
+
                             data.push_back(roomData);
                         }
 
@@ -3187,7 +3151,7 @@ void worker_t::work()
             uWS::WebSocket<true, true, PerSocketData>* ws = nullptr;
             worker_t* worker = nullptr;
             
-            if(isMultiThread) {
+            {
                 /** Checking if a connection exists for the provided UID */
                 tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
@@ -3213,22 +3177,6 @@ void worker_t::work()
                 /** Retrieve the connection object */
                 ws = accessor->second.ws;
                 worker = accessor->second.worker;
-            } else {
-                if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
-                    if(!isAborted.load()){
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("404 Not Found");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Invalid uid!"})");
-                        });
-                    }
-                    return;
-                }
-
-                ws = SingleThreaded::connections[uid].ws;
-                worker = SingleThreaded::connections[uid].worker;
             }
 
             /** Validate the room ID (rid) length constraints */
@@ -3266,7 +3214,7 @@ void worker_t::work()
                 return;
             }
 
-            if(isMultiThread) {
+            {
                 /** checking if the user is already subscribed to the given room */
                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
 
@@ -3278,7 +3226,6 @@ void worker_t::work()
                     /** Check if the room is already associated with the UID */
                     tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
                     if (inner_map.find(inner_accessor, rid)) {
-                        
 
                         /** Ensure response is not sent multiple times */
                         if(!isAborted.load()){
@@ -3296,27 +3243,12 @@ void worker_t::work()
                         return; /** Exit early since user is already subscribed */
                     }
                 }
-            } else {
-                auto it = SingleThreaded::uidToRoomMapping.find(uid);
-                if (it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) != it->second.end()) {
-
-                    if(!isAborted.load()){
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "You are already subscribed to the given room!"})");
-                        });
-                    }
-                    return;
-                }
             }
-            
+
             /** checking if the user is banned from the given room */
-            if(isMultiThread) {
+            {
                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::const_accessor outer_accessor;
-                
+
                 if (ThreadSafe::bannedConnections.find(outer_accessor, rid) && outer_accessor->second.count(uid)) {
 
                     if(!isAborted.load()){
@@ -3328,22 +3260,7 @@ void worker_t::work()
                             res->end(R"({"message": "You have been banned from this room!"})");
                         });
                     }
-                    
-                    return;
-                }
-            } else {
-                auto it = SingleThreaded::bannedConnections.find(rid);
-                if (it != SingleThreaded::bannedConnections.end() && it->second.count(uid)) {
 
-                    if(!isAborted.load()){
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("403 Forbidden");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "You have been banned from this room!"})");
-                        });
-                    }
                     return;
                 }
             }
@@ -3456,47 +3373,23 @@ void worker_t::work()
             /** Prepare the response JSON array */
             nlohmann::json data = nlohmann::json::array();
             
-            if(isMultiThread) {
-                for (const auto& [uid, rids] : ThreadSafe::uidToRoomMapping) {  
-                    /** Create a JSON object for the room */
-                    nlohmann::json roomData;
-                    roomData["uid"] = uid;
-        
-                    /** Store only the keys from the inner map */
-                    std::vector<std::string> roomIDs;
-                    
-                    for (const auto& [uid, _] : rids) {  
-                        roomIDs.push_back(uid);
-                    }
-        
-                    /** Convert vector to JSON array */
-                    roomData["rid"] = std::move(roomIDs);
-        
-                    /** Store the room data in the final list */
-                    data.push_back(std::move(roomData));
+            for (const auto& [uid, rids] : ThreadSafe::uidToRoomMapping) {
+                /** Create a JSON object for the room */
+                nlohmann::json roomData;
+                roomData["uid"] = uid;
+
+                /** Store only the keys from the inner map */
+                std::vector<std::string> roomIDs;
+
+                for (const auto& [rid, _] : rids) {
+                    roomIDs.push_back(rid);
                 }
-            } else {
-                /** 
-                 * Iterate through each user (UID) in the mapping.
-                 * The outer map contains a mapping from UID to a set of rooms.
-                 */
-                for (const auto& [uid, rids] : SingleThreaded::uidToRoomMapping) {  
-                    /** Create a JSON object for the room */
-                    nlohmann::json roomData;
-                    roomData["uid"] = uid;
 
-                    /** Use a more efficient constructor to extract keys from the inner map */
-                    std::vector<std::string> roomIDs;
-                    roomIDs.reserve(rids.size());  // Reserve space to avoid multiple reallocations
+                /** Convert vector to JSON array */
+                roomData["rid"] = std::move(roomIDs);
 
-                    std::transform(rids.begin(), rids.end(), std::back_inserter(roomIDs), [](const auto& pair) { return pair.first; });
-
-                    /** Store extracted room IDs in JSON */
-                    roomData["rid"] = std::move(roomIDs);
-
-                    /** Store the room data in the final list */
-                    data.push_back(std::move(roomData));
-                }
+                /** Store the room data in the final list */
+                data.push_back(std::move(roomData));
             }
 
             std::string response = data.dump();
@@ -3571,42 +3464,24 @@ void worker_t::work()
                             nlohmann::json roomData;
                             roomData["uid"] = uid;
 
-                            if(isMultiThread) {
+                            {
                                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor outer_accessor;
 
                                 if (ThreadSafe::uidToRoomMapping.find(outer_accessor, uid)) {
                                     /** Convert the inner map to a JSON array */
                                     nlohmann::json ridArray = nlohmann::json::array();
-                                    
-                                    /** Iterate over the inner map and add the uids to the JSON array */
+
+                                    /** Iterate over the inner map and add the rids to the JSON array */
                                     for (const auto& entry : outer_accessor->second) {
-                                        ridArray.push_back(entry.first);  /** entry.first is the uid */ 
+                                        ridArray.push_back(entry.first);  /** entry.first is the rid */
                                     }
-                                    
+
                                     roomData["rid"] = ridArray;
                                 } else {
                                     roomData["rid"] = nlohmann::json::array(); /** Empty array for missing `rid` */
                                 }
-                            } else {
-                                /** 
-                                 * Check if the user (UID) exists in the mapping.
-                                 * If it exists, extract the associated room IDs (RIDs).
-                                 */
-                                if (auto uidIt = SingleThreaded::uidToRoomMapping.find(uid); uidIt != SingleThreaded::uidToRoomMapping.end()) {
-                                    /** Reserve space to avoid multiple reallocations */
-                                    nlohmann::json ridArray = nlohmann::json::array();
-                                    ridArray.get_ptr<nlohmann::json::array_t*>()->reserve(uidIt->second.size());
-
-                                    /** Use `transform` to efficiently populate the JSON array */
-                                    std::transform(uidIt->second.begin(), uidIt->second.end(), std::back_inserter(ridArray), [](const auto& entry) { return entry.first; });
-
-                                    roomData["rid"] = std::move(ridArray);
-                                } else {
-                                    /** Assign an empty array if no room IDs are found */
-                                    roomData["rid"] = nlohmann::json::array();
-                                }
                             }
-                            
+
                             data.push_back(roomData);
                         }
 
@@ -3671,7 +3546,7 @@ void worker_t::work()
             uWS::WebSocket<true, true, PerSocketData>* ws = nullptr;
             worker_t* worker = nullptr;
 
-            if(isMultiThread) {
+            {
                 /** checking if there even is a connection with the provided UID */
                 tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
@@ -3691,22 +3566,6 @@ void worker_t::work()
 
                 ws = accessor->second.ws;
                 worker = accessor->second.worker;
-            } else {
-                if (SingleThreaded::connections.find(uid) == SingleThreaded::connections.end()) {
-                    if(!*isAborted){
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("404 Not Found");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Invalid uid!"})");
-                        });
-                    }
-                    return;
-                }
-
-                ws = SingleThreaded::connections[uid].ws;
-                worker = SingleThreaded::connections[uid].worker;
             }
 
             /** checking if the room length is valid */
@@ -3742,46 +3601,30 @@ void worker_t::work()
             }
 
             /** checking if the user is already unsubscribed to the given room */
-            if (isMultiThread) {
+            {
                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor uid_to_rid_outer_accessor;
-                
+
                 if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
                     const auto& inner_map = uid_to_rid_outer_accessor->second;
-            
+
                     /** Check if the room is already present under the UID */
                     tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
                     if (!inner_map.find(inner_accessor, rid)) {
-            
+
                         if (!*isAborted) {
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-            
+
                             res->cork([res]() {
                                 res->writeStatus("400 Bad Request");
                                 res->writeHeader("Content-Type", "application/json");
                                 res->end(R"({"message": "You are not subscribed to the given room!"})");
                             });
                         }
-            
+
                         return;
-                    }                    
+                    }
                 } else {
                     if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-            
-                        res->cork([res]() {
-                            res->writeStatus("400 Bad Request");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "You are not subscribed to the given room!"})");
-                        });
-                    }
-            
-                    return;
-                }
-            } else {
-                auto it = SingleThreaded::uidToRoomMapping.find(uid);
-                if ((it != SingleThreaded::uidToRoomMapping.end() && it->second.find(rid) == it->second.end()) || (it == SingleThreaded::uidToRoomMapping.end())) {
-
-                    if(!*isAborted){
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                         res->cork([res]() {
@@ -4140,7 +3983,7 @@ void worker_t::work()
                             }
                             
                             /** banning the user */
-                            if(isMultiThread) {
+                            {
                                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
                                 tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
@@ -4149,7 +3992,7 @@ void worker_t::work()
                                     ThreadSafe::bannedConnections.insert(global_accessor, rid);
                                 }
 
-                                for (const auto& uid : uids) {                            
+                                for (const auto& uid : uids) {
                                     /** Check if uid already exists before inserting */
                                     if (!global_accessor->second.find(user_accessor, uid)) {
                                         global_accessor->second.insert(user_accessor, uid);
@@ -4158,8 +4001,8 @@ void worker_t::work()
                                         /** Fetch the connection for the given uid from the connections map */
                                         tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
                                         if (ThreadSafe::connections.find(conn_accessor, uid)) {
-                                            uWS::WebSocket<true, true, PerSocketData>* ws = conn_accessor->second.ws; 
-                                            worker_t* worker = conn_accessor->second.worker; 
+                                            uWS::WebSocket<true, true, PerSocketData>* ws = conn_accessor->second.ws;
+                                            worker_t* worker = conn_accessor->second.worker;
 
                                             /** Disconnect the WebSocket or perform any other disconnection logic */
                                             if(rid == "global") {
@@ -4173,33 +4016,6 @@ void worker_t::work()
                                                 /** Tell the user in case of room ban */
                                                 ws->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\", \"rid\":\"" + jsonEscape(rid) + "\"}", uWS::OpCode::TEXT, true);
                                             }
-                                        }
-                                    }
-                                }
-                            } else {
-                                /** Insert or update banned connections efficiently */
-                                auto& bannedSet = SingleThreaded::bannedConnections[rid];
-
-                                /** Insert all UIDs into the banned set in one operation */
-                                bannedSet.insert(uids.begin(), uids.end());
-
-                                /** Iterate over the list of UIDs and disconnect banned users */
-                                for (const auto& uid : uids) {
-                                    /** Check if the UID exists in active connections */
-                                    if (auto it = SingleThreaded::connections.find(uid); it != SingleThreaded::connections.end()) {
-                                        /** Defer execution to properly close the WebSocket connection */
-
-                                        if(rid == "global") {
-                                            it->second.worker->loop_->defer([ws = it->second.ws]() {
-                                                /** Send a WebSocket close message with a ban notification */
-                                                ws->end(1008, R"({"data":"YOU_HAVE_BEEN_BANNED", "source":"admin"})");
-                                            });
-                                        } else {
-                                            /** cloding the connection for the given rid */
-                                            closeConnection(it->second.ws, it->second.worker, rid, uid, roomType);
-
-                                            /** Tell the user in case of room ban */
-                                            it->second.ws->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", \"source\":\"admin\", \"rid\":\"" + jsonEscape(rid) + "\"}", uWS::OpCode::TEXT, true);
                                         }
                                     }
                                 }
@@ -4284,7 +4100,7 @@ void worker_t::work()
                             std::string rid = item["rid"];
                             std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                            if(isMultiThread) {
+                            {
                                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
                                 tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
@@ -4300,17 +4116,6 @@ void worker_t::work()
                                     /** If the inner map becomes empty, erase the entire entry */
                                     if (global_accessor->second.empty()) {
                                         ThreadSafe::bannedConnections.erase(global_accessor);
-                                    }
-                                }
-                            } else {
-                                auto it = SingleThreaded::bannedConnections.find(rid);
-                                if (it != SingleThreaded::bannedConnections.end()) {
-                                    for (const auto& uid : uids) {
-                                        it->second.erase(uid);
-                                    }
-
-                                    if (it->second.empty()) {
-                                        SingleThreaded::bannedConnections.erase(it);
                                     }
                                 }
                             }
@@ -4473,7 +4278,7 @@ void worker_t::work()
 
                             if (action == "enable")
                             {
-                                if(isMultiThread) {
+                                {
                                     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
                                     tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
@@ -4491,21 +4296,11 @@ void worker_t::work()
                                             ThreadSafe::disabledConnections.erase(global_accessor);
                                         }
                                     }
-                                } else {
-                                    if (auto it = SingleThreaded::disabledConnections.find(rid); it != SingleThreaded::disabledConnections.end()) {
-                                        for (const auto& uid : uids) {
-                                            it->second.erase(uid);
-                                        }
-                                    
-                                        if (it->second.empty()) {
-                                            SingleThreaded::disabledConnections.erase(it);
-                                        }
-                                    }                                    
                                 }
                             }
                             else if (action == "disable")
                             {
-                                if(isMultiThread) {
+                                {
                                     tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor global_accessor;
                                     tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
 
@@ -4514,16 +4309,12 @@ void worker_t::work()
                                         ThreadSafe::disabledConnections.insert(global_accessor, rid);
                                     }
 
-                                    for (const auto& uid : uids) {                            
+                                    for (const auto& uid : uids) {
                                         /** Check if uid already exists before inserting */
                                         if (!global_accessor->second.find(user_accessor, uid)) {
                                             global_accessor->second.insert(user_accessor, uid);
                                             user_accessor->second = true;
                                         }
-                                    }
-                                } else {
-                                    for (const auto& uid : uids) {
-                                        SingleThreaded::disabledConnections[rid].insert(uid);
                                     }
                                 }
                             }
@@ -4614,36 +4405,23 @@ void worker_t::work()
             /** Create and reserve space for the JSON response */
             nlohmann::json data = nlohmann::json::array(); 
 
-            if(isMultiThread) {
-                for (const auto& [rid, users] : ThreadSafe::bannedConnections) {  
-                    /** Create a JSON object for the room */
-                    nlohmann::json roomData;
-                    roomData["rid"] = rid;
-    
-                    /** Store only the keys from the inner map */
-                    std::vector<std::string> userKeys;
-                    
-                    for (const auto& [uid, _] : users) {  
-                        userKeys.push_back(uid);
-                    }
-    
-                    /** Convert vector to JSON array */
-                    roomData["uid"] = std::move(userKeys);
-    
-                    /** Store the room data in the final list */
-                    data.push_back(std::move(roomData));
+            for (const auto& [rid, users] : ThreadSafe::bannedConnections) {
+                /** Create a JSON object for the room */
+                nlohmann::json roomData;
+                roomData["rid"] = rid;
+
+                /** Store only the keys from the inner map */
+                std::vector<std::string> userKeys;
+
+                for (const auto& [uid, _] : users) {
+                    userKeys.push_back(uid);
                 }
-            } else {
-                for (const auto& [rid, users] : SingleThreaded::bannedConnections) {  
-                    nlohmann::json roomData;
-                    roomData["rid"] = rid;
-                
-                    /** Convert set to vector more efficiently */
-                    std::vector<std::string> userKeys(users.begin(), users.end());
-                
-                    roomData["uid"] = std::move(userKeys);
-                    data.push_back(std::move(roomData));
-                }
+
+                /** Convert vector to JSON array */
+                roomData["uid"] = std::move(userKeys);
+
+                /** Store the room data in the final list */
+                data.push_back(std::move(roomData));
             }
 
             /** Send the successful response with all banned connections */
@@ -4701,36 +4479,23 @@ void worker_t::work()
             /** Create and reserve space for the JSON response */
             nlohmann::json json_response = nlohmann::json::array();
 
-            if(isMultiThread) {
-                for (const auto& [rid, users] : ThreadSafe::disabledConnections) {  
-                    /** Create a JSON object for the room */
-                    nlohmann::json roomData;
-                    roomData["rid"] = rid;
-    
-                    /** Store only the keys from the inner map */
-                    std::vector<std::string> userKeys;
-                    
-                    for (const auto& [uid, _] : users) {  
-                        userKeys.push_back(uid);
-                    }
-    
-                    /** Convert vector to JSON array */
-                    roomData["uid"] = std::move(userKeys);
-    
-                    /** Store the room data in the final list */
-                    json_response.push_back(std::move(roomData));
+            for (const auto& [rid, users] : ThreadSafe::disabledConnections) {
+                /** Create a JSON object for the room */
+                nlohmann::json roomData;
+                roomData["rid"] = rid;
+
+                /** Store only the keys from the inner map */
+                std::vector<std::string> userKeys;
+
+                for (const auto& [uid, _] : users) {
+                    userKeys.push_back(uid);
                 }
-            } else {
-                for (const auto& [rid, users] : SingleThreaded::disabledConnections) {  
-                    nlohmann::json roomData;
-                    roomData["rid"] = rid;
-                
-                    /** Convert set to vector more efficiently */
-                    std::vector<std::string> userKeys(users.begin(), users.end());
-                
-                    roomData["uid"] = std::move(userKeys);
-                    json_response.push_back(std::move(roomData));
-                }                
+
+                /** Convert vector to JSON array */
+                roomData["uid"] = std::move(userKeys);
+
+                /** Store the room data in the final list */
+                json_response.push_back(std::move(roomData));
             }
             
             /** Send the successful response with all banned connections */
@@ -4770,7 +4535,7 @@ void worker_t::work()
             std::string_view apiKey = req->getHeader("api-key");
             std::string_view uid = req->getHeader("uid");
 
-            if(isMultiThread) {
+            {
                 tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
 
                 if (!ThreadSafe::topics.find(outer_accessor, std::string(rid))) {
@@ -4806,21 +4571,6 @@ void worker_t::work()
 
                         return;
                     }
-                }
-            } else {
-                auto topicIt = SingleThreaded::topics.find(std::string(rid));
-                if (topicIt == SingleThreaded::topics.end() || topicIt->second.find(std::string(uid)) == topicIt->second.end()) {
-                    if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("403 Forbidden");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Access denied!"})");
-                        });
-                    }
-
-                    return;
                 }
             }
 
@@ -5285,11 +5035,6 @@ int main() {
     int numThreads = std::thread::hardware_concurrency();
 
     log(LogLevel::INFO, "Number of threads available : ", numThreads);
-
-    if (numThreads > 1)
-    {
-        isMultiThread = true;
-    }
 
     workers.resize(numThreads);
     
