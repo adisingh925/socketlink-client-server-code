@@ -2169,8 +2169,16 @@ int create_socket(int port) {
 /* uWebSocket worker thread function. */
 void worker_t::work()
 {
+#ifdef LOCAL_TEST
+    /** Use the repo-local test certs and a local listen port (see below) */
+    const std::string keyFilePath = "./ssl/privkey.pem";
+    const std::string certFileName = "./ssl/cert.pem";
+    constexpr int listenPort = 9001;
+#else
     const std::string keyFilePath = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
     const std::string certFileName = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
+    constexpr int listenPort = PORT;
+#endif
 
     /* int sock = create_socket_with_ebpf(PORT);
 
@@ -5226,12 +5234,12 @@ void worker_t::work()
                 });
             }
         }
-    }).listen(PORT, [this](auto *token) {
+    }).listen(listenPort, [this, listenPort](auto *token) {
         listen_socket_ = token;
         if (listen_socket_) {
-            log(LogLevel::INFO, "Thread ", std::this_thread::get_id(), " listening on port ", PORT);
+            log(LogLevel::INFO, "Thread ", std::this_thread::get_id(), " listening on port ", listenPort);
         } else {
-            log(LogLevel::ERROR, "Thread ", std::this_thread::get_id(), " failed to listen on port ", PORT);
+            log(LogLevel::ERROR, "Thread ", std::this_thread::get_id(), " failed to listen on port ", listenPort);
         }
     });
 
@@ -5418,6 +5426,28 @@ void watchCertChanges(std::string_view domain) {
 int main() {
     log(LogLevel::INFO, "Main thread Id : ", std::this_thread::get_id());
 
+#ifdef LOCAL_TEST
+    /** LOCAL_TEST build (compile with -DLOCAL_TEST): bypass all cloud provisioning
+     *  (droplet metadata service, master server, DNS wait, certbot) so the server can
+     *  run on a dev machine. Config is hardcoded here; TLS uses the certs in ./ssl and
+     *  the server listens on a local port (see worker_t::work). This block is compiled
+     *  out entirely in production builds. */
+    {
+        auto& u = UserData::getInstance();
+        u.clientApiKey = "test-client-key";
+        u.adminApiKey  = "test-admin-key";
+        u.connections  = 1000000;
+        u.maxMonthlyPayloadInBytes = 1ULL << 50;
+        u.lmdbDatabaseSizeInBytes  = 1ULL << 30; /** 1 GB */
+        u.msgSizeAllowedInBytes    = 1 << 20;    /** 1 MB */
+        u.maxBackpressureInBytes   = 1 << 20;    /** 1 MB */
+        u.idleTimeoutInSeconds     = 120;
+        u.subdomain = "localtest";
+        /** webhooks and MySQL integration left disabled (empty status maps) */
+    }
+    init_env();
+    log(LogLevel::INFO, "LOCAL_TEST mode: cloud provisioning bypassed.");
+#else
     /** Fetch and populated data before starting the threads */
     fetchAndPopulateUserData();
     init_env();
@@ -5432,7 +5462,7 @@ int main() {
     log(LogLevel::INFO, "Successfully fetched user data!");
 
     /** loading the ebpf program */
-    /* const char *ebpf_program_path = "rr.o";  
+    /* const char *ebpf_program_path = "rr.o";
 
     if (load_ebpf_program(ebpf_program_path) < 0) {
         std::cerr << "Failed to load eBPF program\n";
@@ -5440,7 +5470,7 @@ int main() {
     } */
 
     std::string domain = UserData::getInstance().subdomain + ".socketlink.io";
-    waitForCorrectDNS(domain, UserData::getInstance().ip);  
+    waitForCorrectDNS(domain, UserData::getInstance().ip);
 
     if (!doesCertificateExist(domain))
     {
@@ -5460,6 +5490,7 @@ int main() {
     /** running the file change watcher thread */
     std::thread watcher(watchCertChanges, domain);
     watcher.detach();
+#endif
 
     int numThreads = std::thread::hardware_concurrency();
 
