@@ -687,6 +687,23 @@ enum class Rooms : uint8_t {
     PRIVATE_STATE_CACHE = 7
 };
 
+/**
+ * Derive the room type from a room id's prefix. Returns 255 when the prefix is
+ * not a recognized room type. Longer/more-specific prefixes are checked first.
+ * (Previously this ladder was copy-pasted in the subscribe/unsubscribe/ban handlers.)
+ */
+inline uint8_t parseRoomType(const std::string& rid) {
+    if (rid.rfind("pub-state-cache-", 0) == 0) return static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
+    if (rid.rfind("pri-state-cache-", 0) == 0) return static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
+    if (rid.rfind("pub-cache-", 0) == 0)       return static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
+    if (rid.rfind("pri-cache-", 0) == 0)       return static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
+    if (rid.rfind("pub-state-", 0) == 0)       return static_cast<uint8_t>(Rooms::PUBLIC_STATE);
+    if (rid.rfind("pri-state-", 0) == 0)       return static_cast<uint8_t>(Rooms::PRIVATE_STATE);
+    if (rid.rfind("pub-", 0) == 0)             return static_cast<uint8_t>(Rooms::PUBLIC);
+    if (rid.rfind("pri-", 0) == 0)             return static_cast<uint8_t>(Rooms::PRIVATE);
+    return 255;
+}
+
 /** stores data for websocket and its worker for later use */
 struct WebSocketData {
     uWS::WebSocket<true, true, PerSocketData>* ws;
@@ -3388,43 +3405,10 @@ void worker_t::work()
                 return;  /** Exit early since rid is invalid */
             }
 
-            uint8_t roomType = 255;
-
             /** checking if the correct room type is received */
-            if (rid.rfind("pub-state-cache-", 0) == 0)
+            uint8_t roomType = parseRoomType(rid);
+            if (roomType == 255)
             {
-                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
-            }
-            else if (rid.rfind("pri-state-cache-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
-            }
-            else if (rid.rfind("pub-cache-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
-            }
-            else if (rid.rfind("pri-cache-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
-            }
-            else if (rid.rfind("pub-state-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
-            }
-            else if (rid.rfind("pri-state-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
-            }
-            else if (rid.rfind("pub-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PUBLIC);
-            }
-            else if (rid.rfind("pri-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PRIVATE);
-            }
-            else
-            {                        
                 if(!isAborted.load()){
                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -3896,43 +3880,10 @@ void worker_t::work()
                 return;
             }
 
-            uint8_t roomType = 255;
-
             /** checking if the correct room type is received */
-            if (rid.rfind("pub-state-cache-", 0) == 0)
+            uint8_t roomType = parseRoomType(rid);
+            if (roomType == 255)
             {
-                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
-            }
-            else if (rid.rfind("pri-state-cache-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
-            }
-            else if (rid.rfind("pub-cache-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
-            }
-            else if (rid.rfind("pri-cache-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
-            }
-            else if (rid.rfind("pub-state-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
-            }
-            else if (rid.rfind("pri-state-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
-            }
-            else if (rid.rfind("pub-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PUBLIC);
-            }
-            else if (rid.rfind("pri-", 0) == 0)
-            {
-                roomType = static_cast<uint8_t>(Rooms::PRIVATE);
-            }
-            else
-            {                        
                 if(!*isAborted){
                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -4326,46 +4277,11 @@ void worker_t::work()
                             std::string rid = item["rid"];
                             std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
-                            uint8_t roomType = 255;
-
-                            /** checking if the correct room type is received */
-                            if (rid.rfind("pub-state-cache-", 0) == 0)
+                            /** checking if the correct room type is received
+                             *  ("global" is a valid ban target that has no room prefix) */
+                            uint8_t roomType = parseRoomType(rid);
+                            if (roomType == 255 && rid != "global")
                             {
-                                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
-                            }
-                            else if (rid.rfind("pri-state-cache-", 0) == 0)
-                            {
-                                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
-                            }
-                            else if (rid.rfind("pub-cache-", 0) == 0)
-                            {
-                                roomType = static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
-                            }
-                            else if (rid.rfind("pri-cache-", 0) == 0)
-                            {
-                                roomType = static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
-                            }
-                            else if (rid.rfind("pub-state-", 0) == 0)
-                            {
-                                roomType = static_cast<uint8_t>(Rooms::PUBLIC_STATE);
-                            }
-                            else if (rid.rfind("pri-state-", 0) == 0)
-                            {
-                                roomType = static_cast<uint8_t>(Rooms::PRIVATE_STATE);
-                            }
-                            else if (rid.rfind("pub-", 0) == 0)
-                            {
-                                roomType = static_cast<uint8_t>(Rooms::PUBLIC);
-                            }
-                            else if (rid.rfind("pri-", 0) == 0)
-                            {
-                                roomType = static_cast<uint8_t>(Rooms::PRIVATE);
-                            } 
-                            else if (rid == "global") {
-                                /** do nothing */
-                            }
-                            else
-                            {                        
                                 if(!*isAborted){
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
