@@ -92,10 +92,6 @@ int getFeatureStatus(Features feature)
 /******************************************************************************************************************************************************************************/
 
 class UserData {
-private:
-    /** Private constructor to prevent instantiation */ 
-    UserData() = default;
-
 public:
     /** server configuration variables, can be changed on user demand */
     unsigned int msgSizeAllowedInBytes = 10240;
@@ -103,8 +99,8 @@ public:
     unsigned short idleTimeoutInSeconds = 60;
     unsigned short maxLifetimeInMinutes = 0;
 
-    unsigned long long maxMonthlyPayloadInBytes;
-    int connections;
+    unsigned long long maxMonthlyPayloadInBytes = 0;
+    int connections = 0;
     std::string clientApiKey;
     std::string adminApiKey;
 
@@ -112,38 +108,64 @@ public:
     std::string webHookBaseUrl;
     std::string webhookPath;
     std::string webhookSecret;
-    uint64_t webhooks;
+    uint64_t webhooks = 0;
     std::string webhookIP;
 
     /** mysql db configuration */
     int mysqlDBCommitBatchSize = 1000;
     std::string dbHost;
-    int dbPort;
+    int dbPort = 0;
     std::string dbUser;
     std::string dbPassword;
     std::string dbName;
 
     /** lmdb configurations */
     int lmdbCommitBatchSize = 1000;
-    unsigned long long lmdbDatabaseSizeInBytes;
+    unsigned long long lmdbDatabaseSizeInBytes = 0;
 
     /** auto populated according to the values of above variables */
-    uint32_t features;
+    uint32_t features = 0;
 
     /** user info */
     std::string subdomain;
     std::string ip;
 
-    /** Public static method to get the single instance */ 
-    static UserData& getInstance() {
-        static UserData instance;
-        return instance;
+    UserData() = default;
+    UserData(const UserData&) = default;
+    UserData& operator=(const UserData&) = default;
+
+    /**
+     * Config is published as an immutable snapshot behind an atomic pointer.
+     * getInstance() returns a const reference to the current snapshot, which is
+     * never freed (old snapshots are intentionally leaked when a new one is
+     * published — /invalidate is rare), so readers are lock-free and cannot race
+     * with a concurrent update (previously populateUserData mutated these
+     * std::string fields in place while other threads read them: a data race).
+     *
+     * To update: clone the current snapshot, modify the copy, then publish() it.
+     * Serialize writers with configWriteMutex (see populateUserData).
+     */
+    static const UserData& getInstance() {
+        return *current().load(std::memory_order_acquire);
     }
 
-    /** Delete copy constructor and assignment operator */ 
-    UserData(const UserData&) = delete;
-    UserData& operator=(const UserData&) = delete;
+    /** Atomically install `next` as the current config (takes ownership; the
+     *  previous snapshot is intentionally leaked). */
+    static void publish(UserData* next) {
+        current().store(next, std::memory_order_release);
+    }
+
+private:
+    static std::atomic<UserData*>& current() {
+        /** Meyers singleton avoids static-init-order issues. */
+        static std::atomic<UserData*> ptr{ new UserData() };
+        return ptr;
+    }
 };
+
+/** Serializes config writers (populateUserData) so concurrent /invalidate calls
+ *  don't lose updates via clone-modify-publish races. */
+std::mutex configWriteMutex;
 
 class MySQLConnectionHandler {
 private:
@@ -1424,9 +1446,10 @@ HTTPResponse sendHTTPSRequest(std::string baseURL, std::string path, const httpl
  * Resolves the IPv4 address for the given hostname and stores it.
  * This function ensures proper memory management and handles errors gracefully.
  * 
+ * @param ud       The config snapshot being built; the resolved IP is stored here.
  * @param hostname The domain name to resolve (e.g., "www.example.com").
  */
-void resolveAndStoreIPAddress(const std::string& hostname) {
+void resolveAndStoreIPAddress(UserData& ud, const std::string& hostname) {
     /** Define the hints structure to specify address family and socket type */
     struct addrinfo hints, *res = nullptr;
     char ipAddress[INET_ADDRSTRLEN]; 
@@ -1448,19 +1471,23 @@ void resolveAndStoreIPAddress(const std::string& hostname) {
     struct sockaddr_in* ipv4 = (struct sockaddr_in*)res->ai_addr; 
     inet_ntop(AF_INET, &(ipv4->sin_addr), ipAddress, sizeof(ipAddress)); 
 
-    /** storing the address */
-    UserData::getInstance().webhookIP = ipAddress;
+    /** storing the address into the config snapshot being built */
+    ud.webhookIP = ipAddress;
 
     /** Free the allocated memory for the addrinfo structure */
     freeaddrinfo(res);
 }
 
 /** This function will parse and populate the userdata */
-int populateUserData(std::string data) {    
+int populateUserData(std::string data) {
     nlohmann::json parsedJson = nlohmann::json::parse(data);
     int needsDBUpdate = 0;
 
-    auto& userData = UserData::getInstance();
+    /** Serialize concurrent writers, then build the new config on a private copy of
+     *  the current snapshot and publish it atomically at the end. Readers keep seeing
+     *  the old immutable snapshot until publish(), so there is no read/write race. */
+    std::lock_guard<std::mutex> writeLock(configWriteMutex);
+    UserData userData = UserData::getInstance();
 
     if (parsedJson.contains("client_api_key") && !parsedJson["client_api_key"].is_null()) {
         userData.clientApiKey = parsedJson["client_api_key"].get<std::string>();
@@ -1497,7 +1524,7 @@ int populateUserData(std::string data) {
         userData.webHookBaseUrl = parsedJson["webhook_base_url"].get<std::string>();
 
         /** resolve and store the IP address of the client's webhook URL */
-        resolveAndStoreIPAddress(userData.webHookBaseUrl);
+        resolveAndStoreIPAddress(userData, userData.webHookBaseUrl);
     }
 
     if (parsedJson.contains("webhook_path") && !parsedJson["webhook_path"].is_null()) {
@@ -1553,7 +1580,7 @@ int populateUserData(std::string data) {
     }
 
     /** populate features */
-    populateFeatureStatus(UserData::getInstance().features);
+    populateFeatureStatus(userData.features);
 
     int is_sql_integration_enabled = 0;
 
@@ -1601,11 +1628,11 @@ int populateUserData(std::string data) {
         && dbPort != 0
     ){
         if (
-            UserData::getInstance().dbHost != dbHost 
-            || UserData::getInstance().dbUser != dbUser
-            || UserData::getInstance().dbPassword != dbPassword
-            || UserData::getInstance().dbName != dbName
-            || UserData::getInstance().dbPort != dbPort
+            userData.dbHost != dbHost
+            || userData.dbUser != dbUser
+            || userData.dbPassword != dbPassword
+            || userData.dbName != dbName
+            || userData.dbPort != dbPort
         ){
             userData.dbHost = dbHost;
             userData.dbUser = dbUser;
@@ -1632,6 +1659,10 @@ int populateUserData(std::string data) {
     if (parsedJson.contains("total_payload_sent")) {
         totalPayloadSent = parsedJson["total_payload_sent"].get<unsigned long long>();
     }
+
+    /** Publish the fully-built config snapshot atomically (readers switch over on
+     *  their next getInstance()). The previous snapshot is intentionally leaked. */
+    UserData::publish(new UserData(std::move(userData)));
 
     return needsDBUpdate;
 }
@@ -5420,7 +5451,7 @@ int main() {
      *  the server listens on a local port (see worker_t::work). This block is compiled
      *  out entirely in production builds. */
     {
-        auto& u = UserData::getInstance();
+        UserData u = UserData::getInstance();  // start from defaults, then publish
         u.clientApiKey = "test-client-key";
         u.adminApiKey  = "test-admin-key";
         u.connections  = 1000000;
@@ -5442,6 +5473,7 @@ int main() {
             populateWebhookStatus(static_cast<uint8_t>(Webhooks::ON_MESSAGE));
             log(LogLevel::INFO, "LOCAL_TEST: ON_MESSAGE webhook enabled -> 127.0.0.1:8443");
         }
+        UserData::publish(new UserData(std::move(u)));
     }
     init_env();
     log(LogLevel::INFO, "LOCAL_TEST mode: cloud provisioning bypassed.");
