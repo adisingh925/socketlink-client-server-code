@@ -74,6 +74,26 @@ during connection setup and ~60k destabilizes the VM (OOM). Reaching 100k needs
 client and server on separate hosts (or a larger box) — this is a host limit,
 not a server limit.
 
+## Backpressure / stability test
+
+Proves the server survives extreme backpressure without crashing: `N_SLOW`
+subscribers join a room and then never read (their send buffers back up past
+`maxBackpressure`), while a publisher floods that room; a separate healthy
+pub/sub pair must keep exchanging the whole time.
+
+```bash
+tests/run_backpressure.sh ~/sl-bin/sl_new
+```
+
+Reports whether the server stayed **alive**, its **peak RSS** (must stay bounded —
+it drops, not buffers-forever), the **healthy-client responsiveness %**, and the
+**dropped_messages** count. This is the regression guard for a real crash that was
+found and fixed: the `.dropped` handler used to `ws->send()` a notification, but on
+an already-full buffer that send was itself dropped and re-invoked `.dropped`,
+recursing until the stack overflowed (SIGSEGV). Post-fix result under a hard flood:
+server alive, healthy client 100% responsive, RSS ~360 MB, ~7M messages dropped
+cleanly.
+
 ## Files
 
 | File | Purpose |
@@ -85,6 +105,8 @@ not a server limit.
 | `run_webhook_demo.sh` | Boot mock + server (`SL_TEST_WEBHOOK=1`) → run `webhook_demo.py` |
 | `build_local.sh` | Build `/tmp/sl_new` and `/tmp/sl_orig` in `LOCAL_TEST` mode |
 | `patch_orig.py` | Applies the `LOCAL_TEST` bypass to a `master` copy for the baseline build |
+| `run_backpressure.sh` | Floods the server via non-reading subscribers; checks it survives + stays bounded |
+| `backpressure_test.py` | Slow-subscriber flood + healthy-client responsiveness check |
 
 Notes:
 - `RUN_DIR` (default `~/sl-run`) is the server's working dir; keep it on a native
