@@ -2281,23 +2281,30 @@ void worker_t::work()
             }
         }
 
-        /** Check if the connection limit has been exceeded */
-        if (globalConnectionCounter.load(std::memory_order_relaxed) >= UserData::getInstance().connections) {
-            totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
-
-            res->cork([res]() {
-                res->writeStatus("503 Service Unavailable")->end("MAX_CONNECTION_LIMIT_REACHED");
-            });
-
-            return;
-        }
-
         /** Check if API key is valid or not */
         if(UserData::getInstance().clientApiKey != upgradeData->key){
             totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
 
             res->cork([res]() {
                 res->writeStatus("401 Unauthorized")->end("INVALID_API_KEY");
+            });
+
+            return;
+        }
+
+        /** Reserve a connection slot atomically so the limit is a HARD cap with no
+         *  overshoot. Previously the check (here) and the increment (in .open) were at
+         *  different lifecycle points, so concurrent upgrades could all pass the check
+         *  before any of them counted, letting the server exceed `connections`.
+         *  fetch_add returns the PREVIOUS value; if we were already at the limit, give
+         *  the slot back and reject. The slot is released in .close on the normal path,
+         *  or in the else branch below if the request aborts before it is upgraded. */
+        if (globalConnectionCounter.fetch_add(1, std::memory_order_relaxed) >= UserData::getInstance().connections) {
+            globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
+            totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
+
+            res->cork([res]() {
+                res->writeStatus("503 Service Unavailable")->end("MAX_CONNECTION_LIMIT_REACHED");
             });
 
             return;
@@ -2316,6 +2323,10 @@ void worker_t::work()
                     ud->context
                 );
             });
+        } else {
+            /** Slot was reserved above, but the request aborted before upgrading, so
+             *  .open/.close will never run to release it -- release it here. */
+            globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
         }
     },
     .open = [this](auto *ws) {
@@ -2325,8 +2336,8 @@ void worker_t::work()
 
         std::string userId = ws->getUserData()->uid;
 
-        /** Increment global connection counter */
-        globalConnectionCounter.fetch_add(1, std::memory_order_relaxed);
+        /** The connection slot was already reserved atomically in the upgrade handler
+         *  (hard limit) and is released in .close; do not count again here. */
 
         {
             /** Thread-safe insertion into connections map */
@@ -4973,7 +4984,7 @@ int main() {
         UserData u = UserData::getInstance();  // start from defaults, then publish
         u.clientApiKey = "test-client-key";
         u.adminApiKey  = "test-admin-key";
-        u.connections  = 1000000;
+        u.connections  = std::getenv("SL_MAX_CONN") ? std::atoi(std::getenv("SL_MAX_CONN")) : 1000000;
         u.maxMonthlyPayloadInBytes = 1ULL << 50;
         u.lmdbDatabaseSizeInBytes  = 1ULL << 30; /** 1 GB */
         u.msgSizeAllowedInBytes    = 1 << 20;    /** 1 MB */
