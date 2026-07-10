@@ -12,6 +12,7 @@
 #include <openssl/evp.h>
 #include <tbb/concurrent_hash_map.h>
 #include <filesystem>
+#include <fstream>
 #include <deque>
 #include <condition_variable>
 #include "simdjson.h"
@@ -130,6 +131,13 @@ public:
     std::string subdomain;
     std::string ip;
 
+    /** self-hosted / standalone mode (no master server): bring-your-own TLS cert
+     *  and an explicit listen port, supplied via the local config file. Empty/0 =>
+     *  master-managed mode (certs derived from subdomain, port = PORT). */
+    std::string certFile;
+    std::string keyFile;
+    int listenPort = 0;
+
     UserData() = default;
     UserData(const UserData&) = default;
     UserData& operator=(const UserData&) = default;
@@ -166,6 +174,13 @@ private:
 /** Serializes config writers (populateUserData) so concurrent /invalidate calls
  *  don't lose updates via clone-modify-publish races. */
 std::mutex configWriteMutex;
+
+/** Standalone / self-hosted mode: when SL_CONFIG points at a local JSON config
+ *  file, the server loads config from there instead of the master server (no
+ *  metadata service, no master fetch, no socketlink.io DNS/certbot), uses its own
+ *  cert/key/port, and authenticates /api/v1/invalidate with the admin api key. */
+bool g_standalone = false;
+std::string g_configPath;
 
 class MySQLConnectionHandler {
 private:
@@ -756,9 +771,6 @@ thread_local std::chrono::time_point<std::chrono::high_resolution_clock> threadT
 static thread_local simdjson::ondemand::parser parser;
 
 /** Internal Constants */
-constexpr const char* INTERNAL_IP = "169.254.169.254";
-constexpr const char* MASTER_SERVER_URL = "master.socketlink.io";
-constexpr const char* SECRET = "406$%&88767512673QWEdsf379254196073524";
 constexpr const int PORT = 443;
 
 /** Sending Constants */
@@ -1092,31 +1104,6 @@ void populateFeatureStatus(uint32_t bitmask)
 }
 
 /**
- * @brief Send an HTTP request to the given URL and path
- */
-HTTPResponse sendHTTPRequest(std::string baseURL, std::string path, const httplib::Headers& headers = {}) {
-    try
-    {
-        /** Create an HTTP client for the IP service */ 
-        httplib::Client client(baseURL); 
-
-        /** Make a GET request (no additional path needed for ipify) */ 
-        auto res = client.Get(path, headers);
-
-        /** Check if the response is valid */ 
-        if (res && res->status == 200) {
-            return {res->body, res->status};
-        } else {
-            return {"", -1};
-        }
-    }
-    catch(const std::exception& e)
-    {
-        return {"", -1};
-    }
-}
-
-/**
  * @brief Send an HTTPS POST request to the given URL and path
  */
 HTTPResponse sendHTTPSPOSTRequest(
@@ -1424,31 +1411,6 @@ int sendHTTPSPOSTRequestFireAndForget(
 }
 
 /**
- * @brief Send an HTTPS request to the given URL and path
- */
-HTTPResponse sendHTTPSRequest(std::string baseURL, std::string path, const httplib::Headers& headers = {}) {
-    try
-    {
-        /** Create an HTTPS client for the IP service */ 
-        httplib::SSLClient client(baseURL); 
-
-        /** Make a GET request (no additional path needed for ipify) */ 
-        auto res = client.Get(path, headers);
-
-        /** Check if the response is valid */ 
-        if (res && res->status == 200) {
-            return {res->body, res->status};
-        } else {
-            return {"", -1};
-        }
-    }
-    catch(const std::exception& e)
-    {
-        return {"", -1};
-    }
-}
-
-/**
  * Resolves the IPv4 address for the given hostname and stores it.
  * This function ensures proper memory management and handles errors gracefully.
  * 
@@ -1585,6 +1547,17 @@ int populateUserData(std::string data) {
         userData.ip = parsedJson["ip"].get<std::string>();
     }
 
+    /** Standalone / self-hosted TLS + port (bring-your-own cert, own listen port) */
+    if(parsedJson.contains("cert_file") && !parsedJson["cert_file"].is_null()){
+        userData.certFile = parsedJson["cert_file"].get<std::string>();
+    }
+    if(parsedJson.contains("key_file") && !parsedJson["key_file"].is_null()){
+        userData.keyFile = parsedJson["key_file"].get<std::string>();
+    }
+    if(parsedJson.contains("port") && !parsedJson["port"].is_null()){
+        userData.listenPort = parsedJson["port"].get<int>();
+    }
+
     /** populate features */
     populateFeatureStatus(userData.features);
 
@@ -1671,38 +1644,6 @@ int populateUserData(std::string data) {
     UserData::publish(new UserData(std::move(userData)));
 
     return needsDBUpdate;
-}
-
-/**
- * @brief Fetch and populate user data from the metadata service
- */
-void fetchAndPopulateUserData() {
-    try {
-        std::string dropletId = sendHTTPRequest(INTERNAL_IP, "/metadata/v1/id").body;
-
-        unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
-        hmac_sha256(SECRET, strlen(SECRET), dropletId.c_str(), dropletId.length(), hmac_result);  /**< Compute HMAC */
-            
-        /** Make the HTTP request */ 
-        std::string userData = sendHTTPSRequest(MASTER_SERVER_URL, "/api/v1/init/" + dropletId, {
-            {"secret", to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)}
-        }).body;
-
-        /** populate the userdata */
-        populateUserData(userData);
-    } catch (const nlohmann::json::parse_error& e) {
-        /**  Handle JSON parsing errors */
-        log(LogLevel::ERROR, "JSON Parse Error : ", e.what());
-    } catch (const nlohmann::json::type_error& e) {
-        /** Handle type mismatches in the JSON */ 
-        log(LogLevel::ERROR, "JSON Type Error : ", e.what());
-    } catch (const std::exception& e) {
-        /** Catch any other standard exceptions */ 
-        log(LogLevel::ERROR, "Exception : ", e.what());
-    } catch (...) {
-        /** Catch any unknown exceptions */ 
-        log(LogLevel::ERROR, "An unknown error occurred.");
-    }
 }
 
 /** unsubscribe from the current room and do some cleanup */
@@ -2141,14 +2082,15 @@ int create_socket(int port) {
 void worker_t::work()
 {
 #ifdef LOCAL_TEST
-    /** Use the repo-local test certs and a local listen port (see below) */
+    /** Use the repo-local test certs and a local listen port (SL_PORT, default 9001) */
     const std::string keyFilePath = "./ssl/privkey.pem";
     const std::string certFileName = "./ssl/cert.pem";
-    constexpr int listenPort = 9001;
+    const int listenPort = std::getenv("SL_PORT") ? std::atoi(std::getenv("SL_PORT")) : 9001;
 #else
-    const std::string keyFilePath = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/privkey.pem";
-    const std::string certFileName = "/home/socketlink/certbot-config/live/" + UserData::getInstance().subdomain + ".socketlink.io/fullchain.pem";
-    constexpr int listenPort = PORT;
+    /** Standalone: TLS cert/key and listen port come from the local config file. */
+    const std::string keyFilePath  = UserData::getInstance().keyFile;
+    const std::string certFileName = UserData::getInstance().certFile;
+    const int listenPort = UserData::getInstance().listenPort ? UserData::getInstance().listenPort : PORT;
 #endif
 
     /* int sock = create_socket_with_ebpf(PORT);
@@ -2736,16 +2678,15 @@ void worker_t::work()
 
         try {
             std::string_view apiKey = req->getHeader("api-key");
-            std::string_view secret = req->getHeader("secret");
 
-            /** check if the API key is valid or not */
+            /** Admin-key auth (self-hosted: no master shared-secret signature) */
             if(apiKey != UserData::getInstance().adminApiKey){
 
                 if(!*isAborted){
                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                     res->cork([res]() {
-                        res->writeStatus("400 Unauthorized");
+                        res->writeStatus("401 Unauthorized");
                         res->writeHeader("Content-Type", "application/json");
                         res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                     });
@@ -2758,32 +2699,12 @@ void worker_t::work()
         
             body.reserve(1024);
 
-            res->onData([res, req, body = std::move(body), secret, isAborted](std::string_view data, bool last) mutable {
+            res->onData([res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
                 body.append(data.data(), data.length());
 
-                if (last) { 
+                if (last) {
                     try {
-                        /** generate the secret and compare */
-                        unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];  /**< Buffer to store the HMAC result */
-                        hmac_sha256(SECRET, strlen(SECRET), body.c_str(), body.length(), hmac_result);  /**< Compute HMAC */
-
-                        /** compare HMAC and respond accordingly */
-                        if(secret != to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH)){
-
-                            if(!*isAborted){
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("400 Unauthorized");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "Unauthorized access, Invalid signature!"})");
-                                });
-                            }
-
-                            return;
-                        }
-
-                        /** Parse the JSON response */ 
+                        /** Apply the new config (admin-key already verified above) */
                         int action = populateUserData(body);
                         
                         if(action == 1){
@@ -4799,176 +4720,6 @@ void worker_t::work()
   log(LogLevel::INFO, "Thread ", std::this_thread::get_id(), " exiting");
 }
 
-/**
- * Checks if the DNS for the given domain resolves to the expected IP address.
- *
- * @param domain The domain name to check.
- * @param expectedIP The expected IP address.
- * @return true if DNS resolves correctly, false otherwise.
- */
-bool isDNSResolvedToIP(std::string_view domain, std::string_view expectedIP) {
-    addrinfo hints{}, *res = nullptr;
-    hints.ai_family = AF_INET; /** IPv4 (use AF_UNSPEC for both IPv4 & IPv6) */ 
-
-    /** Perform a DNS lookup */
-    if (getaddrinfo(domain.data(), nullptr, &hints, &res) != 0) {
-        return false;
-    }
-
-    char resolvedIP[INET_ADDRSTRLEN];
-    bool matched = false;
-
-    /** Iterate through resolved addresses */
-    for (addrinfo* p = res; p != nullptr; p = p->ai_next) {
-        sockaddr_in* addr = reinterpret_cast<sockaddr_in*>(p->ai_addr);
-        inet_ntop(AF_INET, &addr->sin_addr, resolvedIP, INET_ADDRSTRLEN);
-        
-        /** Compare resolved IP with expected IP */
-        if (expectedIP == resolvedIP) {
-            matched = true;
-            break;
-        } else {
-            log(LogLevel::INFO, "Resolved IP : ", resolvedIP, " does not match expected IP : ", expectedIP);
-        }
-    }
-
-    /** Free memory allocated by getaddrinfo */
-    freeaddrinfo(res);
-    return matched;
-}
-
-/**
- * Continuously checks DNS resolution until it matches the expected IP.
- *
- * @param domain The domain name to check.
- * @param expectedIP The expected IP address.
- */
-void waitForCorrectDNS(std::string_view domain, std::string_view expectedIP) {
-    log(LogLevel::INFO, "Waiting for DNS resolution of ", domain, " to match ", expectedIP, "...");
-
-    /** Keep checking until the DNS resolves correctly */
-    while (!isDNSResolvedToIP(domain, expectedIP)) {
-        log(LogLevel::INFO, "DNS not resolved correctly. Retrying in 10 seconds...");
-
-        std::this_thread::sleep_for(std::chrono::seconds(10)); /** Avoid excessive CPU usage */ 
-    }
-
-    log(LogLevel::INFO, "DNS correctly resolved for ", domain, " to ", expectedIP, "!");
-}
-
-/**
- * Checks if an SSL certificate exists for the domain.
- *
- * @param domain The domain name.
- * @return true if the certificate exists, false otherwise.
- */
-bool doesCertificateExist(std::string_view domain) {
-    std::string certPath = "/home/socketlink/certbot-config/live/" + std::string(domain) + "/cert.pem";
-    
-    /** Check if the certificate file exists */
-    struct stat buffer;
-    return (stat(certPath.c_str(), &buffer) == 0);
-}
-
-/**
- * Checks if the SSL certificate for the domain is valid for at least the next 24 hours.
- *
- * @param domain The domain name.
- * @return true if the certificate is valid, false otherwise.
- */
-bool isCertificateValid(std::string_view domain) {
-    std::array<char, 128> buffer{};
-    std::string checkCmd = "openssl x509 -checkend 86400 -noout -in /home/socketlink/certbot-config/live/" + std::string(domain) + "/cert.pem";
-
-    /** Execute the command using popen */
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(checkCmd.c_str(), "r"), pclose);
-    if (!pipe) {
-        log(LogLevel::ERROR, "Failed to check certificate validity.");
-        return false;
-    }
-
-    /** Read the command output */
-    if (fgets(buffer.data(), buffer.size(), pipe.get()) == nullptr) {
-        log(LogLevel::ERROR, "Certificate expired or invalid for ", domain);
-        return false;
-    }
-
-    return true;
-}
-
-/**
- * Creates a new SSL certificate for the domain using Certbot.
- *
- * @param domain The domain name.
- */
-void createCertificate(std::string_view domain) {
-    log(LogLevel::INFO, "Creating a new SSL certificate for ", domain);
-
-    std::string createCmd = "certbot certonly --standalone --non-interactive --agree-tos "
-    "--email adisingh925@gmail.com --key-type ecdsa -d " + std::string(domain) + 
-    " --config-dir /home/socketlink/certbot-config "
-    "--work-dir /home/socketlink/certbot-work "
-    "--logs-dir /home/socketlink/certbot-logs";
-    std::system(createCmd.c_str());
-}
-
-/**
- * Renews the SSL certificate for the domain if necessary.
- *
- * @param domain The domain name.
- */
-void renewCertificate(std::string_view domain) {
-    log(LogLevel::INFO, "Renewing SSL certificate for ", domain);
-
-    std::string renewCmd = 
-    "certbot renew --quiet --non-interactive --preferred-challenges http "
-    "--config-dir /home/socketlink/certbot-config "
-    "--work-dir /home/socketlink/certbot-work "
-    "--logs-dir /home/socketlink/certbot-logs";
-    std::system(renewCmd.c_str());
-}
-
-/**
- * @brief Monitors the SSL certificate file for changes and restarts the server if modified.
- * 
- * This function runs in a separate thread and checks the last modified time of the certificate file 
- * once every 24 hours. If a change is detected, it restarts the `socketlink-client-backend.service`.
- */
-void watchCertChanges(std::string_view domain) {
-    /** 
-     * Define the certificate file path that needs to be monitored for changes.
-     */
-    const std::string certPath = "/home/socketlink/certbot-config/live/" + std::string(domain) + "/fullchain.pem";
-
-    /** 
-     * Get the last modified time of the certificate file at startup.
-     */
-    std::filesystem::file_time_type lastModifiedTime = std::filesystem::last_write_time(certPath);
-
-    while (true) {
-        /** 
-         * Sleep for 24 hours before checking the file again to minimize resource usage.
-         */
-        std::this_thread::sleep_for(std::chrono::hours(24));
-
-        /** 
-         * Get the current last modified time of the certificate file.
-         */
-        auto currentModifiedTime = std::filesystem::last_write_time(certPath);
-
-        /**
-         * If the file has been modified since the last check, restart the service.
-         */
-        if (currentModifiedTime != lastModifiedTime) {
-            log(LogLevel::INFO, "Certificate changed, restarting service...");
-
-            /** 
-             * Restart the server using systemd user service.
-             */
-            std::exit(0);
-        }
-    }
-}
 
 /* Main */
 int main() {
@@ -5008,47 +4759,67 @@ int main() {
     init_env();
     log(LogLevel::INFO, "LOCAL_TEST mode: cloud provisioning bypassed.");
 #else
-    /** Fetch and populated data before starting the threads */
-    fetchAndPopulateUserData();
-    init_env();
-
-    /** Keep retrying if subdomain is empty */
-    while (UserData::getInstance().subdomain.empty()) {
-        log(LogLevel::INFO, "Subdomain is empty, retrying fetch in 10 seconds...\n");
-        std::this_thread::sleep_for(std::chrono::seconds(10));
-        fetchAndPopulateUserData();
-    }
-
-    log(LogLevel::INFO, "Successfully fetched user data!");
-
-    /** loading the ebpf program */
-    /* const char *ebpf_program_path = "rr.o";
-
-    if (load_ebpf_program(ebpf_program_path) < 0) {
-        std::cerr << "Failed to load eBPF program\n";
+    /** ---- Standalone / self-hosted mode (the only production mode) ----
+     *  Load config from a local JSON file (path in SL_CONFIG); there is no master
+     *  server, metadata service, DNS wait, or certbot. TLS uses the cert_file/
+     *  key_file from the config on the configured port, and /api/v1/invalidate is
+     *  authenticated with the admin api key. */
+    const char* cfgPath = std::getenv("SL_CONFIG");
+    if (!cfgPath) {
+        log(LogLevel::ERROR, "SL_CONFIG is not set. Point it at a JSON config file "
+                             "(client_api_key, admin_api_key, cert_file, key_file, port, ...).");
         return 1;
-    } */
-
-    std::string domain = UserData::getInstance().subdomain + ".socketlink.io";
-    waitForCorrectDNS(domain, UserData::getInstance().ip);
-
-    if (!doesCertificateExist(domain))
-    {
-        log(LogLevel::INFO, "Creating a new SSL certificate for domain : ", domain);
-        createCertificate(domain);
     }
-    else if (!isCertificateValid(domain))
+    g_standalone = true;
+    g_configPath = cfgPath;
+
     {
-        log(LogLevel::INFO, "Renewing SSL certificate for domain : ", domain);
-        renewCertificate(domain);
-    }
-    else
-    {
-        log(LogLevel::INFO, "SSL certificate is valid. No renewal needed.");
+        std::ifstream cf(g_configPath);
+        if (!cf) {
+            log(LogLevel::ERROR, "Cannot open config file: ", g_configPath);
+            return 1;
+        }
+        std::stringstream buf; buf << cf.rdbuf();
+        try {
+            populateUserData(buf.str());
+        } catch (const std::exception& e) {
+            log(LogLevel::ERROR, "Invalid config JSON in ", g_configPath, ": ", e.what());
+            return 1;
+        }
     }
 
-    /** running the file change watcher thread */
-    std::thread watcher(watchCertChanges, domain);
+    {
+        const auto& cfg = UserData::getInstance();
+        if (cfg.clientApiKey.empty() || cfg.adminApiKey.empty()) {
+            log(LogLevel::ERROR, "Config must set client_api_key and admin_api_key.");
+            return 1;
+        }
+        if (cfg.certFile.empty() || cfg.keyFile.empty()) {
+            log(LogLevel::ERROR, "Config must set cert_file and key_file.");
+            return 1;
+        }
+    }
+
+    init_env();
+    log(LogLevel::INFO, "Standalone mode: loaded ", g_configPath,
+        " (port=", (UserData::getInstance().listenPort ? UserData::getInstance().listenPort : PORT),
+        ", cert=", UserData::getInstance().certFile, ")");
+
+    /** Watch the cert file for external renewal (certbot/acme.sh) and restart to
+     *  reload it (a process manager brings the server back up). */
+    std::string certToWatch = UserData::getInstance().certFile;
+    std::thread watcher([certToWatch]() {
+        std::error_code ec;
+        auto last = std::filesystem::last_write_time(certToWatch, ec);
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::hours(1));
+            auto now = std::filesystem::last_write_time(certToWatch, ec);
+            if (!ec && now != last) {
+                log(LogLevel::INFO, "Standalone: cert changed on disk, restarting to reload.");
+                std::exit(0);
+            }
+        }
+    });
     watcher.detach();
 #endif
 

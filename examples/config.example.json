@@ -1,0 +1,30 @@
+{
+  "client_api_key": "CHANGE_ME_client_key",
+  "admin_api_key": "CHANGE_ME_admin_key",
+
+  "port": 443,
+  "cert_file": "/etc/socketlink/fullchain.pem",
+  "key_file": "/etc/socketlink/privkey.pem",
+
+  "connections": 100000,
+  "msg_size_allowed_in_bytes": 10240,
+  "max_backpressure_in_bytes": 4096,
+  "idle_timeout_in_seconds": 60,
+  "max_lifetime_in_minutes": 0,
+  "max_monthly_payload_in_bytes": 1099511627776,
+  "max_storage_allowed_in_gb": 1,
+  "lmdb_commit_batch_size": 1000,
+  "db_commit_batch_size": 1000,
+
+  "webhooks": 0,
+  "webhook_base_url": "",
+  "webhook_path": "",
+  "webhook_secret": "",
+
+  "is_sql_integration_enabled": false,
+  "db_host": "",
+  "db_user": "",
+  "db_password": "",
+  "db_name": "",
+  "db_port": 0
+}
