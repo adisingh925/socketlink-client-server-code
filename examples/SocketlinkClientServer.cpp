@@ -2573,9 +2573,15 @@ void worker_t::work()
             droppedMessages.fetch_add(1, std::memory_order_relaxed);
         }    
     },
-    .dropped = [](auto *ws, std::string_view message, uWS::OpCode /*opCode*/) {
+    .dropped = [](auto * /*ws*/, std::string_view /*message*/, uWS::OpCode /*opCode*/) {
+        /** A message was dropped because this connection is over its backpressure
+         *  limit. Do NOT ws->send() a notification here: the send buffer is already
+         *  full, so that send would itself be dropped and re-invoke this handler
+         *  synchronously, recursing until the stack overflows and the server crashes
+         *  under sustained backpressure. Just count the drop; the client learns it is
+         *  rate-limited via the YOU_ARE_RATE_LIMITED path when it next sends, and via
+         *  RATE_LIMIT_LIFTED (in .drain) once its buffer drains. */
         droppedMessages.fetch_add(1, std::memory_order_relaxed);
-        ws->send("{\"data\":\"MESSAGE_DROPPED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
     },
     .drain = [](auto *ws) {
         if(ws->getBufferedAmount() < (UserData::getInstance().maxBackpressureInBytes / 2)){
