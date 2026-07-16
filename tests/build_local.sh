@@ -20,7 +20,7 @@ mkdir -p "$OUT_DIR"
 SRC="$REPO/examples/SocketlinkClientServer.cpp"
 
 INC="-I$D/uWebSockets/src -I$D/uWebSockets/uSockets/src -I$D/include -I/usr/include/mysql"
-LIB="$D/uWebSockets/uSockets/uSockets.a -lssl -lcrypto -lz -llmdb -ltbb -lmysqlclient -lbpf -lpthread"
+LIB="$D/uWebSockets/uSockets/uSockets.a -lssl -lcrypto -lz -llmdb -ltbb -lmysqlclient -lpthread"
 STD="-std=c++17 -O2"
 
 echo "=== building $OUT_DIR/sl_new (current tree, -DLOCAL_TEST) ==="

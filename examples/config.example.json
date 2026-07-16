@@ -2,9 +2,7 @@
   "client_api_key": "CHANGE_ME_client_key",
   "admin_api_key": "CHANGE_ME_admin_key",
 
-  "port": 443,
-  "cert_file": "/etc/socketlink/fullchain.pem",
-  "key_file": "/etc/socketlink/privkey.pem",
+  "port": 8080,
 
   "connections": 100000,
   "msg_size_allowed_in_bytes": 10240,

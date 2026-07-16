@@ -18,8 +18,8 @@ import multiprocessing as mp
 import resource
 import http.client
 
-CLIENT_KEY = "test-client-key"
-ADMIN_KEY  = "test-admin-key"
+CLIENT_KEY = "change-me-client-key"
+ADMIN_KEY  = "change-me-admin-key"
 PAYLOAD = b'{"rid":"%s","message":"x"}'  # filled per room
 
 def raise_fds():
@@ -65,8 +65,9 @@ async def read_frame(reader):
 
 async def ws_connect(host, port, src_ip, uid, ctx):
     reader, writer = await asyncio.open_connection(
-        host, port, ssl=ctx, server_hostname="localtest.socketlink.io",
-        local_addr=(src_ip, 0),
+        host, port, ssl=ctx,
+        server_hostname=("localtest.socketlink.io" if ctx else None),  # SNI only meaningful with TLS
+        local_addr=((src_ip, 0) if src_ip else None),  # empty src_ip => let the OS pick (remote targets)
     )
     key = base64.b64encode(os.urandom(16)).decode()
     req = (f"GET / HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\n"
@@ -112,18 +113,37 @@ async def worker_async(cfg, shard_start, shard_end, ready_q, result_q, go_time):
     ready_sent = False
     err = None
     try:
-        ctx = make_ctx()
+        ctx = make_ctx() if cfg["tls"] else None
 
-        # subscribe pool (keep-alive HTTPS connections)
+        # subscribe pool (keep-alive HTTP(S) connections)
         pool = asyncio.Queue()
         for k in range(cfg["pool"]):
+            _s = src_ips[k % len(src_ips)]
             r, w = await asyncio.open_connection(
-                host, port, ssl=ctx, server_hostname="localtest.socketlink.io",
-                local_addr=(src_ips[k % len(src_ips)], 0))
+                host, port, ssl=ctx,
+                server_hostname=("localtest.socketlink.io" if ctx else None),
+                local_addr=((_s, 0) if _s else None))
             pool.put_nowait((r, w))
 
-        conns = []   # (reader, writer, frame)
+        conns = []          # (reader, writer, frame)
+        reader_tasks = []   # started at connect so pings are answered during long ramps
+        counting = [False]  # count received data frames only inside the measurement window
         sem = asyncio.Semaphore(cfg["concurrency"])
+
+        async def reader_task(r, w):
+            # Runs from the moment the connection is established: replies PONG to
+            # server PINGs (otherwise long setup ramps make early connections look
+            # idle and the server closes them), counts data frames once counting is on.
+            while True:
+                try:
+                    op = await read_frame(r)
+                    if op == 0x9:                      # PING -> masked empty PONG
+                        w.write(b"\x8a\x80" + os.urandom(4))
+                        await w.drain()
+                    elif counting[0] and op in (0x1, 0x2):
+                        recv[0] += 1
+                except Exception:
+                    return
 
         async def setup(i):
             nonlocal connected
@@ -138,6 +158,7 @@ async def worker_async(cfg, shard_start, shard_end, ready_q, result_q, go_time):
                         w.close(); return
                     frame = build_text_frame(PAYLOAD % rid.encode())
                     conns.append((r, w, frame))
+                    reader_tasks.append(asyncio.create_task(reader_task(r, w)))
                     connected += 1
                 except Exception:
                     return
@@ -152,6 +173,7 @@ async def worker_async(cfg, shard_start, shard_end, ready_q, result_q, go_time):
 
         stop = time.time() + cfg["duration"]
         interval = (1.0 / cfg["rate"]) if cfg["rate"] > 0 else 0
+        counting[0] = True
 
         async def sender(w, frame):
             while time.time() < stop:
@@ -164,21 +186,11 @@ async def worker_async(cfg, shard_start, shard_end, ready_q, result_q, go_time):
                 else:
                     await asyncio.sleep(0)
 
-        async def reader_task(r):
-            while True:
-                try:
-                    await read_frame(r); recv[0] += 1
-                except Exception:
-                    return
-
-        tasks = []
-        for (r, w, frame) in conns:
-            tasks.append(asyncio.create_task(sender(w, frame)))
-            tasks.append(asyncio.create_task(reader_task(r)))
+        tasks = [asyncio.create_task(sender(w, frame)) for (r, w, frame) in conns]
         await asyncio.sleep(cfg["duration"] + 0.2)
-        for t in tasks:
+        for t in tasks + reader_tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, *reader_tasks, return_exceptions=True)
     except Exception as e:
         err = repr(e)
     finally:
@@ -191,9 +203,11 @@ async def worker_async(cfg, shard_start, shard_end, ready_q, result_q, go_time):
         except Exception:
             pass
 
-def get_metrics(host, port):
-    ctx = make_ctx()
-    conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=15)
+def get_metrics(host, port, tls=True):
+    if tls:
+        conn = http.client.HTTPSConnection(host, port, context=make_ctx(), timeout=15)
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=15)
     try:
         conn.request("GET", "/api/v1/metrics", headers={"api-key": ADMIN_KEY})
         r = conn.getresponse()
@@ -213,12 +227,14 @@ def main():
     ap.add_argument("--pool", type=int, default=16, help="subscribe conns per worker")
     ap.add_argument("--concurrency", type=int, default=400, help="concurrent handshakes per worker")
     ap.add_argument("--src-ips", default="127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4,127.0.0.5,127.0.0.6,127.0.0.7,127.0.0.8")
+    ap.add_argument("--no-tls", action="store_true", help="plaintext ws:// (TLS terminated upstream)")
     args = ap.parse_args()
 
+    tls = not args.no_tls
     src_ips = args.src_ips.split(",")
     cfg = dict(host=args.host, port=args.port, group=args.group, rate=args.rate,
                duration=args.duration, pool=args.pool, concurrency=args.concurrency,
-               src_ips=src_ips)
+               src_ips=src_ips, tls=tls)
 
     per = args.conns // args.procs
     shards = [(i * per, (i + 1) * per if i < args.procs - 1 else args.conns) for i in range(args.procs)]
@@ -251,11 +267,11 @@ def main():
           f"({got}/{args.procs} workers ready)", flush=True)
 
     # coordinated start ~1s from now
-    m0 = get_metrics(args.host, args.port)      # all connections are up at this point
+    m0 = get_metrics(args.host, args.port, tls)      # all connections are up at this point
     conns_at_start = m0["connections"]
     go_time.value = time.time() + 1.0
     time.sleep(1.0 + args.duration - 0.3)
-    m1 = get_metrics(args.host, args.port)      # read just before workers tear down
+    m1 = get_metrics(args.host, args.port, tls)      # read just before workers tear down
     conns_at_end = m1["connections"]
     window = args.duration
 

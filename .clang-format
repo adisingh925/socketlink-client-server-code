@@ -1,0 +1,42 @@
+# clang-format configuration for socketlink-client-server-code
+# Tuned to match the existing style of examples/SocketlinkClientServer.cpp.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+# Indentation (matches existing 4-space style)
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+NamespaceIndentation: All
+
+# Line length: existing code has long lines; 120 is the enforced ceiling
+ColumnLimit: 120
+
+# Braces: attached (K&R), as the file already uses
+BreakBeforeBraces: Attach
+
+# Pointers/references: keep whatever side the existing code uses per-file
+DerivePointerAlignment: true
+PointerAlignment: Left
+
+# NEVER reorder includes — App.h must come first and header order is load-bearing
+SortIncludes: Never
+
+# Lambdas and short constructs (uWS handler style)
+AllowShortLambdasOnASingleLine: All
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Misc
+AlignAfterOpenBracket: Align
+BinPackArguments: true
+BinPackParameters: true
+BreakConstructorInitializers: BeforeColon
+IndentCaseLabels: true
+KeepEmptyLinesAtTheStartOfBlocks: true
+MaxEmptyLinesToKeep: 2
+ReflowComments: false
+SpacesBeforeTrailingComments: 1
