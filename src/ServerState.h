@@ -62,9 +62,6 @@ struct worker_t {
     /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/
     struct uWS::Loop* loop_;
 
-    /** Every thread has it's own db_handler */
-    std::shared_ptr<MySQLConnectionHandler> db_handler;
-
     /* Need to capture the uWS::App object (instance). */
     std::shared_ptr<SLApp> app_;
 

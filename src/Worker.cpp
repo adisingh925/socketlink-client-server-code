@@ -51,8 +51,6 @@ void worker_t::work() {
    * Plaintext: TLS is terminated upstream (load balancer). No cert needed. */
     app_ = std::make_shared<SLApp>(SLApp());
 
-    db_handler = std::make_unique<MySQLConnectionHandler>();
-
     /** Periodic LMDB flush (1s): the write batch is thread-local, so on a quiet
      *  worker a partially-filled batch would otherwise sit in memory indefinitely —
      *  invisible to readers until the next fanned-out flush and lost outright on a
@@ -477,8 +475,10 @@ void worker_t::work() {
 
                                      /** SQL integration works in cache channels only */
                                      if (getFeatureStatus(Features::ENABLE_MYSQL_INTEGRATION) == 1) {
-                                         db_handler->insertSingleData(getCurrentSQLTime(), std::string(message), uid,
-                                                                      rid);
+                                         /** hand the row to the dedicated writer thread — the
+                          *  blocking batched INSERT no longer runs on this loop */
+                                         MySQLWriter::getInstance().enqueue(getCurrentSQLTime(), std::string(message),
+                                                                            uid, rid);
                                      }
                                  }
 
@@ -652,7 +652,8 @@ void worker_t::work() {
                                       R"(,"dropped_log_lines": )" +
                                       std::to_string(AsyncLogger::getInstance().droppedCount()) +
                                       R"(,"dropped_webhook_events": )" + std::to_string(droppedWebhookCount()) +
-                                      R"(})");
+                                      R"(,"dropped_db_rows": )" +
+                                      std::to_string(MySQLWriter::getInstance().droppedCount()) + R"(})");
                          });
                      }
                  } catch (std::exception& e) {
@@ -712,19 +713,11 @@ void worker_t::work() {
                                       int action = populateUserData(body);
 
                                       if (action == 1) {
-                                          /** check if the connection parameters are changed */
-                                          std::for_each(::workers.begin(), ::workers.end(), [](worker_t& w) {
-                                              /** Defer the message publishing to the worker's loop */
-                                              w.loop_->defer([&w]() { w.db_handler->manualCreateConnection(); });
-                                          });
+                                          /** DB connection parameters changed */
+                                          MySQLWriter::getInstance().requestReconnect();
                                       } else if (action == -1) {
-                                          std::for_each(::workers.begin(), ::workers.end(), [](worker_t& w) {
-                                              /** Defer the message publishing to the worker's loop */
-                                              w.loop_->defer([&w]() {
-                                                  w.db_handler->flushRemainingData();
-                                                  w.db_handler->disconnect();
-                                              });
-                                          });
+                                          /** SQL integration disabled: flush, then drop the connection */
+                                          MySQLWriter::getInstance().requestDisconnect();
                                       }
 
                                       log(LogLevel::INFO, "Config updated via /api/v1/invalidate");
@@ -751,11 +744,9 @@ void worker_t::work() {
                        *  a synchronous LMDB sync (MDB_WRITEMAP + exit() would
                        *  otherwise lose recently committed pages). */
                                               for (auto& w : ::workers) {
-                                                  w.loop_->defer([&w]() {
-                                                      write_worker("", "", true);
-                                                      w.db_handler->flushRemainingData();
-                                                  });
+                                                  w.loop_->defer([&w]() { write_worker("", "", true); });
                                               }
+                                              MySQLWriter::getInstance().requestFlush();
                                               std::this_thread::sleep_for(std::chrono::milliseconds(500));
                                               mdb_env_sync(env, 1);
 
@@ -831,10 +822,7 @@ void worker_t::work() {
                          return;
                      }
 
-                     std::for_each(::workers.begin(), ::workers.end(), [](worker_t& w) {
-                         /** Defer the message publishing to the worker's loop */
-                         w.loop_->defer([&w]() { w.db_handler->flushRemainingData(); });
-                     });
+                     MySQLWriter::getInstance().requestFlush();
 
                      log(LogLevel::INFO, "Admin API: MySQL flush requested via /api/v1/mysql/sync");
 

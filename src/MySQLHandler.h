@@ -4,9 +4,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -252,4 +257,155 @@ public:
             log(LogLevel::ERROR, "Disconnect Error : ", std::string(e.what()));
         }
     }
+};
+
+/**
+ * Dedicated MySQL writer thread (same pattern as the webhook dispatcher).
+ *
+ * Previously every worker owned a MySQLConnectionHandler and executed the batched
+ * multi-row INSERT synchronously ON ITS EVENT LOOP — load tests measured a ~4x
+ * delivery collapse with SQL integration enabled, because each 1000-row insert
+ * froze that worker's entire reactor. Event-loop threads now only enqueue the row
+ * here (a few string moves under a mutex); this thread owns the single MySQL
+ * connection and does all blocking work.
+ *
+ * Rows sit in a bounded queue: if MySQL cannot keep up, the OLDEST rows are
+ * dropped and counted (dropped_db_rows in /metrics) — memory stays bounded and
+ * the event loops never stall, matching the webhook/logging queue policy.
+ * Control operations (flush / reconnect / disconnect) travel through a separate
+ * unbounded command queue so overload can never discard them, and every MySQL
+ * call still happens on this one thread.
+ */
+class MySQLWriter {
+public:
+    static MySQLWriter& getInstance() {
+        static MySQLWriter instance;
+        return instance;
+    }
+
+    /** Queue one message row for insertion. Non-blocking; event-loop safe. */
+    void enqueue(std::string insertTime, std::string message, std::string uid, std::string rid) {
+        bool droppedOne = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (rows_.size() >= maxQueuedRows_) {
+                rows_.pop_front();
+                droppedRows_.fetch_add(1, std::memory_order_relaxed);
+                droppedOne = true;
+            }
+            rows_.push_back(Row{std::move(insertTime), std::move(message), std::move(uid), std::move(rid)});
+        }
+        cv_.notify_one();
+
+        if (droppedOne) {
+            unsigned long long d = droppedRows_.load(std::memory_order_relaxed);
+            if (d == 1 || d % 100000 == 0) {
+                log(LogLevel::WARN, "MySQL writer queue full: dropping oldest rows (total dropped: ", d, ")");
+            }
+        }
+    }
+
+    /** Flush the connection handler's pending batch (e.g. /api/v1/mysql/sync, shutdown). */
+    void requestFlush() { enqueueCommand(Command::FLUSH); }
+
+    /** (Re)connect with the current config (invalidate changed the DB settings). */
+    void requestReconnect() { enqueueCommand(Command::RECONNECT); }
+
+    /** Flush then drop the connection (SQL integration disabled). */
+    void requestDisconnect() { enqueueCommand(Command::DISCONNECT); }
+
+    unsigned long long droppedCount() const { return droppedRows_.load(std::memory_order_relaxed); }
+
+    MySQLWriter(const MySQLWriter&) = delete;
+    MySQLWriter& operator=(const MySQLWriter&) = delete;
+
+private:
+    struct Row {
+        std::string insertTime;
+        std::string message;
+        std::string uid;
+        std::string rid;
+    };
+
+    enum class Command : uint8_t { FLUSH, RECONNECT, DISCONNECT };
+
+    MySQLWriter() : writer_([this]() { run(); }) {}
+
+    ~MySQLWriter() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            running_ = false;
+        }
+        cv_.notify_all();
+        if (writer_.joinable()) {
+            writer_.join();
+        }
+    }
+
+    void enqueueCommand(Command c) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            commands_.push_back(c);
+        }
+        cv_.notify_one();
+    }
+
+    void run() {
+        /** the handler (and thus the MySQL connection) is created and used
+         *  exclusively on this thread */
+        auto handler = std::make_unique<MySQLConnectionHandler>();
+
+        while (true) {
+            Row row;
+            Command cmd{};
+            bool haveRow = false, haveCmd = false;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this]() { return !rows_.empty() || !commands_.empty() || !running_; });
+                if (!running_ && rows_.empty() && commands_.empty()) {
+                    break;
+                }
+                if (!commands_.empty()) { /** commands take priority and are never dropped */
+                    cmd = commands_.front();
+                    commands_.pop_front();
+                    haveCmd = true;
+                } else if (!rows_.empty()) {
+                    row = std::move(rows_.front());
+                    rows_.pop_front();
+                    haveRow = true;
+                }
+            }
+
+            if (haveCmd) {
+                switch (cmd) {
+                    case Command::FLUSH:
+                        handler->flushRemainingData();
+                        break;
+                    case Command::RECONNECT:
+                        handler->manualCreateConnection();
+                        break;
+                    case Command::DISCONNECT:
+                        handler->flushRemainingData();
+                        handler->disconnect();
+                        break;
+                }
+            } else if (haveRow) {
+                handler->insertSingleData(row.insertTime, row.message, row.uid, row.rid);
+            }
+        }
+
+        handler->flushRemainingData(); /** drain on clean exit */
+    }
+
+    std::deque<Row> rows_;
+    std::deque<Command> commands_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool running_ = true;
+    std::atomic<unsigned long long> droppedRows_{0};
+    /** ~50k rows; at the 10KB message cap that bounds worst-case queue memory
+     *  to ~500MB, and at typical sizes far less. DB slower than ingress -> the
+     *  oldest rows drop (counted) instead of stalling loops or growing memory. */
+    static constexpr size_t maxQueuedRows_ = 50000;
+    std::thread writer_;
 };

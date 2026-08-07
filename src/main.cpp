@@ -93,19 +93,16 @@ int main() {
         sigwait(&shutdownSignals, &sig);
         log(LogLevel::INFO, "Received signal ", sig, ": flushing persistence and shutting down");
 
-        /** flush every worker's thread-local LMDB batch and MySQL buffer on its
-         *  own loop, give them a moment, then sync the LMDB map to disk.
-         *  (loop_ may still be null if the signal beats a worker's startup.) */
+        /** flush every worker's thread-local LMDB batch on its own loop and the
+         *  MySQL writer's pending batch on its thread, give them a moment, then
+         *  sync the LMDB map to disk. (loop_ may still be null if the signal
+         *  beats a worker's startup.) */
         for (auto& w : ::workers) {
             if (w.loop_) {
-                w.loop_->defer([&w]() {
-                    write_worker("", "", true);
-                    if (w.db_handler) {
-                        w.db_handler->flushRemainingData();
-                    }
-                });
+                w.loop_->defer([]() { write_worker("", "", true); });
             }
         }
+        MySQLWriter::getInstance().requestFlush();
         std::this_thread::sleep_for(std::chrono::milliseconds(700));
         mdb_env_sync(env, 1);
 
