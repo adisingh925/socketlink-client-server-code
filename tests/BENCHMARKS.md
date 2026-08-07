@@ -126,11 +126,48 @@ Sustained dispatcher throughput ≈ 10–15k webhooks/s (single connection).
 Echo ✓ · JSON-escaping round-trip ✓ · latency avg 0.261 ms, p50 0.166, p95 0.284,
 p99 0.538 · fan-out 60,000 / 60,000 deliveries.
 
-## Sizing
+## Limits of one 1 CPU / 1 GB container
 
-Plaintext connections cost **~11 KB each** at these traffic profiles (20k conns
-peaked ~218 MiB), not the ~50 KB of the old TLS build — so a 1 GB container is
-CPU-bound long before it is memory-bound (memory wall ≈ 70–80k conns/GB).
+Measured by ramping connections until the container died
+(`tests/run_limits_docker.sh`, then client containers on `slnet`):
+
+| Connections | Peak memory | Outcome |
+|---|---|---|
+| 20,000 | 218 MiB | fine, lossless |
+| 28,000 | 335 MiB | fine |
+| **40,000** | **592 MiB** | **survives** — 40k connected in 3.7 s, 707,920 deliveries/s @ 215 MB/s, 98.3% delivered, 98% CPU |
+| 50,000 | 1024 MiB | **OOM-killed** |
+| 60,000 | 875 MiB | OOM-killed |
+| 100,000 | 1022 MiB | OOM-killed (server did hit its 100k cap and reject, but died first) |
+
+**Ceiling ≈ 45k connections per GB** (~12–15 KB per connection including kernel
+socket buffers; ramp bursts cost more than steady state — 40k peaked at 592 MiB
+while ramping and settled to 216 MiB).
+
+> **Sizing rule:** the `connections` cap must be set from the memory budget.
+> The compiled-in default of **100,000 is unsafe for a 1 GB container** — the
+> process is OOM-killed long before the cap can shed load, so the hard limit
+> never protects the deployment. Use ≈ **40,000 per GB** (leaving headroom for
+> ramp bursts), i.e. `{"connections": 40000}` via `/api/v1/invalidate` for a
+> 1 GB container.
+
+Plaintext connections cost far less than the old TLS build's ~50 KB each, but
+more than the earlier ~11 KB estimate once kernel socket memory (charged to the
+container cgroup) is counted.
+
+### Driving >28k connections
+
+A single client cannot exceed **~28,232 connections** to one destination — that
+is the default ephemeral port range (32768–60999), and source-IP rotation does
+*not* survive the Docker published-port path. Two ways past it:
+
+- one client container with a widened range:
+  `--sysctl net.ipv4.ip_local_port_range="1024 65535"` (~64k ports) — used for
+  the 40k verification above;
+- several client containers on `slnet` (each has its own IP, hence its own full
+  range) — give each a distinct `--uid-prefix`, since duplicate uids are rejected.
+
+Client containers connect to `sl-server:8080` by name (loadgen resolves hostnames).
 
 ## Caveats
 

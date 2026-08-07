@@ -3,3 +3,4 @@ messages_db/
 build-uring/
 docker/socketlink
 tests/.mockcerts/
+docker/loadgen

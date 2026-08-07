@@ -1,0 +1,17 @@
+# Load generator image — lets clients run ON the docker network with the server.
+#
+# Connecting from the host/WSL to the published port caps out at ~28k connections
+# (one source IP's ephemeral port range, and source-IP rotation does not survive
+# the published-port path). Each client CONTAINER has its own IP, hence its own
+# full ephemeral range, so N client containers scale connections linearly.
+#
+#   cp build/loadgen docker/loadgen && docker build -f docker/Dockerfile.loadgen -t sl-loadgen docker/
+#   docker run --rm --network slnet --ulimit nofile=1048576:1048576 sl-loadgen \
+#     --host sl-server --port 8080 --conns 25000 --threads 64 --uid-prefix c1_
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY loadgen /usr/local/bin/loadgen
+ENTRYPOINT ["/usr/local/bin/loadgen"]

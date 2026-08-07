@@ -54,6 +54,12 @@ struct Config {
     std::string prefix = "pub-grp-";
     std::string uidPrefix = "lg";
     std::string clientKey = "change-me-client-key";
+    /** Source IPs to rotate over. One local IP affords only ~28k ephemeral ports
+     *  toward a given destination, which caps a co-located client at ~28k
+     *  connections regardless of server capacity; each extra 127.0.0.x adds
+     *  another full range. Empty entry = let the OS choose. */
+    std::vector<std::string> srcIps{""};
+    double connectTimeout = 120.0;
 };
 
 /* ------------------------------ global stats ------------------------------ */
@@ -61,10 +67,38 @@ std::atomic<long long> g_sent{0}, g_recv{0}, g_recvBytes{0}, g_connected{0}, g_c
 std::atomic<bool> g_go{false}, g_stop{false};
 
 /* ------------------------------ small helpers ----------------------------- */
-static int dialBlocking(const std::string& host, int port) {
+/** Resolve a host (name or IPv4 literal) to dotted-quad, "" on failure. */
+static std::string resolveHost(const std::string& host) {
+    in_addr probe{};
+    if (inet_pton(AF_INET, host.c_str(), &probe) == 1)
+        return host;
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res)
+        return "";
+    char buf[INET_ADDRSTRLEN] = {0};
+    inet_ntop(AF_INET, &((sockaddr_in*)res->ai_addr)->sin_addr, buf, sizeof(buf));
+    freeaddrinfo(res);
+    return buf;
+}
+
+static int dialBlocking(const std::string& host, int port, const std::string& srcIp = "") {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
+    if (!srcIp.empty()) {
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_port = 0; /* any ephemeral port on THIS source address */
+        inet_pton(AF_INET, srcIp.c_str(), &local.sin_addr);
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        if (bind(fd, (sockaddr*)&local, sizeof(local)) != 0) {
+            close(fd);
+            return -1;
+        }
+    }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t)port);
@@ -232,16 +266,45 @@ static void onBytes(Conn& c, const char* p, ssize_t n) {
 static void worker(const Config& cfg, int firstConn, int lastConn) {
     int count = lastConn - firstConn;
     std::vector<Conn> conns((size_t)count);
+    std::vector<epoll_event> events(1024);
+    char rbuf[65536];
+
+    int ep = epoll_create1(0);
+
+    /**
+     * Service already-established sockets DURING the connect ramp. uWS sends
+     * keepalive pings and closes anything idle past idleTimeout (120s by
+     * default); a long ramp that never reads would let the server time out the
+     * connections made at the start — the client would report tens of thousands
+     * "connected" while the server had already closed most of them.
+     */
+    auto pump = [&]() {
+        int nev = epoll_wait(ep, events.data(), (int)events.size(), 0);
+        for (int e = 0; e < nev; ++e) {
+            Conn& c = *(Conn*)events[e].data.ptr;
+            if (c.fd < 0)
+                continue;
+            ssize_t r;
+            while ((r = recv(c.fd, rbuf, sizeof(rbuf), 0)) > 0)
+                onBytes(c, rbuf, r);
+            if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) {
+                epoll_ctl(ep, EPOLL_CTL_DEL, c.fd, nullptr);
+                close(c.fd);
+                c.fd = -1;
+                g_connected.fetch_sub(1);
+            }
+        }
+    };
 
     /* one keep-alive HTTP connection for all REST subscribes in this shard */
-    int http = dialBlocking(cfg.host, cfg.port);
+    int http = dialBlocking(cfg.host, cfg.port, cfg.srcIps[0]);
 
     for (int k = 0; k < count; ++k) {
         int i = firstConn + k;
         std::string uid = cfg.uidPrefix + std::to_string(i);
         std::string rid = cfg.prefix + std::to_string(i / cfg.group);
 
-        int fd = dialBlocking(cfg.host, cfg.port);
+        int fd = dialBlocking(cfg.host, cfg.port, cfg.srcIps[(size_t)i % cfg.srcIps.size()]);
         if (fd < 0) {
             g_connectFailed.fetch_add(1);
             continue;
@@ -286,26 +349,27 @@ static void worker(const Config& cfg, int firstConn, int lastConn) {
         Conn& c = conns[(size_t)k];
         c.fd = fd;
         c.frame = buildFrame("{\"rid\":\"" + rid + "\",\"message\":\"" + std::string((size_t)cfg.size, 'x') + "\"}");
+
+        /* non-blocking + epoll immediately, so pump() can service it while the
+         * rest of this shard is still connecting */
+        int fl = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        epoll_event ev{};
+        ev.events = EPOLLIN;
+        ev.data.ptr = &c;
+        epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev);
+
         g_connected.fetch_add(1);
+        if ((k & 31) == 0)
+            pump();
     }
     if (http >= 0)
         close(http);
 
-    /* switch to non-blocking + epoll */
-    int ep = epoll_create1(0);
-    for (auto& c : conns) {
-        if (c.fd < 0)
-            continue;
-        int fl = fcntl(c.fd, F_GETFL, 0);
-        fcntl(c.fd, F_SETFL, fl | O_NONBLOCK);
-        epoll_event ev{};
-        ev.events = EPOLLIN;
-        ev.data.ptr = &c;
-        epoll_ctl(ep, EPOLL_CTL_ADD, c.fd, &ev);
-    }
-
-    while (!g_go.load(std::memory_order_acquire))
+    while (!g_go.load(std::memory_order_acquire)) {
+        pump(); /* keep answering pings while other shards finish connecting */
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 
     const bool flood = cfg.rate <= 0.0;
     /* rate mode: this shard sends (rate * liveConns) msgs/s, round-robin */
@@ -313,8 +377,6 @@ static void worker(const Config& cfg, int firstConn, int lastConn) {
     double tokens = 0;
     auto last = Clock::now();
     size_t rr = 0;
-    std::vector<epoll_event> events(1024);
-    char rbuf[65536];
 
     while (!g_stop.load(std::memory_order_acquire)) {
         int nev = epoll_wait(ep, events.data(), (int)events.size(), flood ? 0 : 1);
@@ -431,6 +493,22 @@ int main(int argc, char** argv) {
             cfg.uidPrefix = next();
         else if (a == "--key")
             cfg.clientKey = next();
+        else if (a == "--connect-timeout")
+            cfg.connectTimeout = atof(next());
+        else if (a == "--src-ips") {
+            cfg.srcIps.clear();
+            std::string list = next(), cur;
+            for (char ch : list) {
+                if (ch == ',') {
+                    cfg.srcIps.push_back(cur);
+                    cur.clear();
+                } else
+                    cur.push_back(ch);
+            }
+            cfg.srcIps.push_back(cur);
+            if (cfg.srcIps.empty())
+                cfg.srcIps.push_back("");
+        }
         else {
             fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return 2;
@@ -441,6 +519,14 @@ int main(int argc, char** argv) {
     getrlimit(RLIMIT_NOFILE, &rl);
     rl.rlim_cur = rl.rlim_max;
     setrlimit(RLIMIT_NOFILE, &rl);
+
+    /** resolve once: workers dial by IP (container DNS names must work too) */
+    std::string resolved = resolveHost(cfg.host);
+    if (resolved.empty()) {
+        fprintf(stderr, "[loadgen] cannot resolve host '%s'\n", cfg.host.c_str());
+        return 2;
+    }
+    cfg.host = resolved;
 
     fprintf(stderr, "[loadgen] connecting %d conns across %d threads (group=%d, rate=%.1f, size=%d)...\n", cfg.conns,
             cfg.threads, cfg.group, cfg.rate, cfg.size);
@@ -456,7 +542,7 @@ int main(int argc, char** argv) {
     auto t0 = Clock::now();
     while (g_connected.load() + g_connectFailed.load() < cfg.conns) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        if (std::chrono::duration<double>(Clock::now() - t0).count() > 120)
+        if (std::chrono::duration<double>(Clock::now() - t0).count() > cfg.connectTimeout)
             break;
     }
     double setup = std::chrono::duration<double>(Clock::now() - t0).count();
