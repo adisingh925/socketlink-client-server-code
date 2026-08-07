@@ -114,6 +114,27 @@ estimate — `SL_BYTES_PER_CONN=8192` yields a ~106k cap on 1 GB — but only if
 are confident the fan-out stays light, because the memory it protects against is
 the kind admission control cannot reclaim.
 
+## Idle connection capacity (one core)
+
+Essentially-idle connections (0.02 msgs/s each, so keepalive pings dominate).
+Cost is consistently **~11.7 KB per idle connection**, so RAM decides until the
+core saturates.
+
+| Config | Connections held | Memory | CPU | Bound by |
+|---|---|---|---|---|
+| 1 CPU / 1 GB | **55,517** | 640 MiB (62%) | 0–104% | memory (adaptive cap) |
+| 1 CPU / 4 GB | 100,000 | 1,157 MiB | 61–72% | the configured 100k cap |
+| 1 CPU / 6 GB | **200,000** | 2,338 MiB | ~112% (saturated) | **CPU** |
+
+So one core tops out around **200k idle connections**, and below that RAM is the
+constraint: budget ~12 KB each. Ramp rate was ~6,250 connections/s on one core.
+
+The 1 GB row is the adaptive cap working as intended: it measured 13 KiB/conn and
+raised the limit from the 21,299 static default to 55,517 — 2.6× — because idle
+connections genuinely are cheaper than the worst-case estimate. The same server
+under heavy fan-out shrinks back to ~21k. `SL_MAX_CONNECTIONS` sets the ceiling
+the adaptive cap may grow toward (default 100,000).
+
 ## Ceilings (C++ `loadgen`, rooms of 100)
 
 | Target | Command | Delivered | Bandwidth | Drops |

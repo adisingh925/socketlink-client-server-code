@@ -70,8 +70,17 @@ int main() {
      *  unreachable cap is worse than none: the kernel OOM-kills the process —
      *  taking every established connection with it — before the cap sheds
      *  anything. ~15 KB/connection measured (incl. kernel socket buffers). */
-    /** the operator's intent, captured before clamping: the adaptive cap may grow
-     *  back up to this but never past it */
+    /** The operator's intent, captured before clamping: the adaptive cap may grow
+     *  back up to this but never past it. SL_MAX_CONNECTIONS overrides the
+     *  compiled-in default without a rebuild (memory still governs — the clamp
+     *  and the watchdog both apply on top of whatever is set here). */
+    if (const char* mc = std::getenv("SL_MAX_CONNECTIONS")) {
+        int v = std::atoi(mc);
+        if (v > 0) {
+            setConnectionLimit(v);
+            log(LogLevel::INFO, "Connection limit set from SL_MAX_CONNECTIONS: ", v);
+        }
+    }
     const int configuredConnections = UserData::getInstance().connections;
     {
         unsigned long long memLimit = memoryLimitBytes();
