@@ -3,7 +3,8 @@
 simulating a slow customer webhook receiver. Counts requests; prints count."""
 import os, socket, ssl, sys, time, threading
 
-HOST, PORT = "127.0.0.1", 8443
+HOST = os.environ.get("MOCK_HOST", "127.0.0.1")  # 0.0.0.0 when containerized
+PORT = int(os.environ.get("MOCK_PORT", "8443"))
 DELAY = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
 CERT = os.environ.get("MOCK_CERT", "/tmp/mock_cert.pem")
 KEY = os.environ.get("MOCK_KEY", "/tmp/mock_key.pem")
