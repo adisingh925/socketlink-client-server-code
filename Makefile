@@ -56,9 +56,14 @@ $(BUILD)/simdjson.o: $(SL_DEPS)/simdjson.cpp | $(BUILD)
 $(BUILD):
 	mkdir -p $(BUILD)
 
+loadgen: $(BUILD)/loadgen
+
+$(BUILD)/loadgen: tests/loadgen.cpp | $(BUILD)
+	$(CXX) -std=c++17 -O2 -pthread $< -o $@
+
 clean:
 	rm -rf build build-uring
 
 -include $(OBJS:.o=.d)
 
-.PHONY: all clean
+.PHONY: all clean loadgen
