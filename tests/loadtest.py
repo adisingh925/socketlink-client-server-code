@@ -150,7 +150,7 @@ async def worker_async(cfg, shard_start, shard_end, ready_q, result_q, go_time):
         async def setup(i):
             nonlocal connected
             uid = f"u{i}"
-            rid = f"pub-grp-{i // group}"
+            rid = f"{cfg['prefix']}{i // group}"
             src = src_ips[i % len(src_ips)]
             async with sem:
                 try:
@@ -231,13 +231,15 @@ def main():
     ap.add_argument("--src-ips", default="127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4,127.0.0.5,127.0.0.6,127.0.0.7,127.0.0.8")
     ap.add_argument("--no-tls", action="store_true", help="plaintext ws:// (TLS terminated upstream)")
     ap.add_argument("--size", type=int, default=1, help="message body size in bytes (server cap: 10 KB frame)")
+    ap.add_argument("--room-prefix", default="pub-grp-",
+                    help="room id prefix; use 'pub-cache-grp-' to exercise the LMDB/MySQL persistence path")
     args = ap.parse_args()
 
     tls = not args.no_tls
     src_ips = args.src_ips.split(",")
     cfg = dict(host=args.host, port=args.port, group=args.group, rate=args.rate,
                duration=args.duration, pool=args.pool, concurrency=args.concurrency,
-               src_ips=src_ips, tls=tls, size=args.size)
+               src_ips=src_ips, tls=tls, size=args.size, prefix=args.room_prefix)
 
     per = args.conns // args.procs
     shards = [(i * per, (i + 1) * per if i < args.procs - 1 else args.conns) for i in range(args.procs)]
