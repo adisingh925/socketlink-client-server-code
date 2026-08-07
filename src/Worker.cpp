@@ -431,17 +431,25 @@ void worker_t::work() {
                                               uWS::OpCode::TEXT, true);
                                  };
 
+                                 /** which workers actually hold subscribers of this room */
+                                 uint64_t workerMask = 0;
+
                                  {
                                      /** the sender must already be subscribed to `rid`; fetch its room type
-                      *  from the SOCKET-LOCAL map (mutated only on this thread by
-                      *  openConnection/closeConnection) — no locks, no shared state */
+                      *  and the room's worker mask from the SOCKET-LOCAL map (mutated
+                      *  only on this thread by openConnection/closeConnection) — no
+                      *  locks, no shared-map lookup, no atomics beyond the mask load */
                                      auto roomIt = userData.rooms.find(rid);
                                      if (roomIt == userData.rooms.end()) {
                                          sendNoSubscriptionFound();
                                          return;
                                      }
 
-                                     roomType = roomIt->second;
+                                     roomType = roomIt->second.roomType;
+                                     if (roomIt->second.workers) {
+                                         workerMask =
+                                             roomIt->second.workers->mask.load(std::memory_order_acquire);
+                                     }
                                  }
 
                                  /** Fast path: skip the room-disabled lookup when nobody is disabled anywhere. */
@@ -476,8 +484,24 @@ void worker_t::work() {
                                  /** Publish on every other worker's loop. The payload and room id are
                      *  shared via shared_ptr so they are not copied once per worker thread. */
                                  auto ridShared = std::make_shared<std::string>(rid);
-                                 for (auto& w : ::workers) {
-                                     if (std::this_thread::get_id() != w.thread_->get_id()) {
+                                 const size_t selfIdx = workerIndex(this);
+                                 /** SL_NO_WORKER_MASK=1 restores the old wake-everyone behaviour,
+                      *  for A/B measurement of this optimisation */
+                                 static const bool maskDisabled = std::getenv("SL_NO_WORKER_MASK") != nullptr;
+                                 const bool maskUsable = !maskDisabled && ::workers.size() <= MAX_MASKED_WORKERS;
+
+                                 for (size_t wi = 0; wi < ::workers.size(); ++wi) {
+                                     if (wi == selfIdx) {
+                                         continue; /** already published locally above */
+                                     }
+                                     /** Skip workers with no subscriber of this room. This is the
+                          *  scaling fix: previously every publish woke every other
+                          *  worker's loop, so most wakeups delivered nothing. */
+                                     if (maskUsable && !(workerMask & (1ULL << wi))) {
+                                         continue;
+                                     }
+                                     {
+                                         worker_t& w = ::workers[wi];
                                          w.loop_->defer([&w, data, ridShared, opCode]() {
                                              w.app_->publish(*ridShared, *data, opCode, true);
 
@@ -612,8 +636,12 @@ void worker_t::work() {
          *  isClosed=true doesn't mutate it) instead of the global one — no TBB
          *  accessor is held across the closeConnection calls. */
                      if (ownedRegistryEntry) {
+                         const size_t myIdx = workerIndex(this);
                          for (auto& entry : ws->getUserData()->rooms) {
-                             closeConnection(ws, this, entry.first, userId, entry.second, true);
+                             closeConnection(ws, this, entry.first, userId, entry.second.roomType, true);
+                             /** closeConnection skips this in the isClosed path, so release
+                  *  this worker's claim on each room's publish mask here */
+                             roomWorkersRemove(entry.first, myIdx);
                          }
                          ws->getUserData()->rooms.clear();
 

@@ -16,8 +16,10 @@
 void closeConnection(SLWebSocket* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType,
                      bool isClosed) {
     if (isClosed == false) {
-        /** drop the socket-local subscription (owner thread; the hot path reads this) */
+        /** drop the socket-local subscription (owner thread; the hot path reads this)
+         *  and this worker's claim on the room's publish mask */
         ws->getUserData()->rooms.erase(rid);
+        roomWorkersRemove(rid, workerIndex(worker));
 
         /** structural mutation of iterated registry maps: shared iteration guard */
         std::shared_lock<std::shared_mutex> iterGuard(registryIterationGuard);
@@ -194,8 +196,15 @@ void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t 
 
         log(LogLevel::DEBUG, "Subscribed: uid=", uid, " rid=", rid, " (room size ", size, ")");
 
-        /** record the subscription socket-locally (owner thread; the hot path reads this) */
-        ws->getUserData()->rooms.emplace(rid, roomType);
+        /** record the subscription socket-locally (owner thread; the hot path reads
+         *  this) together with the room's shared worker mask, so publishing needs
+         *  no map lookup at all */
+        {
+            RoomSub sub;
+            sub.roomType = roomType;
+            sub.workers = roomWorkersAdd(rid, workerIndex(worker));
+            ws->getUserData()->rooms[rid] = std::move(sub);
+        }
 
         {
             /** structural mutation of iterated registry maps: shared iteration guard */

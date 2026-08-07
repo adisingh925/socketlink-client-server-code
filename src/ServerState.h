@@ -19,6 +19,36 @@
 
 #include "MySQLHandler.h"
 
+/**
+ * Which worker threads hold at least one subscriber of a given room.
+ *
+ * Publishing used to defer to EVERY other worker unconditionally, so a message
+ * to a 10-member room woke all 19 other loops on a 20-core box — a cross-thread
+ * eventfd wakeup each, almost all of them finding nothing to send. That is the
+ * measured cause of sub-linear scaling (1 CPU ~1M deliveries/s, 4 CPU 3M = 75%
+ * efficient, 20 CPU 7.8M = only 39% efficient). With this mask a publish wakes
+ * only the workers that can actually deliver.
+ *
+ * `counts` is per-worker subscriber refcounts (mutated only on the owning
+ * worker's thread, so a relaxed fetch_add/sub pair is enough); `mask` is the
+ * bitmask derived from it and is what the publish path reads.
+ */
+struct RoomWorkers {
+    std::atomic<uint64_t> mask{0};
+    std::vector<std::atomic<uint32_t>> counts;
+    explicit RoomWorkers(size_t workerCount) : counts(workerCount) {}
+};
+
+/** One socket's membership of one room. */
+struct RoomSub {
+    uint8_t roomType = 255;
+    /** Shared with every other subscriber of this room. Held by shared_ptr so the
+     *  publish path needs NO map lookup and no lock: while this socket is
+     *  subscribed its own worker bit is set, so the room entry cannot be erased
+     *  underneath it. */
+    std::shared_ptr<RoomWorkers> workers;
+};
+
 /* ws->getUserData returns one of these */
 struct PerSocketData {
     std::string key;
@@ -26,14 +56,14 @@ struct PerSocketData {
     std::string metadata;
 
     /**
-     * This socket's subscriptions (rid -> room type). OWNER-THREAD ONLY: every
-     * mutation site (openConnection/closeConnection) runs on the socket's event
-     * loop (REST/ban callers get there via runOnOwnerThread), so the per-message
-     * hot path reads this plain map with no locks or atomics at all. The global
-     * ThreadSafe::uidToRoomMapping is maintained in the same code paths and
-     * serves only cross-thread readers (REST validation, admin listings).
+     * This socket's subscriptions (rid -> room type + worker mask). OWNER-THREAD
+     * ONLY: every mutation site (openConnection/closeConnection) runs on the
+     * socket's event loop (REST/ban callers get there via runOnOwnerThread), so
+     * the per-message hot path reads this plain map with no locks or atomics at
+     * all. The global ThreadSafe::uidToRoomMapping is maintained in the same code
+     * paths and serves only cross-thread readers (REST validation, admin listings).
      */
-    std::unordered_map<std::string, uint8_t> rooms;
+    std::unordered_map<std::string, RoomSub> rooms;
 
     /**
      * true - sending allowed
@@ -143,7 +173,64 @@ namespace ThreadSafe {
     inline tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>> uidToRoomMapping;
     inline tbb::concurrent_hash_map<std::string, bool> uid;
     inline tbb::concurrent_hash_map<std::string, WebSocketData> connections;
+    /** rid -> which workers hold subscribers (see RoomWorkers) */
+    inline tbb::concurrent_hash_map<std::string, std::shared_ptr<RoomWorkers>> roomWorkers;
 } // namespace ThreadSafe
+
+inline std::shared_mutex registryIterationGuard;
+
+inline std::vector<worker_t> workers;
+
+/** Worker masks address workers by bit position, so this many workers at most
+ *  get the optimisation; beyond it the publish path falls back to waking all. */
+inline constexpr size_t MAX_MASKED_WORKERS = 64;
+
+/** Index of a worker within the global `workers` vector. */
+inline size_t workerIndex(const worker_t* w) { return (size_t)(w - ::workers.data()); }
+
+/**
+ * Register one subscriber of `rid` on worker `idx` and return the shared record
+ * (which the caller stores in its socket-local map). Owner-thread only.
+ */
+inline std::shared_ptr<RoomWorkers> roomWorkersAdd(const std::string& rid, size_t idx) {
+    /** The accessor (a per-key write lock) is held across the whole mutation so
+     *  add and remove are serialised for this room. Releasing it early would let
+     *  a concurrent remove observe mask == 0 and erase the entry in between this
+     *  insert and its bit-set — orphaning this subscriber's record while later
+     *  publishers create a fresh one, which silently loses messages. */
+    tbb::concurrent_hash_map<std::string, std::shared_ptr<RoomWorkers>>::accessor acc;
+    if (ThreadSafe::roomWorkers.insert(acc, rid)) {
+        acc->second = std::make_shared<RoomWorkers>(::workers.size());
+    }
+    std::shared_ptr<RoomWorkers> rw = acc->second;
+
+    if (idx < MAX_MASKED_WORKERS && idx < rw->counts.size()) {
+        if (rw->counts[idx].fetch_add(1, std::memory_order_relaxed) == 0) {
+            rw->mask.fetch_or(1ULL << idx, std::memory_order_release);
+        }
+    }
+    return rw;
+}
+
+/** Drop one subscriber of `rid` on worker `idx`; erases the record when the last
+ *  subscriber anywhere leaves. Owner-thread only. */
+inline void roomWorkersRemove(const std::string& rid, size_t idx) {
+    /** accessor held across the mutation — see roomWorkersAdd */
+    tbb::concurrent_hash_map<std::string, std::shared_ptr<RoomWorkers>>::accessor acc;
+    if (!ThreadSafe::roomWorkers.find(acc, rid)) {
+        return;
+    }
+    std::shared_ptr<RoomWorkers> rw = acc->second;
+
+    if (idx < MAX_MASKED_WORKERS && idx < rw->counts.size()) {
+        if (rw->counts[idx].fetch_sub(1, std::memory_order_relaxed) == 1) {
+            rw->mask.fetch_and(~(1ULL << idx), std::memory_order_release);
+            if (rw->mask.load(std::memory_order_acquire) == 0) {
+                ThreadSafe::roomWorkers.erase(acc); /** room is empty everywhere */
+            }
+        }
+    }
+}
 
 /**
  * Guards ITERATION of the registry maps above. tbb::concurrent_hash_map tolerates
@@ -158,9 +245,6 @@ namespace ThreadSafe {
  *   - `connections` is never iterated and needs no locking.
  * Keep lock scopes tight: never hold this across defers, webhooks, or sends.
  */
-inline std::shared_mutex registryIterationGuard;
-
-inline std::vector<worker_t> workers;
 
 /** Sending Constants */
 constexpr const char* ROOM_NAME_INVALID = "ROOM_NAME_INVALID";
