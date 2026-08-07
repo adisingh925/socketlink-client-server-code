@@ -49,3 +49,24 @@ void countMemoryRejection();
 
 /** Start the sampling thread (idempotent; no-op if the limit is unknown). */
 void startMemoryGuard();
+
+/**
+ * Enable the adaptive connection cap.
+ *
+ * A fixed bytes-per-connection estimate is always wrong for some workload: 40 KB
+ * is right for heavy fan-out but ~3x too conservative for presence-style traffic,
+ * while 8 KB (tried for small payloads) OOM-killed a 1 GB container at 71k
+ * connections. So instead of guessing, measure: the guard periodically computes
+ * (working_set - baseline) / connections and re-sizes the cap to whatever the
+ * memory budget can actually hold AT THE CURRENT traffic mix.
+ *
+ * The cap only moves within [1000, hardMax]; hardMax is the operator's
+ * configured `connections`, which is never exceeded. Lowering the cap never
+ * disconnects anyone — it only refuses new connections until usage drops.
+ *
+ * `connCounter` is the live connection count (ServerState's globalConnectionCounter).
+ */
+void enableAdaptiveCap(std::atomic<int>* connCounter, int hardMax);
+
+/** Bytes-per-connection currently measured (0 before the first sample). */
+unsigned long long measuredBytesPerConnection();

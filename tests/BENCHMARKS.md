@@ -230,12 +230,47 @@ Three defences, in order of importance:
    memory limit and clamps `connections` to `(limit − 192 MiB) / 40 KB`
    (≈21k per GB). 40 KB is the measured cost of an *active* connection: ~8 KB
    app/anon plus ~32 KB of kernel buffers. Override with `SL_BYTES_PER_CONN`.
-3. **Memory watchdog** — samples the cgroup working set (usage minus reclaimable
+3. **Adaptive cap** — every 500 ms the guard measures
+   `(working_set − baseline) / connections` and re-sizes the cap to fit the
+   budget at the *current* traffic mix, so the fixed 40 KB estimate is only a
+   starting point. Reported as `connection_limit` and
+   `measured_bytes_per_connection` in `/metrics`.
+
+   The response is deliberately **asymmetric**, and this is the important part:
+
+   - **Shrinking is immediate.** Cost rising is a safety signal.
+   - **Growing needs a full minute** of sustained evidence: working set below
+     50% of the budget, the cap actually being the binding constraint, then at
+     most +20% per step — and the cap is sized from the *peak* per-connection
+     cost seen recently, not the latest sample.
+
+   Why so cautious: a connection's memory cost is unknowable until it carries
+   traffic. During a ramp, connections that have not yet sent anything measure
+   ~12 KiB and look cheap; the same connections cost ~23 KiB once fan-out
+   starts. An earlier, faster growth policy (3 samples ≈ 1.5 s) was measured
+   doing exactly the wrong thing: it grew the cap to 44,162 on ramp-time
+   optimism, traffic then started, and the container was OOM-killed — because
+   admission control can refuse a *new* connection but can never take back one
+   already admitted. Growth is an optimisation; over-admission is fatal.
+
+4. **Memory watchdog** — samples the cgroup working set (usage minus reclaimable
    file cache — *not* process RSS, which excludes the kernel socket memory that
    actually kills you) every 100 ms and pauses new connections above 80% of the
    limit, resuming below 70%. Rejects with `503 SERVER_UNDER_MEMORY_PRESSURE`;
    established connections keep running. Exposed as `admission_paused` and
    `rejected_memory_pressure` in `/metrics`.
+
+Validated at both workload extremes on 1 GB, 100k connections attempted:
+
+| Workload | Cap behaviour | Peak memory | Result |
+|---|---|---|---|
+| Heavy (512 B, rate 2) | held at 21,299 | 485 MiB | survives |
+| Light (16 B, rate 0.5) | held at 21,299 | 256 MiB | survives |
+
+The light case does not grow within a 45-second test *by design* — a minute of
+proven quiet is the price of admission for a bigger cap. A long-running light
+workload grows in +20% steps; an operator who knows their traffic can still set
+the starting point directly with `SL_BYTES_PER_CONN`.
 
 Verified: the load that previously OOM-killed the container (100k connection
 attempts, 512-byte fan-out, two client containers) now peaks at 448 MiB with

@@ -707,7 +707,10 @@ void worker_t::work() {
                                       R"(,"memory_limit_bytes": )" + std::to_string(memoryLimitBytes()) +
                                       R"(,"admission_paused": )" + (admissionPaused() ? "true" : "false") +
                                       R"(,"rejected_memory_pressure": )" + std::to_string(memoryRejectionCount()) +
-                                      R"(})");
+                                      R"(,"connection_limit": )" +
+                                      std::to_string(UserData::getInstance().connections) +
+                                      R"(,"measured_bytes_per_connection": )" +
+                                      std::to_string(measuredBytesPerConnection()) + R"(})");
                          });
                      }
                  } catch (std::exception& e) {

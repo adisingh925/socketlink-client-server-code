@@ -70,10 +70,13 @@ int main() {
      *  unreachable cap is worse than none: the kernel OOM-kills the process —
      *  taking every established connection with it — before the cap sheds
      *  anything. ~15 KB/connection measured (incl. kernel socket buffers). */
+    /** the operator's intent, captured before clamping: the adaptive cap may grow
+     *  back up to this but never past it */
+    const int configuredConnections = UserData::getInstance().connections;
     {
         unsigned long long memLimit = memoryLimitBytes();
         int safeCap = safeConnectionCap(memLimit);
-        int configured = UserData::getInstance().connections;
+        int configured = configuredConnections;
         if (safeCap > 0 && configured > safeCap) {
             log(LogLevel::WARN, "Connection limit ", configured, " exceeds what ", memLimit / (1024 * 1024),
                 " MiB can hold; clamping to ", safeCap,
@@ -85,9 +88,16 @@ int main() {
         }
     }
 
-    /** Backstop for everything the static estimate cannot predict (large
-     *  payloads, backpressure buffers, queue growth): pause admission under
-     *  real memory pressure instead of dying. */
+    /** The startup clamp is only a starting point — it uses a fixed
+     *  bytes-per-connection guess that is wrong for some workload either way.
+     *  Let the guard re-size the cap from MEASURED cost (never above the
+     *  operator's configured value), so light traffic earns a bigger cap and
+     *  heavy fan-out shrinks it before memory becomes a problem. */
+    enableAdaptiveCap(&globalConnectionCounter, configuredConnections);
+
+    /** Backstop for everything neither estimate nor measurement predicts in time
+     *  (ramp bursts, payload spikes): pause admission under real memory pressure
+     *  instead of dying. */
     startMemoryGuard();
 
     init_env();
