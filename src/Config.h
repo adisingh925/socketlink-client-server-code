@@ -55,6 +55,8 @@ public:
     std::string webhookSecret;
     uint64_t webhooks = 0;
     std::string webhookIP;
+    /** webhook endpoint port (always HTTPS; internal endpoints often use 8443) */
+    int webhookPort = 443;
 
     /** mysql db configuration */
     int mysqlDBCommitBatchSize = 1000;

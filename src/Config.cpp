@@ -91,6 +91,10 @@ int populateUserData(std::string data) {
         userData.webhookPath = parsedJson["webhook_path"].get<std::string>();
     }
 
+    if (parsedJson.contains("webhook_port") && !parsedJson["webhook_port"].is_null()) {
+        userData.webhookPort = parsedJson["webhook_port"].get<int>();
+    }
+
     if (parsedJson.contains("webhook_secret") && !parsedJson["webhook_secret"].is_null()) {
         userData.webhookSecret = parsedJson["webhook_secret"].get<std::string>();
     }

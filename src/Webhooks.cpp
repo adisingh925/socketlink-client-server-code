@@ -43,7 +43,9 @@ thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::sock
 void populateWebhookStatus(uint8_t bitmask) {
     std::unique_lock<std::shared_mutex> lock(webhookMutex);
 
-    for (uint8_t i = 0; i < 6; ++i) {
+    /** bits 1..6 (values 2..64): i < 7, not i < 6 — the old bound silently made
+     *  ON_ROOM_VACATED (1 << 6) impossible to enable */
+    for (uint8_t i = 0; i < 7; ++i) {
         Webhooks webhook = static_cast<Webhooks>(static_cast<uint8_t>(1) << i);
         webhookStatus[webhook] = (bitmask & (static_cast<uint8_t>(1) << i)) ? 1 : 0;
     }
@@ -170,9 +172,9 @@ static int sendWebhookBlocking(const std::string& baseURL, const std::string& pa
                 ssl_socket =
                     std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
 
-                constexpr int webhookPort = 443;
                 boost::asio::ip::tcp::endpoint endpoint(
-                    boost::asio::ip::make_address(UserData::getInstance().webhookIP), webhookPort);
+                    boost::asio::ip::make_address(UserData::getInstance().webhookIP),
+                    static_cast<unsigned short>(UserData::getInstance().webhookPort));
 
                 ssl_socket->lowest_layer().connect(endpoint);
 
