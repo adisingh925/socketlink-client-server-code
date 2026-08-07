@@ -1,1620 +1,43 @@
-#include "App.h"
+/**
+ * worker_t::work(): one uWS event loop per thread — the websocket behavior
+ * (upgrade/open/message/drain/close) and every REST endpoint.
+ */
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <shared_mutex>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
 #include "json.hpp"
-#include <boost/asio.hpp>
-#include <boost/asio/ssl.hpp>
-#include <boost/system/error_code.hpp>
-#include <lmdb.h>
-#include <mysql/mysql.h>
-#include <openssl/hmac.h>
-#include <openssl/evp.h>
-#include <tbb/concurrent_hash_map.h>
-#include <filesystem>
-#include <fstream>
-#include <deque>
-#include <condition_variable>
-#include <sys/resource.h>
 #include "simdjson.h"
 
-constexpr bool LOGS_ENABLED = true;
+#include "Config.h"
+#include "LmdbStore.h"
+#include "Logging.h"
+#include "MySQLHandler.h"
+#include "RoomLifecycle.h"
+#include "ServerState.h"
+#include "Util.h"
+#include "Webhooks.h"
+
+/** Thread local variables (latency EMA probe + reused JSON parser) */
 
-std::atomic<unsigned long long> totalMysqlDBWrites{0};
-
-enum class LogLevel { DEBUG = 0, INFO = 1, WARN = 2, ERROR = 3 };
-
-/** Minimum level that is actually emitted (runtime-adjustable). Suppressed
- *  levels cost one relaxed atomic load and a branch at the call site. */
-std::atomic<int> g_logLevel{static_cast<int>(LogLevel::INFO)};
-
-/**
- * Asynchronous logger: call sites never perform I/O.
- *
- * The previous logger wrote to cout/cerr with std::endl (a flush) on the CALLING
- * thread, so a log line from a uWS event-loop handler stalled that worker's entire
- * reactor on terminal/journal I/O. Here callers only format the message and push it
- * onto a bounded queue; a dedicated thread timestamps, batches, and writes. The
- * queue drops the oldest entry when full (dropped count is tracked), so logging can
- * never block the server or grow memory without bound.
- */
-class AsyncLogger {
-public:
-    static AsyncLogger& getInstance() {
-        static AsyncLogger instance;
-        return instance;
-    }
-
-    void enqueue(LogLevel level, std::string text) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (queue_.size() >= maxQueueSize_) {
-                queue_.pop_front();
-                dropped_.fetch_add(1, std::memory_order_relaxed);
-            }
-            queue_.push_back(Entry{level, std::chrono::system_clock::now(), std::move(text)});
-        }
-        cv_.notify_one();
-    }
-
-    unsigned long long droppedCount() const { return dropped_.load(std::memory_order_relaxed); }
-
-    AsyncLogger(const AsyncLogger&) = delete;
-    AsyncLogger& operator=(const AsyncLogger&) = delete;
-
-private:
-    struct Entry {
-        LogLevel level;
-        std::chrono::system_clock::time_point ts;
-        std::string text;
-    };
-
-    AsyncLogger() : writer_([this]() { run(); }) {}
-
-    ~AsyncLogger() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            running_ = false;
-        }
-        cv_.notify_all();
-        if (writer_.joinable()) {
-            writer_.join(); /** drains the queue: nothing is lost on clean exit */
-        }
-    }
-
-    static const char* levelTag(LogLevel l) {
-        switch (l) {
-            case LogLevel::DEBUG:
-                return "[DEBUG] ";
-            case LogLevel::INFO:
-                return "[INFO] ";
-            case LogLevel::WARN:
-                return "[WARN] ";
-            default:
-                return "[ERROR] ";
-        }
-    }
-
-    void run() {
-        std::deque<Entry> batch;
-        std::string outBuf, errBuf;
-        unsigned long long reportedDrops = 0;
-
-        while (true) {
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [this]() { return !queue_.empty() || !running_; });
-                if (queue_.empty() && !running_) {
-                    break;
-                }
-                batch.swap(queue_); /** take the whole backlog in one lock acquisition */
-            }
-
-            outBuf.clear();
-            errBuf.clear();
-            for (const auto& e : batch) {
-                std::string& buf = (e.level == LogLevel::ERROR) ? errBuf : outBuf;
-
-                std::time_t t = std::chrono::system_clock::to_time_t(e.ts);
-                std::tm tm_buf;
-                localtime_r(&t, &tm_buf);
-                char ts[24];
-                std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
-
-                buf += '[';
-                buf += ts;
-                buf += "] ";
-                buf += levelTag(e.level);
-                buf += e.text;
-                buf += '\n';
-            }
-            batch.clear();
-
-            /** one write + one flush per batch, on this thread only */
-            if (!outBuf.empty()) {
-                fwrite(outBuf.data(), 1, outBuf.size(), stdout);
-                fflush(stdout);
-            }
-            if (!errBuf.empty()) {
-                fwrite(errBuf.data(), 1, errBuf.size(), stderr);
-                fflush(stderr);
-            }
-
-            unsigned long long d = dropped_.load(std::memory_order_relaxed);
-            if (d > reportedDrops) {
-                std::string note =
-                    "AsyncLogger: " + std::to_string(d - reportedDrops) + " log line(s) dropped (queue full)\n";
-                fwrite(note.data(), 1, note.size(), stderr);
-                fflush(stderr);
-                reportedDrops = d;
-            }
-        }
-    }
-
-    std::deque<Entry> queue_;
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    bool running_ = true;
-    std::atomic<unsigned long long> dropped_{0};
-    static constexpr size_t maxQueueSize_ = 65536;
-    std::thread writer_;
-};
-
-/** Log a message. Cheap when suppressed (one atomic load); when emitted, the caller
- *  only formats the text — all I/O happens on the logger's own thread. */
-template <typename... Args> void log(LogLevel level, const Args&... args) {
-    if (!LOGS_ENABLED)
-        return;
-    if (static_cast<int>(level) < g_logLevel.load(std::memory_order_relaxed))
-        return;
-
-    std::ostringstream oss;
-    (oss << ... << args);
-    AsyncLogger::getInstance().enqueue(level, oss.str());
-}
-
-enum class Features : uint32_t {
-    ENABLE_MYSQL_INTEGRATION = 1 << 0,
-};
-
-std::unordered_map<Features, int> featureStatus;
-std::shared_mutex featureMutex;
-
-/** read features, thread safe */
-int getFeatureStatus(Features feature) {
-    std::shared_lock<std::shared_mutex> lock(featureMutex);
-
-    auto it = featureStatus.find(feature);
-    return (it != featureStatus.end()) ? it->second : 0;
-}
-
-/** Fixed plaintext HTTP/WS listen port (TLS terminated upstream by a load
- *  balancer). Not configurable — the socket binds to this at startup. */
-static constexpr int SL_LISTEN_PORT = 8080;
-
-class UserData {
-public:
-    /** Server configuration. These in-class defaults ARE the compiled-in config for
-     *  standalone mode (there is no config file); /api/v1/invalidate can override
-     *  any of them at runtime. */
-    unsigned int msgSizeAllowedInBytes = 10240; /* 10 KB max message */
-    unsigned int maxBackpressureInBytes = 4096;
-    unsigned short idleTimeoutInSeconds = 120;
-    unsigned short maxLifetimeInMinutes = 0; /* 0 = no forced lifetime */
-
-    int connections = 100000; /* hard cap on concurrent connections */
-    /** Hardcoded API keys — change these and rebuild (or override at runtime via
-     *  /api/v1/invalidate). Client key authenticates WS/pub-sub clients; admin key
-     *  authenticates the admin REST endpoints. */
-    std::string clientApiKey = "change-me-client-key";
-    std::string adminApiKey = "change-me-admin-key";
-
-    /** webhook configuration */
-    std::string webHookBaseUrl;
-    std::string webhookPath;
-    std::string webhookSecret;
-    uint64_t webhooks = 0;
-    std::string webhookIP;
-
-    /** mysql db configuration */
-    int mysqlDBCommitBatchSize = 1000;
-    std::string dbHost;
-    int dbPort = 0;
-    std::string dbUser;
-    std::string dbPassword;
-    std::string dbName;
-
-    /** lmdb configurations */
-    int lmdbCommitBatchSize = 1000;
-    unsigned long long lmdbDatabaseSizeInBytes = 1ULL << 30; /* 1 GB message store */
-
-    /** auto populated according to the values of above variables */
-    uint32_t features = 0;
-
-    UserData() = default;
-    UserData(const UserData&) = default;
-    UserData& operator=(const UserData&) = default;
-
-    /**
-     * Config is published as an immutable snapshot behind an atomic pointer.
-     * getInstance() returns a const reference to the current snapshot, which is
-     * never freed (old snapshots are intentionally leaked when a new one is
-     * published — /invalidate is rare), so readers are lock-free and cannot race
-     * with a concurrent update (previously populateUserData mutated these
-     * std::string fields in place while other threads read them: a data race).
-     *
-     * To update: clone the current snapshot, modify the copy, then publish() it.
-     * Serialize writers with configWriteMutex (see populateUserData).
-     */
-    static const UserData& getInstance() { return *current().load(std::memory_order_acquire); }
-
-    /** Atomically install `next` as the current config (takes ownership; the
-     *  previous snapshot is intentionally leaked). */
-    static void publish(UserData* next) { current().store(next, std::memory_order_release); }
-
-private:
-    static std::atomic<UserData*>& current() {
-        /** Meyers singleton avoids static-init-order issues. */
-        static std::atomic<UserData*> ptr{new UserData()};
-        return ptr;
-    }
-};
-
-/** Serializes config writers (populateUserData) so concurrent /invalidate calls
- *  don't lose updates via clone-modify-publish races. */
-std::mutex configWriteMutex;
-
-/** Standalone / self-hosted mode: config is compiled in (see main()); there is no
- *  master server and no config file. /api/v1/invalidate is authenticated with the
- *  admin api key and can update the in-memory config snapshot at runtime. */
-
-class MySQLConnectionHandler {
-private:
-    MYSQL* conn;
-    std::vector<std::tuple<std::string, std::string, std::string, std::string>> batch_data;
-
-    class MySQLException : public std::runtime_error {
-    public:
-        explicit MySQLException(const std::string& message) : std::runtime_error(message) {}
-    };
-
-    /** Closes any existing connection and establishes a new one. */
-    void createConnection() {
-        try {
-            if (getFeatureStatus(Features::ENABLE_MYSQL_INTEGRATION) == 0) {
-                return;
-            }
-
-            if (conn) {
-                mysql_close(conn);
-                conn = nullptr;
-            }
-
-            conn = mysql_init(NULL);
-            if (!conn) {
-                log(LogLevel::ERROR, "MySQL Initialization Error");
-            }
-
-            /** connect timeout in seconds */
-            unsigned int timeout = 3;
-            mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
-
-            if (!mysql_real_connect(conn, UserData::getInstance().dbHost.c_str(),
-                                    UserData::getInstance().dbUser.c_str(), UserData::getInstance().dbPassword.c_str(),
-                                    UserData::getInstance().dbName.c_str(), UserData::getInstance().dbPort, NULL, 0)) {
-                log(LogLevel::ERROR, "MySQL Connection Error : " + std::string(mysql_error(conn)));
-                mysql_close(conn);
-                conn = nullptr;
-            } else {
-                mysql_query(conn, "SET SESSION query_cache_type = OFF");
-                createTableIfNotExists();
-                log(LogLevel::INFO, "MySQL connected: ", UserData::getInstance().dbHost, ":",
-                    UserData::getInstance().dbPort, " db=", UserData::getInstance().dbName);
-            }
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "MySQL Error : ", std::string(e.what()));
-        }
-    }
-
-    /** Ensures there is an active MySQL connection, creating one if needed. */
-    void checkConnection() {
-        try {
-            if (!conn) {
-                createConnection();
-            }
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "Connection Error : ", std::string(e.what()));
-        }
-    }
-
-    void createTableIfNotExists() {
-        try {
-            if (!conn)
-                return;
-
-            const char* query = "CREATE TABLE IF NOT EXISTS socketlink_messages ("
-                                "id INT AUTO_INCREMENT PRIMARY KEY,"
-                                "insert_time DATETIME NOT NULL,"
-                                "message TEXT NOT NULL,"
-                                "uid VARCHAR(4096) NOT NULL,"
-                                "rid VARCHAR(160) NOT NULL"
-                                ")";
-
-            if (mysql_query(conn, query)) {
-                throw MySQLException("Table creation failed : " + std::string(mysql_error(conn)));
-            }
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "Table Creation Error : ", std::string(e.what()));
-        }
-    }
-
-    /** Inserts the batch via a parameterized statement (avoids SQL injection). */
-    bool insertBatchData() {
-        try {
-            if (!conn) {
-                return false;
-            }
-
-            std::string query = "INSERT INTO socketlink_messages (insert_time, message, uid, rid) VALUES ";
-            for (size_t i = 0; i < batch_data.size(); ++i) {
-                if (i > 0)
-                    query += ", ";
-                query += "(?, ?, ?, ?)";
-            }
-
-            MYSQL_STMT* stmt = mysql_stmt_init(conn);
-            if (!stmt) {
-                log(LogLevel::ERROR, "Batch Insertion Error : mysql_stmt_init failed (out of memory)");
-                return false;
-            }
-            if (mysql_stmt_prepare(stmt, query.c_str(), query.length())) {
-                log(LogLevel::ERROR, "Batch Insertion Error : " + std::string(mysql_stmt_error(stmt)));
-                mysql_stmt_close(stmt);
-                return false;
-            }
-
-            /** heap-allocated to avoid a large VLA on the stack */
-            std::vector<MYSQL_BIND> bind(4 * batch_data.size());
-            std::memset(bind.data(), 0, sizeof(MYSQL_BIND) * bind.size());
-            int paramIndex = 0;
-
-            for (const auto& [insert_time, message, identifier, room] : batch_data) {
-                bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
-                bind[paramIndex].buffer = (void*)insert_time.c_str();
-                bind[paramIndex].buffer_length = insert_time.length();
-                paramIndex++;
-
-                bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
-                bind[paramIndex].buffer = (void*)message.c_str();
-                bind[paramIndex].buffer_length = message.length();
-                paramIndex++;
-
-                bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
-                bind[paramIndex].buffer = (void*)identifier.c_str();
-                bind[paramIndex].buffer_length = identifier.length();
-                paramIndex++;
-
-                bind[paramIndex].buffer_type = MYSQL_TYPE_STRING;
-                bind[paramIndex].buffer = (void*)room.c_str();
-                bind[paramIndex].buffer_length = room.length();
-                paramIndex++;
-            }
-
-            if (mysql_stmt_bind_param(stmt, bind.data()) || mysql_stmt_execute(stmt)) {
-                mysql_stmt_close(stmt);
-                log(LogLevel::ERROR, "Batch Insertion Error : " + std::string(mysql_stmt_error(stmt)));
-                return false;
-            }
-
-            mysql_stmt_close(stmt);
-            batch_data.clear();
-            totalMysqlDBWrites.fetch_add(1, std::memory_order_relaxed);
-            return true;
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "Batch Insertion Error : ", std::string(e.what()));
-
-            return false;
-        }
-    }
-
-public:
-    MySQLConnectionHandler() : conn(nullptr) {
-        try {
-            createConnection();
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "Constructor Error : ", std::string(e.what()));
-        }
-    }
-
-    ~MySQLConnectionHandler() {
-        try {
-            if (conn) {
-                mysql_close(conn);
-            }
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "Destructor Error : ", std::string(e.what()));
-        }
-    }
-
-    /** Appends a message to the batch, flushing once a batch-size multiple is reached. */
-    void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier,
-                          const std::string& room) {
-        try {
-            /** Retried up to 3 batches' worth; beyond that the batch is dropped to bound memory use */
-            if (batch_data.size() <= (UserData::getInstance().mysqlDBCommitBatchSize * 3)) {
-                batch_data.emplace_back(insert_time, message, identifier, room);
-                if (batch_data.size() % UserData::getInstance().mysqlDBCommitBatchSize == 0) {
-                    insertBatchData();
-                }
-            } else {
-                /** batch is not draining (DB unavailable); drop it to bound memory */
-                batch_data.clear();
-            }
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "Insert Data Error : ", std::string(e.what()));
-        }
-    }
-
-    /** Forces insertion of any remaining batch data. */
-    void flushRemainingData() {
-        try {
-            if (!batch_data.empty()) {
-                insertBatchData();
-            }
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "Flush Data Error : ", std::string(e.what()));
-        }
-    }
-
-    void manualCreateConnection() {
-        try {
-            createConnection();
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "Manual Connection Error : ", std::string(e.what()));
-        }
-    }
-
-    void disconnect() {
-        try {
-            if (conn) {
-                mysql_close(conn);
-                conn = NULL;
-            }
-        } catch (const MySQLException& e) {
-            log(LogLevel::ERROR, "Disconnect Error : ", std::string(e.what()));
-        }
-    }
-};
-
-/* ws->getUserData returns one of these */
-struct PerSocketData {
-    std::string key;
-    std::string uid;
-    std::string metadata;
-
-    /**
-     * true - sending allowed
-     * false - sending not allowed
-     */
-    bool sendingAllowed = true;
-};
-
-/**
- * Plaintext HTTP/WS transport.
- *
- * The server speaks plain ws:// (no TLS). TLS is terminated upstream by a load
- * balancer / reverse proxy, so there is zero per-connection TLS handshake cost
- * in the app itself.
- */
-using SLApp = uWS::App; // plaintext (non-TLS) uWebSockets app
-using SLWebSocket = uWS::WebSocket<false, true, PerSocketData>;
-
-/** uWebSocket worker runs in a separate thread */
-struct worker_t {
-    void work();
-
-    /* uWebSocket worker listens on separate port, or share the same port (works on Linux). */
-    struct us_listen_socket_t* listen_socket_;
-
-    /* Every thread has its own Loop, and uWS::Loop::get() returns the Loop for current thread.*/
-    struct uWS::Loop* loop_;
-
-    /** Every thread has it's own db_handler */
-    std::shared_ptr<MySQLConnectionHandler> db_handler;
-
-    /* Need to capture the uWS::App object (instance). */
-    std::shared_ptr<SLApp> app_;
-
-    /* Thread object for uWebSocket worker */
-    std::shared_ptr<std::thread> thread_;
-};
-
-MDB_env* env;
-
-/** Single shared LMDB database handle, opened once in init_env and reused for the
- *  lifetime of the process. LMDB DBI handles are meant to be opened once and shared;
- *  opening/closing one inside every transaction takes a lock and is wasteful. */
-MDB_dbi g_dbi;
-
-/** Mutexes for thread-safety */
-std::mutex write_mutex;
-std::mutex rateLimitMutex;
-std::mutex write_worker_mutex;
-
-/** webhooks */
-enum class Webhooks : uint8_t {
-    /** Message-related events */
-    ON_MESSAGE = 1 << 1, /** value 2 */
-
-    /** Connection verification events */
-    ON_VERIFICATION_REQUEST = 1 << 2, /** value 4 */
-
-    /** Connection open events */
-    ON_SUBSCRIBE = 1 << 3, /** value 8 */
-
-    /** Connection close events */
-    ON_UNSUBSCRIBE = 1 << 4, /** value 16 */
-
-    /** Room occupancy events */
-    ON_ROOM_OCCUPIED = 1 << 5, /** value 32 */
-
-    /** Room vacancy events */
-    ON_ROOM_VACATED = 1 << 6 /** value 64 */
-};
-
-/** Rooms */
-enum class Rooms : uint8_t {
-    PUBLIC = 0,
-    PRIVATE = 1,
-    PUBLIC_STATE = 2,
-    PRIVATE_STATE = 3,
-    PUBLIC_CACHE = 4,
-    PRIVATE_CACHE = 5,
-    PUBLIC_STATE_CACHE = 6,
-    PRIVATE_STATE_CACHE = 7
-};
-
-/**
- * Derive the room type from a room id's prefix. Returns 255 when the prefix is
- * not a recognized room type. Longer/more-specific prefixes are checked first.
- * (Previously this ladder was copy-pasted in the subscribe/unsubscribe/ban handlers.)
- */
-inline uint8_t parseRoomType(const std::string& rid) {
-    if (rid.rfind("pub-state-cache-", 0) == 0)
-        return static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE);
-    if (rid.rfind("pri-state-cache-", 0) == 0)
-        return static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE);
-    if (rid.rfind("pub-cache-", 0) == 0)
-        return static_cast<uint8_t>(Rooms::PUBLIC_CACHE);
-    if (rid.rfind("pri-cache-", 0) == 0)
-        return static_cast<uint8_t>(Rooms::PRIVATE_CACHE);
-    if (rid.rfind("pub-state-", 0) == 0)
-        return static_cast<uint8_t>(Rooms::PUBLIC_STATE);
-    if (rid.rfind("pri-state-", 0) == 0)
-        return static_cast<uint8_t>(Rooms::PRIVATE_STATE);
-    if (rid.rfind("pub-", 0) == 0)
-        return static_cast<uint8_t>(Rooms::PUBLIC);
-    if (rid.rfind("pri-", 0) == 0)
-        return static_cast<uint8_t>(Rooms::PRIVATE);
-    return 255;
-}
-
-/** stores data for websocket and its worker for later use */
-struct WebSocketData {
-    SLWebSocket* ws;
-    worker_t* worker;
-};
-
-/** Global atomic variables and data structures (all thread safe) */
-/** these variables mainly stores the metrics */
-std::atomic<int> globalConnectionCounter(0);
-std::atomic<unsigned long long> globalMessagesSent{0};
-std::atomic<unsigned long long> totalPayloadSent{0};
-std::atomic<unsigned long long> totalConnectionErrors{0};    /** Websocket connections rejected due to some error */
-std::atomic<unsigned long long> totalFailedApiCalls{0};      /** API calls rejected due to 4XX or 5XX codes */
-std::atomic<unsigned long long> totalSuccessApiCalls{0};     /** API calls with 2XX code */
-std::atomic<unsigned long long> totalLMDBWrites{0};          /** Total writes to the LMDB database */
-std::atomic<unsigned long long> totalSuccessWebhookCalls{0}; /** Total webhook calls */
-std::atomic<unsigned long long> totalFailedWebhookCalls{0};  /** Total failed webhook calls */
-std::atomic<int> totalLatency{0};                            /** Total latency in milliseconds */
-std::atomic<int> latencyCount(0);                            /** Number of latency measurements */
-std::atomic<unsigned long long> droppedMessages{0};
-std::atomic<unsigned int> messageCount(0);
-std::atomic<bool> isMessagingDisabled(false);
-
-/** All connection/room state uses TBB concurrent maps unconditionally. (These work
- *  fine single-threaded too, so the previous SingleThreaded std::unordered_map mirror
- *  and the isMultiThread branching were removed to eliminate ~1000 lines of duplicate,
- *  divergence-prone logic.) */
-namespace ThreadSafe {
-    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> topics;
-    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> bannedConnections;
-    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>> disabledConnections;
-    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>> uidToRoomMapping;
-    tbb::concurrent_hash_map<std::string, bool> uid;
-    tbb::concurrent_hash_map<std::string, WebSocketData> connections;
-} // namespace ThreadSafe
-
-/** map to store enabled webhooks and features (no need to make it thread safe) */
-std::unordered_map<Webhooks, int> webhookStatus;
-std::shared_mutex webhookMutex;
-
-std::vector<worker_t> workers;
-
-/** Thread local variables */
-thread_local boost::asio::io_context io_context;
-thread_local boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);
-thread_local std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> ssl_socket = nullptr;
 thread_local double localEma = 0.0;
 thread_local std::chrono::time_point<std::chrono::high_resolution_clock> threadTimestamp =
     std::chrono::high_resolution_clock::now();
 static thread_local simdjson::ondemand::parser parser;
 
-/** Sending Constants */
-constexpr const char* ROOM_NAME_INVALID = "ROOM_NAME_INVALID";
-constexpr const char* API_KEY_INVALID = "API_KEY_INVALID";
-constexpr const char* CONNECTION_LIMIT_EXCEEDED = "CONNECTION_LIMIT_EXCEEDED";
-constexpr const char* SOMEONE_JOINED_THE_ROOM = "SOMEONE_JOINED_THE_ROOM";
-constexpr const char* CONNECTED_TO_ROOM = "CONNECTED_TO_ROOM";
-constexpr const char* SOMEONE_LEFT_THE_ROOM = "SOMEONE_LEFT_THE_ROOM";
-constexpr const char* YOU_ARE_RATE_LIMITED = "YOU_ARE_RATE_LIMITED";
-constexpr const char* RATE_LIMIT_LIFTED = "RATE_LIMIT_LIFTED";
-constexpr const char* BROADCAST = "SOCKETLINK_BROADCAST";
-constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
-
-/** HMAC-SHA256 Constants */
-constexpr int HMAC_SHA256_DIGEST_LENGTH = 32; /**< SHA-256 produces a 32-byte (256-bit) output */
-
 /** smoothing factor */
 constexpr double alpha = 0.05;
-
-using json = nlohmann::json;
-
-/** Computes the HMAC-SHA256 of `data` under `key` into the 32-byte `output`. */
-void hmac_sha256(const char* key, size_t key_len, const char* data, size_t data_len,
-                 unsigned char output[HMAC_SHA256_DIGEST_LENGTH]) {
-    HMAC_CTX* ctx = HMAC_CTX_new();
-
-    HMAC_Init_ex(ctx, key, key_len, EVP_sha256(), nullptr);
-    HMAC_Update(ctx, (unsigned char*)data, data_len);
-
-    unsigned int out_len = 0;
-    HMAC_Final(ctx, output, &out_len);
-
-    HMAC_CTX_free(ctx);
-}
-
-/** Converts binary data to a lowercase hex string. */
-std::string to_hex(const unsigned char* data, size_t len) {
-    static const char hex_digits[] = "0123456789abcdef";
-
-    std::string hex(len * 2, ' ');
-    for (size_t i = 0; i < len; ++i) {
-        hex[2 * i] = hex_digits[(data[i] >> 4) & 0xF];
-        hex[2 * i + 1] = hex_digits[data[i] & 0xF];
-    }
-
-    return hex;
-}
-
-/**
- * Appends `s` to `out` as the CONTENTS of a JSON string (without surrounding quotes),
- * escaping per RFC 8259. All server envelopes and webhook payloads are built by
- * concatenating raw strings, so any user-controlled field (message, rid, uid, metadata)
- * containing a '"', '\\', or control character would otherwise break out of its JSON
- * string and corrupt the envelope (or inject fields). This makes that impossible.
- */
-void appendJsonEscaped(std::string& out, std::string_view s) {
-    static const char hex_digits[] = "0123456789abcdef";
-    for (unsigned char c : s) {
-        switch (c) {
-            case '"':
-                out += "\\\"";
-                break;
-            case '\\':
-                out += "\\\\";
-                break;
-            case '\b':
-                out += "\\b";
-                break;
-            case '\f':
-                out += "\\f";
-                break;
-            case '\n':
-                out += "\\n";
-                break;
-            case '\r':
-                out += "\\r";
-                break;
-            case '\t':
-                out += "\\t";
-                break;
-            default:
-                if (c < 0x20) {
-                    /** Other control characters must be escaped as \u00XX */
-                    out += "\\u00";
-                    out += hex_digits[(c >> 4) & 0xF];
-                    out += hex_digits[c & 0xF];
-                } else {
-                    out += static_cast<char>(c);
-                }
-        }
-    }
-}
-
-/** Convenience wrapper returning the JSON-escaped contents of `s` (no surrounding quotes). */
-std::string jsonEscape(std::string_view s) {
-    std::string out;
-    out.reserve(s.size() + 8);
-    appendJsonEscaped(out, s);
-    return out;
-}
-
-/** Fetch the current UTC time in SQL-compatible format. */
-std::string getCurrentSQLTime() {
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
-
-    /** gmtime_r (not gmtime) because gmtime returns a shared static buffer and is not thread-safe. */
-    std::tm tm;
-    gmtime_r(&now_c, &tm);
-
-    char buffer[20]; /** 'YYYY-MM-DD HH:MM:SS' format */
-
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm);
-
-    return std::string(buffer);
-}
-
-void init_env() {
-    if (mdb_env_create(&env) != 0) {
-        log(LogLevel::ERROR, "Failed to create LMDB environment.");
-        exit(-1);
-    }
-
-    if (mdb_env_set_mapsize(env, UserData::getInstance().lmdbDatabaseSizeInBytes) != 0) {
-        log(LogLevel::ERROR, "Failed to set map size.");
-        exit(-1);
-    }
-
-    if (mdb_env_set_maxreaders(env, 128) != 0) {
-        log(LogLevel::ERROR, "Failed to set max readers.");
-        exit(-1);
-    }
-
-    if (mdb_env_set_maxdbs(env, 1) != 0) {
-        log(LogLevel::ERROR, "Failed to set max databases.");
-        exit(-1);
-    }
-
-    if (mdb_env_open(env, "./messages_db", MDB_WRITEMAP, 0664) != 0) {
-        log(LogLevel::ERROR, "Failed to open LMDB environment.");
-        exit(-1);
-    }
-
-    /** Open the single shared database handle once and keep it for the process
-     *  lifetime (reused by all read/write/delete transactions). */
-    {
-        MDB_txn* txn;
-        if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-            log(LogLevel::ERROR, "Failed to begin txn for dbi open.");
-            exit(-1);
-        }
-        if (mdb_dbi_open(txn, "messages_db", MDB_CREATE, &g_dbi) != 0) {
-            log(LogLevel::ERROR, "Failed to open LMDB database handle.");
-            mdb_txn_abort(txn);
-            exit(-1);
-        }
-        if (mdb_txn_commit(txn) != 0) {
-            log(LogLevel::ERROR, "Failed to commit dbi open txn.");
-            exit(-1);
-        }
-    }
-
-    log(LogLevel::INFO, "LMDB environment initialized successfully.");
-}
-
-/** write the data to the LMDB, LMDB has internal locking mechanish so no need to mutexes */
-void write_worker(const std::string& room_id, const std::string& message_content, bool needsCommit = false) {
-    MDB_txn* txn;
-
-    thread_local std::vector<std::tuple<std::string, std::string>> batch;
-
-    if (!needsCommit) {
-        batch.push_back({room_id, message_content});
-    }
-
-    /** commit once the batch reaches its size limit, or when a commit is forced */
-    if (batch.size() >= UserData::getInstance().lmdbCommitBatchSize || (needsCommit && batch.size() > 0)) {
-        if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-            log(LogLevel::ERROR, "Failed to begin write transaction.");
-            batch.clear();
-            return;
-        }
-
-        for (const auto& [key_str, value_str] : batch) {
-            MDB_val key, value;
-
-            key.mv_size = key_str.size();
-            key.mv_data = (void*)key_str.data();
-
-            value.mv_size = value_str.size();
-            value.mv_data = (void*)value_str.data();
-
-            if (mdb_put(txn, g_dbi, &key, &value, 0) != 0) {
-                log(LogLevel::ERROR, "Failed to write key : ", key_str);
-                batch.clear();
-                mdb_txn_abort(txn);
-                return;
-            }
-        }
-
-        /** mdb_txn_commit frees the txn even on failure — do NOT abort it afterwards */
-        if (mdb_txn_commit(txn) != 0) {
-            log(LogLevel::ERROR, "Failed to commit transaction.");
-            batch.clear();
-            return;
-        }
-
-        batch.clear();
-    }
-}
-
-/** This function will delete the entry stored under the exact room_id key */
-void delete_worker(const std::string& room_id) {
-    MDB_txn* txn;
-    MDB_val key;
-
-    std::lock_guard<std::mutex> lock(write_worker_mutex);
-
-    if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-        log(LogLevel::ERROR, "Failed to begin delete transaction.");
-        return;
-    }
-
-    key.mv_data = (void*)room_id.c_str();
-    key.mv_size = room_id.size();
-
-    if (mdb_del(txn, g_dbi, &key, nullptr) != 0) {
-        /** normal when a cache room vacates without ever storing a message */
-        log(LogLevel::DEBUG, "Failed to delete key : ", room_id);
-        mdb_txn_abort(txn);
-        return;
-    }
-
-    if (mdb_txn_commit(txn) != 0) {
-        log(LogLevel::ERROR, "Failed to commit delete transaction.");
-    }
-}
-
-std::string read_worker(const std::string& room_id) {
-    MDB_txn* txn;
-    MDB_val key, value;
-
-    if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
-        log(LogLevel::ERROR, "Failed to begin read transaction : ", mdb_strerror(errno));
-        return "{}";
-    }
-
-    key.mv_size = room_id.size();
-    key.mv_data = (void*)room_id.data();
-
-    if (mdb_get(txn, g_dbi, &key, &value) == 0) {
-        std::string message_content((char*)value.mv_data, value.mv_size);
-
-        mdb_txn_commit(txn);
-
-        return message_content;
-    }
-
-    /** a missing key is a normal cache miss (empty/new room), not an error */
-    log(LogLevel::DEBUG, "No message found for room_id : ", room_id);
-    mdb_txn_abort(txn);
-    return "{}";
-}
-
-/** Decode a bitmask into the webhook-status map (1 = active, 0 = inactive). */
-void populateWebhookStatus(uint8_t bitmask) {
-    std::unique_lock<std::shared_mutex> lock(webhookMutex);
-
-    for (uint8_t i = 0; i < 6; ++i) {
-        Webhooks webhook = static_cast<Webhooks>(static_cast<uint8_t>(1) << i);
-        webhookStatus[webhook] = (bitmask & (static_cast<uint8_t>(1) << i)) ? 1 : 0;
-    }
-}
-
-/** read webhooks, thread safe */
-int getWebhookStatus(Webhooks webhook) {
-    std::shared_lock<std::shared_mutex> lock(webhookMutex);
-
-    auto it = webhookStatus.find(webhook);
-    return (it != webhookStatus.end()) ? it->second : 0;
-}
-
-void populateFeatureStatus(uint32_t bitmask) {
-    std::unique_lock<std::shared_mutex> lock(featureMutex);
-
-    for (uint32_t i = 0; i < 1; ++i) {
-        Features feature = static_cast<Features>(1 << i);
-        featureStatus[feature] = (bitmask & (1 << i)) ? 1 : 0;
-    }
-}
-
-/** Synchronously send an HTTPS POST webhook on the CALLING thread. This blocks on
- *  TCP connect / SSL handshake / write, so it must NOT be called directly from a
- *  uWS event-loop thread for fire-and-forget events — use the
- *  sendHTTPSPOSTRequestFireAndForget wrapper, which offloads to a dispatcher thread.
- *  The synchronous path is used directly only when a status code is needed
- *  (waitForResponse == true, e.g. private-room verification). */
-static int sendWebhookBlocking(const std::string& baseURL, const std::string& path, const std::string& body,
-                               const std::map<std::string, std::string>& headers, bool waitForResponse) {
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        try {
-            /** Disable SSL certificate verification if needed. 
-             *  This is insecure and should only be used for testing purposes. */
-            if (UserData::getInstance().webhookIP.empty()) {
-                /** DNS is not resolved, returning */
-                return 0;
-            }
-
-            ssl_context.set_verify_mode(boost::asio::ssl::verify_none);
-
-            if (!ssl_socket || !ssl_socket->lowest_layer().is_open()) {
-                ssl_socket =
-                    std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(io_context, ssl_context);
-
-                constexpr int webhookPort = 443;
-                boost::asio::ip::tcp::endpoint endpoint(
-                    boost::asio::ip::make_address(UserData::getInstance().webhookIP), webhookPort);
-
-                ssl_socket->lowest_layer().connect(endpoint);
-
-                boost::asio::socket_base::keep_alive keepAliveOption(true);
-                ssl_socket->lowest_layer().set_option(keepAliveOption);
-
-                ssl_socket->handshake(boost::asio::ssl::stream_base::client);
-            }
-
-            /** TCP_NODELAY to minimize latency */
-            boost::asio::ip::tcp::no_delay no_delay_option(true);
-            ssl_socket->lowest_layer().set_option(no_delay_option);
-
-            boost::asio::streambuf request_buffer;
-            std::ostream request_stream(&request_buffer);
-
-            if (UserData::getInstance().webhookSecret.length() > 0) {
-                unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];
-                hmac_sha256(UserData::getInstance().webhookSecret.c_str(),
-                            UserData::getInstance().webhookSecret.length(), body.c_str(), body.length(), hmac_result);
-
-                request_stream << "POST " << path << " HTTP/1.1\r\n"
-                               << "Host: " << baseURL << "\r\n"
-                               << "Connection: keep-alive\r\n"
-                               << "Content-Type: application/json\r\n"
-                               << "X-HMAC-Signature: " << to_hex(hmac_result, HMAC_SHA256_DIGEST_LENGTH) << "\r\n";
-            } else {
-                request_stream << "POST " << path << " HTTP/1.1\r\n"
-                               << "Host: " << baseURL << "\r\n"
-                               << "Connection: keep-alive\r\n"
-                               << "Content-Type: application/json\r\n";
-            }
-
-            for (const auto& header : headers) {
-                request_stream << header.first << ": " << header.second << "\r\n";
-            }
-
-            request_stream << "Content-Length: " << body.size() << "\r\n"
-                           << "\r\n";
-
-            boost::asio::write(*ssl_socket, request_buffer);
-
-            boost::asio::write(*ssl_socket, boost::asio::buffer(body));
-
-            if (waitForResponse) {
-                boost::asio::streambuf response_buffer;
-                boost::system::error_code ec;
-
-                boost::asio::read_until(*ssl_socket, response_buffer, "\r\n\r\n", ec);
-
-                if (!ec) {
-                    std::istream response_stream(&response_buffer);
-                    std::string status_line;
-
-                    std::getline(response_stream, status_line);
-
-                    if (status_line.empty()) {
-                        log(LogLevel::INFO, "Empty response line!");
-                        return 0;
-                    }
-
-                    /** parse: HTTP version, status code, status message */
-                    std::istringstream status_stream(status_line);
-                    std::string http_version;
-                    unsigned int status_code = 0; /* 0 if the status line fails to parse */
-                    std::string status_message;
-
-                    status_stream >> http_version >> status_code;
-                    std::getline(status_stream, status_message);
-
-                    if (!status_message.empty() && status_message.front() == ' ') {
-                        status_message.erase(0, 1);
-                    }
-
-                    totalSuccessWebhookCalls.fetch_add(1, std::memory_order_relaxed);
-
-                    return status_code;
-                } else {
-                    log(LogLevel::ERROR, "Error reading response : ", ec.message());
-                    return 0;
-                }
-            }
-
-            totalSuccessWebhookCalls.fetch_add(1, std::memory_order_relaxed);
-
-            break;
-        } catch (const boost::system::system_error& e) {
-            log(LogLevel::ERROR, "Error in sendHTTPSPOSTRequestFireAndForget : ", e.what());
-
-            ssl_socket = nullptr;
-
-            /** retry only once on failure */
-            if (attempt == 1) {
-                totalFailedWebhookCalls.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
-        }
-    }
-
-    return 0;
-}
-
-/**
- * Background dispatcher for fire-and-forget webhooks.
- *
- * Previously every fire-and-forget webhook was sent synchronously from inside a
- * uWS event-loop handler, which blocked that worker's entire reactor (all of its
- * connections) on TCP connect / SSL handshake / write. This dispatcher moves that
- * blocking I/O onto a dedicated thread: event-loop handlers only enqueue a job and
- * return immediately.
- *
- * The dispatcher thread owns its own thread-local SSL socket (see sendWebhookBlocking),
- * so it reuses a single persistent keep-alive connection to the customer's endpoint.
- * The queue is bounded; if the customer's endpoint is slow/down, the oldest pending
- * webhooks are dropped rather than growing memory without limit.
- */
-class WebhookDispatcher {
-public:
-    static WebhookDispatcher& getInstance() {
-        static WebhookDispatcher instance;
-        return instance;
-    }
-
-    /** Enqueue a fire-and-forget webhook. Non-blocking; safe to call from event-loop threads. */
-    void enqueue(std::string baseURL, std::string path, std::string body,
-                 std::map<std::string, std::string> headers = {}) {
-        bool droppedOne = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            /** Bound the queue to protect memory when the endpoint is slow or unreachable */
-            if (queue_.size() >= maxQueueSize_) {
-                queue_.pop_front();
-                droppedWebhookCalls_.fetch_add(1, std::memory_order_relaxed);
-                droppedOne = true;
-            }
-            queue_.push_back(Job{std::move(baseURL), std::move(path), std::move(body), std::move(headers)});
-        }
-        cv_.notify_one();
-
-        /** webhook endpoint can't keep up — warn, but rate-limited (once per 10k drops) */
-        if (droppedOne) {
-            unsigned long long d = droppedWebhookCalls_.load(std::memory_order_relaxed);
-            if (d == 1 || d % 10000 == 0) {
-                log(LogLevel::WARN, "Webhook queue full: dropping oldest events (total dropped: ", d, ")");
-            }
-        }
-    }
-
-    unsigned long long droppedCount() const { return droppedWebhookCalls_.load(std::memory_order_relaxed); }
-
-    WebhookDispatcher(const WebhookDispatcher&) = delete;
-    WebhookDispatcher& operator=(const WebhookDispatcher&) = delete;
-
-private:
-    struct Job {
-        std::string baseURL;
-        std::string path;
-        std::string body;
-        std::map<std::string, std::string> headers;
-    };
-
-    WebhookDispatcher() : worker_([this]() { run(); }) {}
-
-    ~WebhookDispatcher() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            running_ = false;
-        }
-        cv_.notify_all();
-        if (worker_.joinable()) {
-            worker_.join();
-        }
-    }
-
-    void run() {
-        while (true) {
-            Job job;
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [this]() { return !queue_.empty() || !running_; });
-                if (!running_ && queue_.empty()) {
-                    return;
-                }
-                job = std::move(queue_.front());
-                queue_.pop_front();
-            }
-            /** Blocking send happens on this dedicated thread, never on an event loop */
-            sendWebhookBlocking(job.baseURL, job.path, job.body, job.headers, false);
-        }
-    }
-
-    std::deque<Job> queue_;
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    bool running_ = true;
-    std::atomic<unsigned long long> droppedWebhookCalls_{0};
-    static constexpr size_t maxQueueSize_ = 100000;
-    std::thread worker_;
-};
-
-/**
- * @brief Dispatch an HTTPS POST webhook.
- *
- * For fire-and-forget events (waitForResponse == false) the request is handed to a
- * background dispatcher thread and this returns immediately, so the calling event loop
- * never blocks on webhook I/O. When a status code is required (waitForResponse == true,
- * e.g. private-room verification) the request is sent synchronously on the calling thread
- * and the HTTP status is returned.
- */
-int sendHTTPSPOSTRequestFireAndForget(const std::string& baseURL, const std::string& path, const std::string& body,
-                                      const std::map<std::string, std::string>& headers = {},
-                                      bool waitForResponse = false) {
-    if (waitForResponse) {
-        return sendWebhookBlocking(baseURL, path, body, headers, true);
-    }
-
-    WebhookDispatcher::getInstance().enqueue(baseURL, path, body, headers);
-    return 0;
-}
-
-/**
- * Resolves the IPv4 address for `hostname` and stores it in the config snapshot
- * `ud` being built (ud.webhookIP).
- */
-void resolveAndStoreIPAddress(UserData& ud, const std::string& hostname) {
-    struct addrinfo hints, *res = nullptr;
-    char ipAddress[INET_ADDRSTRLEN];
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &res);
-    if (status != 0) {
-        log(LogLevel::ERROR, "getaddrinfo error : ", gai_strerror(status));
-        return;
-    }
-
-    struct sockaddr_in* ipv4 = (struct sockaddr_in*)res->ai_addr;
-    inet_ntop(AF_INET, &(ipv4->sin_addr), ipAddress, sizeof(ipAddress));
-
-    ud.webhookIP = ipAddress;
-
-    freeaddrinfo(res);
-}
-
-int populateUserData(std::string data) {
-    nlohmann::json parsedJson = nlohmann::json::parse(data);
-    int needsDBUpdate = 0;
-
-    /** Serialize concurrent writers, then build the new config on a private copy of
-     *  the current snapshot and publish it atomically at the end. Readers keep seeing
-     *  the old immutable snapshot until publish(), so there is no read/write race. */
-    std::lock_guard<std::mutex> writeLock(configWriteMutex);
-    UserData userData = UserData::getInstance();
-
-    if (parsedJson.contains("client_api_key") && !parsedJson["client_api_key"].is_null()) {
-        userData.clientApiKey = parsedJson["client_api_key"].get<std::string>();
-    }
-
-    if (parsedJson.contains("admin_api_key") && !parsedJson["admin_api_key"].is_null()) {
-        userData.adminApiKey = parsedJson["admin_api_key"].get<std::string>();
-    }
-
-    if (parsedJson.contains("connections") && !parsedJson["connections"].is_null()) {
-        userData.connections = parsedJson["connections"].get<int>();
-    }
-
-    if (parsedJson.contains("msg_size_allowed_in_bytes") && !parsedJson["msg_size_allowed_in_bytes"].is_null()) {
-        userData.msgSizeAllowedInBytes = parsedJson["msg_size_allowed_in_bytes"].get<unsigned int>();
-    }
-
-    if (parsedJson.contains("webhooks") && !parsedJson["webhooks"].is_null()) {
-        userData.webhooks = parsedJson["webhooks"].get<uint8_t>();
-
-        populateWebhookStatus(userData.webhooks);
-    }
-
-    if (parsedJson.contains("features") && !parsedJson["features"].is_null()) {
-        userData.features = parsedJson["features"].get<uint32_t>();
-    }
-
-    if (parsedJson.contains("webhook_base_url") && !parsedJson["webhook_base_url"].is_null()) {
-        userData.webHookBaseUrl = parsedJson["webhook_base_url"].get<std::string>();
-
-        resolveAndStoreIPAddress(userData, userData.webHookBaseUrl);
-    }
-
-    if (parsedJson.contains("webhook_path") && !parsedJson["webhook_path"].is_null()) {
-        userData.webhookPath = parsedJson["webhook_path"].get<std::string>();
-    }
-
-    if (parsedJson.contains("webhook_secret") && !parsedJson["webhook_secret"].is_null()) {
-        userData.webhookSecret = parsedJson["webhook_secret"].get<std::string>();
-    }
-
-    if (parsedJson.contains("max_storage_allowed_in_gb") && !parsedJson["max_storage_allowed_in_gb"].is_null()) {
-        userData.lmdbDatabaseSizeInBytes =
-            parsedJson["max_storage_allowed_in_gb"].get<unsigned long long>() * 1024ULL * 1024 * 1024;
-    }
-
-    if (parsedJson.contains("lmdb_commit_batch_size") && !parsedJson["lmdb_commit_batch_size"].is_null()) {
-        userData.lmdbCommitBatchSize = parsedJson["lmdb_commit_batch_size"].get<int>();
-    }
-
-    if (parsedJson.contains("db_commit_batch_size") && !parsedJson["db_commit_batch_size"].is_null()) {
-        userData.mysqlDBCommitBatchSize = parsedJson["db_commit_batch_size"].get<int>();
-    }
-
-    if (parsedJson.contains("idle_timeout_in_seconds") && !parsedJson["idle_timeout_in_seconds"].is_null()) {
-        unsigned short idleTimeoutInSeconds = parsedJson["idle_timeout_in_seconds"].get<unsigned short>();
-        if (userData.idleTimeoutInSeconds == 60 && idleTimeoutInSeconds != userData.idleTimeoutInSeconds) {
-            userData.idleTimeoutInSeconds = idleTimeoutInSeconds;
-        } else {
-            userData.idleTimeoutInSeconds = idleTimeoutInSeconds;
-            needsDBUpdate = 2;
-        }
-    }
-
-    if (parsedJson.contains("max_lifetime_in_minutes") && !parsedJson["max_lifetime_in_minutes"].is_null()) {
-        unsigned short maxLifetimeInMinutes = parsedJson["max_lifetime_in_minutes"].get<unsigned short>();
-        if (userData.maxLifetimeInMinutes == 0 && maxLifetimeInMinutes != userData.maxLifetimeInMinutes) {
-            userData.maxLifetimeInMinutes = maxLifetimeInMinutes;
-        } else {
-            userData.maxLifetimeInMinutes = maxLifetimeInMinutes;
-            needsDBUpdate = 2;
-        }
-    }
-
-    if (parsedJson.contains("max_backpressure_in_bytes") && !parsedJson["max_backpressure_in_bytes"].is_null()) {
-        userData.maxBackpressureInBytes = parsedJson["max_backpressure_in_bytes"].get<unsigned int>();
-    }
-
-    populateFeatureStatus(userData.features);
-
-    int is_sql_integration_enabled = 0;
-
-    if (parsedJson.contains("is_sql_integration_enabled") && !parsedJson["is_sql_integration_enabled"].is_null()) {
-        if (parsedJson["is_sql_integration_enabled"].get<bool>()) {
-            is_sql_integration_enabled = 1;
-        } else {
-            is_sql_integration_enabled = -1;
-        }
-    }
-
-    std::string dbHost = "";
-    std::string dbUser = "";
-    std::string dbPassword = "";
-    std::string dbName = "";
-    int dbPort = 0;
-
-    if (parsedJson.contains("db_host") && !parsedJson["db_host"].is_null()) {
-        dbHost = parsedJson["db_host"].get<std::string>();
-    }
-    if (parsedJson.contains("db_user") && !parsedJson["db_user"].is_null()) {
-        dbUser = parsedJson["db_user"].get<std::string>();
-    }
-    if (parsedJson.contains("db_password") && !parsedJson["db_password"].is_null()) {
-        dbPassword = parsedJson["db_password"].get<std::string>();
-    }
-    if (parsedJson.contains("db_name") && !parsedJson["db_name"].is_null()) {
-        dbName = parsedJson["db_name"].get<std::string>();
-    }
-    if (parsedJson.contains("db_port") && !parsedJson["db_port"].is_null()) {
-        dbPort = parsedJson["db_port"].get<int>();
-    }
-
-    if (dbHost.length() > 0 && dbUser.length() > 0 && dbPassword.length() > 0 && dbName.length() > 0 && dbPort != 0) {
-        if (userData.dbHost != dbHost || userData.dbUser != dbUser || userData.dbPassword != dbPassword ||
-            userData.dbName != dbName || userData.dbPort != dbPort) {
-            userData.dbHost = dbHost;
-            userData.dbUser = dbUser;
-            userData.dbPassword = dbPassword;
-            userData.dbName = dbName;
-            userData.dbPort = dbPort;
-        }
-    }
-
-    if (is_sql_integration_enabled == 1) {
-        std::unique_lock<std::shared_mutex> lock(featureMutex);
-        featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
-        needsDBUpdate = 1;
-    } else if (is_sql_integration_enabled == -1) {
-        std::unique_lock<std::shared_mutex> lock(featureMutex);
-        featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 0;
-        needsDBUpdate = -1;
-    }
-
-    /** Publish the fully-built config snapshot atomically (readers switch over on
-     *  their next getInstance()). The previous snapshot is intentionally leaked. */
-    UserData::publish(new UserData(std::move(userData)));
-
-    return needsDBUpdate;
-}
-
-/** unsubscribe from the current room and do some cleanup */
-void closeConnection(SLWebSocket* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType,
-                     bool isClosed = false) {
-    if (isClosed == false) {
-        /** remove the RID from the uid -> room mapping */
-        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor
-            uid_to_rid_outer_accessor;
-        if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, ws->getUserData()->uid)) {
-            auto& inner_uid_to_rid_map = uid_to_rid_outer_accessor->second;
-
-            {
-                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                if (inner_uid_to_rid_map.find(uid_to_rid_inner_accessor, rid)) {
-                    inner_uid_to_rid_map.erase(uid_to_rid_inner_accessor);
-                }
-            }
-
-            if (inner_uid_to_rid_map.empty()) {
-
-                /** the uid now has no rooms: mark it orphaned (true) */
-                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-                if (ThreadSafe::uid.find(uid_outer_accessor, ws->getUserData()->uid)) {
-                    if (!uid_outer_accessor->second) {
-                        uid_outer_accessor->second = true;
-                    }
-                }
-
-                ThreadSafe::uidToRoomMapping.erase(uid_to_rid_outer_accessor);
-            }
-        }
-    }
-
-    /** remove the user from the room in topics */
-    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
-
-    int size = 0;
-
-    if (ThreadSafe::topics.find(outer_accessor, rid)) {
-        auto& inner_map = outer_accessor->second;
-
-        {
-            tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
-            if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
-                inner_map.erase(inner_accessor);
-            }
-        }
-
-        size = inner_map.size();
-
-        /** room empty: drop it along with its disabled/banned entries */
-        if (size == 0) {
-            ThreadSafe::topics.erase(outer_accessor);
-
-            for (auto& map : {&ThreadSafe::disabledConnections, &ThreadSafe::bannedConnections}) {
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor
-                    map_accessor;
-
-                if (map->find(map_accessor, rid)) {
-                    map->erase(map_accessor);
-                }
-            }
-        }
-    }
-
-    log(LogLevel::DEBUG, "Unsubscribed: uid=", uid, " rid=", rid, " (room size ", size, ")");
-
-    /** Unsubscribe on the correct thread */
-    auto unsubscribe_fn = [ws, rid]() { ws->unsubscribe(rid); };
-    if (worker->thread_->get_id() != std::this_thread::get_id()) {
-        worker->loop_->defer(unsubscribe_fn);
-    } else {
-        unsubscribe_fn();
-    }
-
-    static const std::unordered_set<uint8_t> validCacheRoomTypes = {
-        static_cast<uint8_t>(Rooms::PUBLIC_CACHE), static_cast<uint8_t>(Rooms::PRIVATE_CACHE),
-        static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE), static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)};
-
-    /** delete the key value pair if it's a cache room */
-    if (size == 0 && validCacheRoomTypes.count(roomType)) {
-        delete_worker(rid);
-    }
-
-    /** Broadcast disconnect message */
-    static const std::unordered_set<uint8_t> validRoomTypes = {
-        static_cast<uint8_t>(Rooms::PUBLIC_STATE), static_cast<uint8_t>(Rooms::PRIVATE_STATE),
-        static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE), static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)};
-
-    if (validRoomTypes.count(roomType)) {
-        std::string result = "{\"data\":\"SOMEONE_LEFT_THE_ROOM\", \"metadata\":\"" +
-                             jsonEscape(ws->getUserData()->metadata) + "\", \"source\":\"server\", \"rid\":\"" +
-                             jsonEscape(rid) + "\"}";
-
-        /** Publish message to all workers */
-        for (auto& w : ::workers) {
-            w.loop_->defer([&w, rid, result]() { w.app_->publish(rid, result, uWS::OpCode::TEXT, true); });
-        }
-    }
-
-    if (getWebhookStatus(Webhooks::ON_UNSUBSCRIBE) == 1) {
-        std::ostringstream payload;
-        payload << "{\"event\":\"ON_UNSUBSCRIBE\", " << "\"uid\":\"" << jsonEscape(ws->getUserData()->uid) << "\", "
-                << "\"rid\":\"" << jsonEscape(rid) << "\", " << "\"connections_in_room\":\"" << size << "\"}";
-
-        std::string body = payload.str();
-
-        sendHTTPSPOSTRequestFireAndForget(UserData::getInstance().webHookBaseUrl, UserData::getInstance().webhookPath,
-                                          body, {});
-    }
-
-    /** room vacate webhooks */
-    if (size == 0) {
-        if (getWebhookStatus(Webhooks::ON_ROOM_VACATED) == 1) {
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_ROOM_VACATED\", " << "\"uid\":\"" << jsonEscape(ws->getUserData()->uid)
-                    << "\", " << "\"rid\":\"" << jsonEscape(rid) << "\"}";
-
-            std::string body = payload.str();
-
-            sendHTTPSPOSTRequestFireAndForget(UserData::getInstance().webHookBaseUrl,
-                                              UserData::getInstance().webhookPath, body, {});
-        }
-    }
-}
-
-/** subscribe to a new room */
-void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t roomType) {
-    if (!rid.empty()) {
-        const auto& uid = ws->getUserData()->uid;
-        auto currentThreadId = std::this_thread::get_id();
-        auto workerThreadId = worker->thread_->get_id();
-
-        /** subscribe on the thread that owns the ws instance */
-        if (workerThreadId == currentThreadId) {
-            ws->subscribe(rid);
-        } else {
-            worker->loop_->defer([ws, rid]() { ws->subscribe(rid); });
-        }
-
-        int size = 0;
-
-        {
-            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
-
-            if (ThreadSafe::topics.find(topicsAccessor, rid)) {
-                auto& innerMap = topicsAccessor->second;
-
-                tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
-
-                if (innerMap.insert(innerAccessor, uid)) {
-                    innerAccessor->second = true;
-                }
-
-                size = innerMap.size();
-            } else {
-                tbb::concurrent_hash_map<std::string, bool> newInnerMap;
-                newInnerMap.emplace(uid, true);
-
-                if (ThreadSafe::topics.insert(topicsAccessor, rid)) {
-                    topicsAccessor->second = std::move(newInnerMap);
-                }
-
-                size = 1;
-            }
-        }
-
-        log(LogLevel::DEBUG, "Subscribed: uid=", uid, " rid=", rid, " (room size ", size, ")");
-
-        {
-            tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor
-                uid_to_rid_outer_accessor;
-
-            if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                auto& innerMap = uid_to_rid_outer_accessor->second;
-
-                tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-
-                if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
-                    uid_to_rid_inner_accessor->second = roomType;
-                }
-            } else {
-                if (ThreadSafe::uidToRoomMapping.insert(uid_to_rid_outer_accessor, uid)) {
-                    tbb::concurrent_hash_map<std::string, uint8_t>& innerMap = uid_to_rid_outer_accessor->second;
-
-                    tbb::concurrent_hash_map<std::string, uint8_t>::accessor uid_to_rid_inner_accessor;
-                    if (innerMap.insert(uid_to_rid_inner_accessor, rid)) {
-                        uid_to_rid_inner_accessor->second = roomType;
-                    }
-                }
-
-                /** uid now has a room: clear its orphaned flag (false) */
-                tbb::concurrent_hash_map<std::string, bool>::accessor uid_outer_accessor;
-                if (ThreadSafe::uid.find(uid_outer_accessor, uid)) {
-                    if (uid_outer_accessor->second) {
-                        uid_outer_accessor->second = false;
-                    }
-                }
-            }
-        }
-
-        /** Broadcast the message to others if the room is public/private */
-        if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
-            roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-            roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
-            std::string broadcastMessage = "{\"data\":\"SOMEONE_JOINED_THE_ROOM\", \"metadata\":\"" +
-                                           jsonEscape(ws->getUserData()->metadata) +
-                                           "\", \"source\":\"server\", \"rid\":\"" + jsonEscape(rid) + "\"}";
-
-            if (workerThreadId == currentThreadId) {
-                ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-            }
-
-            std::for_each(::workers.begin(), ::workers.end(), [broadcastMessage, rid](worker_t& w) {
-                /** Check if the current thread ID matches the worker's thread ID */
-                if (std::this_thread::get_id() != w.thread_->get_id()) {
-                    /** Defer the message publishing to the worker's loop */
-                    w.loop_->defer([&w, broadcastMessage, rid]() {
-                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                    });
-                }
-            });
-        }
-
-        /** fire connection open webhook */
-        if (getWebhookStatus(Webhooks::ON_SUBSCRIBE) == 1) {
-            std::ostringstream payload;
-            payload << "{\"event\":\"ON_SUBSCRIBE\", " << "\"uid\":\"" << jsonEscape(ws->getUserData()->uid) << "\", "
-                    << "\"rid\":\"" << jsonEscape(rid) << "\", " << "\"connections_in_room\":\"" << size << "\"}";
-
-            std::string body = payload.str();
-
-            sendHTTPSPOSTRequestFireAndForget(UserData::getInstance().webHookBaseUrl,
-                                              UserData::getInstance().webhookPath, body, {});
-        }
-
-        /** Room ocuupied webhooks */
-        if (size == 1) {
-            if (getWebhookStatus(Webhooks::ON_ROOM_OCCUPIED) == 1) {
-                std::ostringstream payload;
-                payload << "{\"event\":\"ON_ROOM_OCCUPIED\", " << "\"uid\":\"" << jsonEscape(ws->getUserData()->uid)
-                        << "\", " << "\"rid\":\"" << jsonEscape(rid) << "\"}";
-
-                std::string body = payload.str();
-
-                sendHTTPSPOSTRequestFireAndForget(UserData::getInstance().webHookBaseUrl,
-                                                  UserData::getInstance().webhookPath, body, {});
-            }
-        }
-    }
-}
 
 /** calculate latency for each thread */
 void update_ema(double newLatency) {
     localEma = alpha * newLatency + (1 - alpha) * localEma;
 }
-
 
 /* uWebSocket worker thread function. */
 void worker_t::work() {
@@ -1629,6 +52,15 @@ void worker_t::work() {
     app_ = std::make_shared<SLApp>(SLApp());
 
     db_handler = std::make_unique<MySQLConnectionHandler>();
+
+    /** Periodic LMDB flush (1s): the write batch is thread-local, so on a quiet
+     *  worker a partially-filled batch would otherwise sit in memory indefinitely —
+     *  invisible to readers until the next fanned-out flush and lost outright on a
+     *  crash. An empty batch makes this a no-op. */
+    {
+        struct us_timer_t* lmdbFlushTimer = us_create_timer((struct us_loop_t*)loop_, 0, 0);
+        us_timer_set(lmdbFlushTimer, [](struct us_timer_t*) { write_worker("", "", true); }, 1000, 1000);
+    }
 
     /* Very simple WebSocket broadcasting echo server */
     app_->ws<PerSocketData>(
@@ -1739,11 +171,23 @@ void worker_t::work() {
                      }
 
                      /** Check if API key is valid or not */
-                     if (UserData::getInstance().clientApiKey != upgradeData->key) {
+                     if (!constantTimeEquals(upgradeData->key, UserData::getInstance().clientApiKey)) {
                          totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
                          log(LogLevel::WARN, "Connection rejected (invalid client api key): uid=", upgradeData->uid);
 
                          res->cork([res]() { res->writeStatus("401 Unauthorized")->end("INVALID_API_KEY"); });
+
+                         return;
+                     }
+
+                     /** Per-user token (no-op while connection_token_secret is unset): the uid
+         *  header is otherwise client-asserted, so one leaked client key could
+         *  impersonate any user. */
+                     if (!verifyConnectionToken(upgradeData->uid, req->getHeader("token"))) {
+                         totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
+                         log(LogLevel::WARN, "Connection rejected (invalid token): uid=", upgradeData->uid);
+
+                         res->cork([res]() { res->writeStatus("401 Unauthorized")->end("INVALID_TOKEN"); });
 
                          return;
                      }
@@ -1818,6 +262,8 @@ void worker_t::work() {
                      }
 
                      {
+                         /** structural mutation of an iterated registry map */
+                         std::shared_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                          tbb::concurrent_hash_map<std::string, bool>::accessor user_accessor;
                          if (ThreadSafe::uid.insert(user_accessor, userId)) {
                              user_accessor->second = true;
@@ -1905,6 +351,13 @@ void worker_t::work() {
 
                                      update_ema(elapsed);
 
+                                     /** publish this thread's EMA so /metrics can average across
+                      *  workers instead of reporting whichever thread served it */
+                                     size_t workerIdx = static_cast<size_t>(this - ::workers.data());
+                                     if (workerIdx < 256) {
+                                         workerEmaLatencyMs[workerIdx].store(localEma, std::memory_order_relaxed);
+                                     }
+
                                      return;
                                  }
 
@@ -1932,27 +385,16 @@ void worker_t::work() {
                                  };
 
                                  {
-                                     /** the sender must already be subscribed to `rid`; fetch its room type */
-                                     tbb::concurrent_hash_map<
-                                         std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::const_accessor
-                                         uid_to_rid_outer_accessor;
-
-                                     if (ThreadSafe::uidToRoomMapping.find(uid_to_rid_outer_accessor, uid)) {
-                                         auto& inner_map = uid_to_rid_outer_accessor->second;
-
-                                         tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor
-                                             uid_to_rid_inner_accessor;
-
-                                         if (!inner_map.find(uid_to_rid_inner_accessor, rid)) {
-                                             sendNoSubscriptionFound();
-                                             return;
-                                         }
-
-                                         roomType = uid_to_rid_inner_accessor->second;
-                                     } else {
+                                     /** the sender must already be subscribed to `rid`; fetch its room type
+                      *  from the SOCKET-LOCAL map (mutated only on this thread by
+                      *  openConnection/closeConnection) — no locks, no shared state */
+                                     auto roomIt = userData.rooms.find(rid);
+                                     if (roomIt == userData.rooms.end()) {
                                          sendNoSubscriptionFound();
                                          return;
                                      }
+
+                                     roomType = roomIt->second;
                                  }
 
                                  /** Fast path: skip the room-disabled lookup when nobody is disabled anywhere. */
@@ -1991,6 +433,17 @@ void worker_t::work() {
                                      if (std::this_thread::get_id() != w.thread_->get_id()) {
                                          w.loop_->defer([&w, data, ridShared, opCode]() {
                                              w.app_->publish(*ridShared, *data, opCode, true);
+
+                                             /** count THIS worker's local subscribers too, so the
+                              *  messages_sent/payload metrics reflect true cross-worker
+                              *  fan-out (previously only the publisher's worker counted
+                              *  and the totals undercounted by ~worker-count) */
+                                             unsigned int subs = w.app_->numSubscribers(*ridShared);
+                                             globalMessagesSent.fetch_add(static_cast<unsigned long long>(subs),
+                                                                          std::memory_order_relaxed);
+                                             totalPayloadSent.fetch_add(static_cast<unsigned long long>(data->size()) *
+                                                                            static_cast<unsigned long long>(subs),
+                                                                        std::memory_order_relaxed);
                                          });
                                      }
                                  }
@@ -2079,14 +532,23 @@ void worker_t::work() {
                      log(LogLevel::DEBUG, "Connection closed: uid=", userId, " (",
                          globalConnectionCounter.load(std::memory_order_relaxed), " remaining)");
 
+                     /** A socket that lost the duplicate-uid race in .open gets end()ed while
+         *  the WINNER's registry entries are live under the same uid — so only
+         *  tear down the uid-keyed state if it belongs to THIS socket, otherwise
+         *  this close would silently deregister the surviving connection. */
+                     bool ownedRegistryEntry = false;
+
                      {
                          tbb::concurrent_hash_map<std::string, WebSocketData>::accessor conn_accessor;
-                         if (ThreadSafe::connections.find(conn_accessor, userId)) {
+                         if (ThreadSafe::connections.find(conn_accessor, userId) && conn_accessor->second.ws == ws) {
                              ThreadSafe::connections.erase(conn_accessor);
+                             ownedRegistryEntry = true;
                          }
                      }
 
-                     {
+                     if (ownedRegistryEntry) {
+                         /** structural mutation of an iterated registry map */
+                         std::shared_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                          tbb::concurrent_hash_map<std::string, bool>::accessor uid_accessor;
                          if (ThreadSafe::uid.find(uid_accessor, userId)) {
                              ThreadSafe::uid.erase(uid_accessor);
@@ -2096,18 +558,22 @@ void worker_t::work() {
                      ws->unsubscribe(userId);
                      ws->unsubscribe(BROADCAST);
 
-                     /** close every room subscription for this uid, then drop the uid mapping */
-                     {
+                     /** close every room subscription for this uid, then drop the uid mapping.
+         *  Iterate the SOCKET-LOCAL map (owner thread; closeConnection with
+         *  isClosed=true doesn't mutate it) instead of the global one — no TBB
+         *  accessor is held across the closeConnection calls. */
+                     if (ownedRegistryEntry) {
+                         for (auto& entry : ws->getUserData()->rooms) {
+                             closeConnection(ws, this, entry.first, userId, entry.second, true);
+                         }
+                         ws->getUserData()->rooms.clear();
+
+                         /** drop the global (cross-thread view) mapping for this uid
+             *  (structural mutation of an iterated registry map) */
+                         std::shared_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                          tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, uint8_t>>::accessor
                              outer_accessor;
-
                          if (ThreadSafe::uidToRoomMapping.find(outer_accessor, userId)) {
-                             auto& inner_map = outer_accessor->second;
-
-                             for (auto& entry : inner_map) {
-                                 closeConnection(ws, this, entry.first, userId, entry.second, true);
-                             }
-
                              ThreadSafe::uidToRoomMapping.erase(outer_accessor);
                          }
                      }
@@ -2124,7 +590,7 @@ void worker_t::work() {
                  });
 
                  try {
-                     if (req->getHeader("api-key") != UserData::getInstance().adminApiKey) {
+                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                          if (!*isAborted) {
@@ -2143,7 +609,21 @@ void worker_t::work() {
                      if (!*isAborted) {
                          totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                         res->cork([res]() {
+                         /** average the per-worker latency EMAs (only workers that have
+                          *  measured anything) — previously this reported the EMA of
+                          *  whichever thread happened to serve /metrics, usually 0 */
+                         double emaSum = 0.0;
+                         int emaCount = 0;
+                         for (size_t i = 0; i < ::workers.size() && i < 256; ++i) {
+                             double v = workerEmaLatencyMs[i].load(std::memory_order_relaxed);
+                             if (v > 0.0) {
+                                 emaSum += v;
+                                 ++emaCount;
+                             }
+                         }
+                         double avgLatencyMs = (emaCount > 0) ? (emaSum / emaCount) : 0.0;
+
+                         res->cork([res, avgLatencyMs]() {
                              res->writeStatus("200 OK");
                              res->writeHeader("Content-Type", "application/json");
                              res->end(R"({"connections": )" +
@@ -2166,9 +646,13 @@ void worker_t::work() {
                                       std::to_string(totalSuccessWebhookCalls.load(std::memory_order_relaxed)) +
                                       R"(,"total_failed_webhook_calls": )" +
                                       std::to_string(totalFailedWebhookCalls.load(std::memory_order_relaxed)) +
-                                      R"(,"average_latency": )" + std::to_string(localEma) +
+                                      R"(,"average_latency": )" + std::to_string(avgLatencyMs) +
                                       R"(,"dropped_messages": )" +
-                                      std::to_string(droppedMessages.load(std::memory_order_relaxed)) + R"(})");
+                                      std::to_string(droppedMessages.load(std::memory_order_relaxed)) +
+                                      R"(,"dropped_log_lines": )" +
+                                      std::to_string(AsyncLogger::getInstance().droppedCount()) +
+                                      R"(,"dropped_webhook_events": )" + std::to_string(droppedWebhookCount()) +
+                                      R"(})");
                          });
                      }
                  } catch (std::exception& e) {
@@ -2198,7 +682,7 @@ void worker_t::work() {
                       std::string_view apiKey = req->getHeader("api-key");
 
                       /** Admin-key auth (self-hosted: no master shared-secret signature) */
-                      if (apiKey != UserData::getInstance().adminApiKey) {
+                      if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                           log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                           if (!*isAborted) {
@@ -2256,11 +740,28 @@ void worker_t::work() {
                                       }
 
                                       if (action == 2) {
-                                          log(LogLevel::INFO, "idle_timeout/max_lifetime changed: exiting in 1s so the "
-                                                              "process manager restarts with the new socket settings");
+                                          log(LogLevel::INFO, "socket-level settings changed: exiting shortly so the "
+                                                              "process manager restarts with the new values");
                                           std::thread([]() {
+                                              /** let the 200 response flush first */
                                               std::this_thread::sleep_for(std::chrono::seconds(1));
-                                              std::exit(0);
+
+                                              /** flush all persistence BEFORE exiting: per-worker
+                       *  thread-local LMDB batches, buffered MySQL rows, then
+                       *  a synchronous LMDB sync (MDB_WRITEMAP + exit() would
+                       *  otherwise lose recently committed pages). */
+                                              for (auto& w : ::workers) {
+                                                  w.loop_->defer([&w]() {
+                                                      write_worker("", "", true);
+                                                      w.db_handler->flushRemainingData();
+                                                  });
+                                              }
+                                              std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                                              mdb_env_sync(env, 1);
+
+                                              /** _Exit: static destruction with live worker
+                       *  threads hangs; everything durable is flushed */
+                                              std::_Exit(0);
                                           }).detach();
                                       }
                                   } catch (std::exception& e) {
@@ -2300,7 +801,7 @@ void worker_t::work() {
                  });
 
                  try {
-                     if (req->getHeader("api-key") != UserData::getInstance().adminApiKey) {
+                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                          if (!*isAborted) {
@@ -2370,7 +871,7 @@ void worker_t::work() {
                  });
 
                  try {
-                     if (req->getHeader("api-key") != UserData::getInstance().adminApiKey) {
+                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                          if (!*isAborted) {
@@ -2388,6 +889,9 @@ void worker_t::work() {
 
                      nlohmann::json data = nlohmann::json::array();
 
+                     /** EXCLUSIVE: iterating a registry map is only safe while no thread
+                      *  is inserting/erasing (all mutators hold registryIterationGuard shared) */
+                     std::unique_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                      for (const auto& [rid, users] : ThreadSafe::topics) {
                          nlohmann::json roomData;
                          roomData["rid"] = rid;
@@ -2436,7 +940,7 @@ void worker_t::work() {
                  });
 
                  try {
-                     if (req->getHeader("api-key") != UserData::getInstance().adminApiKey) {
+                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                          if (!*isAborted) {
@@ -2454,6 +958,8 @@ void worker_t::work() {
 
                      std::vector<std::string> orphanUids;
 
+                     /** EXCLUSIVE: iteration vs concurrent insert/erase (see registryIterationGuard) */
+                     std::unique_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                      for (auto it = ThreadSafe::uid.begin(); it != ThreadSafe::uid.end(); ++it) {
                          if (it->second) {
                              orphanUids.push_back(it->first);
@@ -2499,7 +1005,7 @@ void worker_t::work() {
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (apiKey != UserData::getInstance().adminApiKey) {
+                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                         if (!*isAborted) {
@@ -2596,18 +1102,22 @@ void worker_t::work() {
         .get(
             "/api/v1/users/subscribe/room/:rid",
             [this](auto* res, auto* req) {
-                std::atomic<bool> isAborted = false;
+                /** shared_ptr (not a stack flag): the private-room verification path
+                 *  completes ASYNCHRONOUSLY after this handler returns, so the abort
+                 *  flag must outlive the handler frame. Read/written only on this
+                 *  loop's thread (onAborted and the deferred completion both run here). */
+                auto isAborted = std::make_shared<bool>(false);
                 std::string rid = std::string(req->getParameter("rid"));
                 std::string uid = std::string(req->getHeader("uid"));
 
-                res->onAborted([&isAborted]() {
-                    isAborted.store(true);
+                res->onAborted([isAborted]() {
+                    *isAborted = true;
                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
                 });
 
                 try {
-                    if (req->getHeader("api-key") != UserData::getInstance().clientApiKey) {
-                        if (!isAborted.load()) {
+                    if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().clientApiKey)) {
+                        if (!*isAborted) {
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                             res->cork([res]() {
@@ -2620,15 +1130,33 @@ void worker_t::work() {
                         return;
                     }
 
-                    SLWebSocket* ws = nullptr;
+                    /** per-user token (no-op while connection_token_secret is unset) */
+                    if (!verifyConnectionToken(uid, req->getHeader("token"))) {
+                        if (!*isAborted) {
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                            res->cork([res]() {
+                                res->writeStatus("401 Unauthorized");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid or expired token!"})");
+                            });
+                        }
+
+                        return;
+                    }
+
                     worker_t* worker = nullptr;
 
                     {
-                        /** the caller UID must have an active connection on this server */
+                        /** the caller UID must have an active connection on this server.
+                         *  Only the worker pointer is taken out of the accessor scope:
+                         *  worker_t objects live for the process lifetime, whereas the raw
+                         *  ws pointer could be freed the moment the accessor is released,
+                         *  so ws is re-looked-up on the owner thread (runOnOwnerThread). */
                         tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
                         if (!ThreadSafe::connections.find(accessor, uid)) {
-                            if (!isAborted.load()) {
+                            if (!*isAborted) {
                                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                                 res->cork([res]() {
@@ -2641,12 +1169,11 @@ void worker_t::work() {
                             return;
                         }
 
-                        ws = accessor->second.ws;
                         worker = accessor->second.worker;
                     }
 
                     if (rid.empty() || rid.size() > 160) {
-                        if (!isAborted.load()) {
+                        if (!*isAborted) {
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                             res->cork([res]() {
@@ -2662,7 +1189,7 @@ void worker_t::work() {
                     /** checking if the correct room type is received */
                     uint8_t roomType = parseRoomType(rid);
                     if (roomType == 255) {
-                        if (!isAborted.load()) {
+                        if (!*isAborted) {
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                             res->cork([res]() {
@@ -2686,7 +1213,7 @@ void worker_t::work() {
 
                             tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
                             if (inner_map.find(inner_accessor, rid)) {
-                                if (!isAborted.load()) {
+                                if (!*isAborted) {
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                                     res->cork([res]() {
@@ -2709,7 +1236,7 @@ void worker_t::work() {
                         if (ThreadSafe::bannedConnections.find(outer_accessor, rid) &&
                             outer_accessor->second.count(uid)) {
 
-                            if (!isAborted.load()) {
+                            if (!*isAborted) {
                                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                                 res->cork([res]() {
@@ -2736,28 +1263,71 @@ void worker_t::work() {
                             std::string body = payload.str();
 
                             /** Note: the X-HMAC-Signature header is computed and added inside
-                     *  sendHTTPSPOSTRequestFireAndForget using the configured webhookSecret,
-                     *  so no signature needs to be built here. */
+                     *  the webhook sender using the configured webhookSecret, so no
+                     *  signature needs to be built here.
+                     *
+                     *  The verification webhook is a BLOCKING HTTPS round-trip (up to two
+                     *  3s connect attempts). It used to run right here on the event loop,
+                     *  freezing every connection on this worker while the endpoint was
+                     *  slow. Now it runs on a small bounded pool and completes back on
+                     *  this loop via defer; `res` stays valid because onAborted is
+                     *  registered and `isAborted` is only touched on this thread. */
+                            std::string baseURL = UserData::getInstance().webHookBaseUrl;
+                            std::string whPath = UserData::getInstance().webhookPath;
+                            uWS::Loop* httpLoop = uWS::Loop::get();
 
-                            int status =
-                                sendHTTPSPOSTRequestFireAndForget(UserData::getInstance().webHookBaseUrl,
-                                                                  UserData::getInstance().webhookPath, body, {}, true);
+                            bool queued = enqueueVerificationWebhook(
+                                baseURL, whPath, body,
+                                [httpLoop, res, isAborted, worker, uid, rid, roomType](int status) {
+                                httpLoop->defer([status, res, isAborted, worker, uid, rid, roomType]() {
+                                    if (*isAborted) {
+                                        return; /** client went away while we verified */
+                                    }
 
-                            if (status != 200) {
-                                if (!isAborted.load()) {
+                                    if (status != 200) {
+                                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                                        res->cork([res]() {
+                                            res->writeStatus("403 Forbidden");
+                                            res->writeHeader("Content-Type", "application/json");
+                                            res->end("{\"message\": \"You are not allowed to access this private "
+                                                     "room!\"}");
+                                        });
+                                        return;
+                                    }
+
+                                    runOnOwnerThread(worker, uid,
+                                                     [rid, roomType](SLWebSocket* aliveWs, worker_t* owner) {
+                                                         openConnection(aliveWs, owner, rid, roomType);
+                                                     });
+
+                                    totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                                    res->cork([res]() {
+                                        res->writeStatus("200 OK");
+                                        res->writeHeader("Content-Type", "application/json");
+                                        res->end(R"({"message": "Successfully subscribed to the given room!"})");
+                                    });
+                                });
+                                });
+
+                            if (!queued) {
+                                /** verification pool saturated (endpoint slow/down) — shed
+                     *  load instead of queueing unbounded latency */
+                                if (!*isAborted) {
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                                     res->cork([res]() {
-                                        res->writeStatus("403 Forbidden");
+                                        res->writeStatus("503 Service Unavailable");
                                         res->writeHeader("Content-Type", "application/json");
-                                        res->end("{\"message\": \"You are not allowed to access this private room!\"}");
+                                        res->end(R"({"message": "Verification is temporarily unavailable!"})");
                                     });
                                 }
-
-                                return;
                             }
+
+                            return; /** response completes asynchronously above */
                         } else {
-                            if (!isAborted.load()) {
+                            if (!*isAborted) {
                                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                                 res->cork([res]() {
@@ -2772,9 +1342,17 @@ void worker_t::work() {
                         }
                     }
 
-                    openConnection(ws, worker, rid, roomType);
+                    /** Run the subscribe on the socket's owner thread; the connection is
+                     *  re-validated there, so a socket that closed since the check above
+                     *  is simply skipped instead of being dereferenced after free. As a
+                     *  bonus, openConnection now always runs on the owner thread, so the
+                     *  SOMEONE_JOINED_THE_ROOM broadcast covers every worker (previously
+                     *  the HTTP-handling worker was skipped). */
+                    runOnOwnerThread(worker, uid, [rid, roomType](SLWebSocket* aliveWs, worker_t* owner) {
+                        openConnection(aliveWs, owner, rid, roomType);
+                    });
 
-                    if (!isAborted.load()) {
+                    if (!*isAborted) {
                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                         res->cork([res]() {
@@ -2784,7 +1362,7 @@ void worker_t::work() {
                         });
                     }
                 } catch (std::exception& e) {
-                    if (!isAborted.load()) {
+                    if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                         res->cork([res]() {
@@ -2809,7 +1387,7 @@ void worker_t::work() {
                  try {
                      std::string_view apiKey = req->getHeader("api-key");
 
-                     if (apiKey != UserData::getInstance().adminApiKey) {
+                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                          if (!*isAborted) {
@@ -2828,6 +1406,8 @@ void worker_t::work() {
                      /** Prepare the response JSON array */
                      nlohmann::json data = nlohmann::json::array();
 
+                     /** EXCLUSIVE: iteration vs concurrent insert/erase (see registryIterationGuard) */
+                     std::unique_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                      for (const auto& [uid, rids] : ThreadSafe::uidToRoomMapping) {
                          nlohmann::json roomData;
                          roomData["uid"] = uid;
@@ -2880,7 +1460,7 @@ void worker_t::work() {
                   try {
                       std::string_view apiKey = req->getHeader("api-key");
 
-                      if (apiKey != UserData::getInstance().adminApiKey) {
+                      if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                           log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
                           if (!*isAborted) {
                               totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
@@ -2985,7 +1565,7 @@ void worker_t::work() {
                  });
 
                  try {
-                     if (req->getHeader("api-key") != UserData::getInstance().clientApiKey) {
+                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().clientApiKey)) {
                          if (!*isAborted) {
                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2999,11 +1579,27 @@ void worker_t::work() {
                          return;
                      }
 
-                     SLWebSocket* ws = nullptr;
+                     /** per-user token (no-op while connection_token_secret is unset) */
+                     if (!verifyConnectionToken(uid, req->getHeader("token"))) {
+                         if (!*isAborted) {
+                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                             res->cork([res]() {
+                                 res->writeStatus("401 Unauthorized");
+                                 res->writeHeader("Content-Type", "application/json");
+                                 res->end(R"({"message": "Invalid or expired token!"})");
+                             });
+                         }
+
+                         return;
+                     }
+
                      worker_t* worker = nullptr;
 
                      {
-                         /** checking if there even is a connection with the provided UID */
+                         /** checking if there even is a connection with the provided UID.
+                          *  Only the (process-lifetime) worker pointer leaves the accessor
+                          *  scope; the ws itself is re-looked-up on its owner thread. */
                          tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
                          if (!ThreadSafe::connections.find(accessor, uid)) {
@@ -3020,7 +1616,6 @@ void worker_t::work() {
                              return;
                          }
 
-                         ws = accessor->second.ws;
                          worker = accessor->second.worker;
                      }
 
@@ -3096,8 +1691,12 @@ void worker_t::work() {
                          }
                      }
 
-                     /** cloding the connection for the given rid */
-                     closeConnection(ws, worker, rid, uid, roomType);
+                     /** close the connection for the given rid on the socket's owner
+                      *  thread; re-validated there so a just-closed socket is skipped
+                      *  instead of dereferenced after free */
+                     runOnOwnerThread(worker, uid, [rid, uid, roomType](SLWebSocket* aliveWs, worker_t* owner) {
+                         closeConnection(aliveWs, owner, rid, uid, roomType);
+                     });
 
                      if (!*isAborted) {
                          totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
@@ -3132,7 +1731,7 @@ void worker_t::work() {
                 });
 
                 try {
-                    if (req->getHeader("api-key") != UserData::getInstance().adminApiKey) {
+                    if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                         if (!*isAborted) {
@@ -3223,7 +1822,7 @@ void worker_t::work() {
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (apiKey != UserData::getInstance().adminApiKey) {
+                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                         if (!*isAborted) {
@@ -3319,7 +1918,7 @@ void worker_t::work() {
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (apiKey != UserData::getInstance().adminApiKey) {
+                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                         if (!*isAborted) {
@@ -3415,7 +2014,7 @@ void worker_t::work() {
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (apiKey != UserData::getInstance().adminApiKey) {
+                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                         if (!*isAborted) {
@@ -3466,8 +2065,18 @@ void worker_t::work() {
                                         return;
                                     }
 
-                                    /** banning the user */
+                                    /** Banning happens in two passes. Pass 1 records the bans
+                                     *  while holding the bannedConnections accessor; pass 2
+                                     *  disconnects AFTER that accessor is released. Disconnecting
+                                     *  inline used to self-deadlock: closeConnection() erases
+                                     *  bannedConnections[rid] when the banned user was the room's
+                                     *  last member, and TBB accessors are not reentrant, so the
+                                     *  thread blocked forever on the accessor it already held. */
+                                    std::vector<std::string> newlyBanned;
+
                                     {
+                                        /** structural mutation of an iterated registry map */
+                                        std::shared_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                                         tbb::concurrent_hash_map<std::string,
                                                                  tbb::concurrent_hash_map<std::string, bool>>::accessor
                                             global_accessor;
@@ -3483,32 +2092,45 @@ void worker_t::work() {
                                             if (!global_accessor->second.find(user_accessor, uid)) {
                                                 global_accessor->second.insert(user_accessor, uid);
                                                 user_accessor->second = true;
-
-                                                /** Fetch the connection for the given uid from the connections map */
-                                                tbb::concurrent_hash_map<std::string, WebSocketData>::accessor
-                                                    conn_accessor;
-                                                if (ThreadSafe::connections.find(conn_accessor, uid)) {
-                                                    SLWebSocket* ws = conn_accessor->second.ws;
-                                                    worker_t* worker = conn_accessor->second.worker;
-
-                                                    /** Disconnect the WebSocket or perform any other disconnection logic */
-                                                    if (rid == "global") {
-                                                        worker->loop_->defer([ws]() {
-                                                            ws->end(1008, "{\"data\":\"YOU_HAVE_BEEN_BANNED\", "
-                                                                          "\"source\":\"admin\"}");
-                                                        });
-                                                    } else {
-                                                        /** cloding the connection for the given rid */
-                                                        closeConnection(ws, worker, rid, uid, roomType);
-
-                                                        /** Tell the user in case of room ban */
-                                                        ws->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", "
-                                                                 "\"source\":\"admin\", \"rid\":\"" +
-                                                                     jsonEscape(rid) + "\"}",
-                                                                 uWS::OpCode::TEXT, true);
-                                                    }
-                                                }
+                                                newlyBanned.push_back(uid);
                                             }
+                                        }
+                                    }
+
+                                    /** Pass 2: disconnect each newly banned user on the thread
+                                     *  that owns its socket (runOnOwnerThread re-validates the
+                                     *  connection there, so no raw ws pointer crosses threads). */
+                                    for (const auto& uid : newlyBanned) {
+                                        worker_t* worker = nullptr;
+                                        {
+                                            tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor
+                                                conn_accessor;
+                                            if (ThreadSafe::connections.find(conn_accessor, uid)) {
+                                                worker = conn_accessor->second.worker;
+                                            }
+                                        }
+
+                                        if (!worker) {
+                                            continue; /** banned uid has no live connection */
+                                        }
+
+                                        if (rid == "global") {
+                                            runOnOwnerThread(worker, uid, [](SLWebSocket* aliveWs, worker_t*) {
+                                                aliveWs->end(1008, "{\"data\":\"YOU_HAVE_BEEN_BANNED\", "
+                                                                   "\"source\":\"admin\"}");
+                                            });
+                                        } else {
+                                            runOnOwnerThread(
+                                                worker, uid,
+                                                [rid, uid, roomType](SLWebSocket* aliveWs, worker_t* owner) {
+                                                    closeConnection(aliveWs, owner, rid, uid, roomType);
+
+                                                    /** Tell the user in case of room ban */
+                                                    aliveWs->send("{\"data\":\"YOU_HAVE_BEEN_BANNED\", "
+                                                                  "\"source\":\"admin\", \"rid\":\"" +
+                                                                      jsonEscape(rid) + "\"}",
+                                                                  uWS::OpCode::TEXT, true);
+                                                });
                                         }
                                     }
                                 }
@@ -3565,7 +2187,7 @@ void worker_t::work() {
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (apiKey != UserData::getInstance().adminApiKey) {
+                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                         if (!*isAborted) {
@@ -3599,6 +2221,8 @@ void worker_t::work() {
                                     std::vector<std::string> uids = item["uid"].get<std::vector<std::string>>();
 
                                     {
+                                        /** structural mutation of an iterated registry map */
+                                        std::shared_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                                         tbb::concurrent_hash_map<std::string,
                                                                  tbb::concurrent_hash_map<std::string, bool>>::accessor
                                             global_accessor;
@@ -3672,7 +2296,7 @@ void worker_t::work() {
                      std::string_view apiKey = req->getHeader("api-key");
                      std::string_view action = req->getParameter("action");
 
-                     if (apiKey != UserData::getInstance().adminApiKey) {
+                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                          if (!*isAborted) {
@@ -3748,7 +2372,7 @@ void worker_t::work() {
                     std::string_view apiKey = req->getHeader("api-key");
                     std::string_view action = req->getParameter("action");
 
-                    if (apiKey != UserData::getInstance().adminApiKey) {
+                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
 
                         if (!*isAborted) {
@@ -3783,6 +2407,8 @@ void worker_t::work() {
 
                                     if (action == "enable") {
                                         {
+                                            /** structural mutation of an iterated registry map */
+                                            std::shared_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                                             tbb::concurrent_hash_map<
                                                 std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor
                                                 global_accessor;
@@ -3805,6 +2431,8 @@ void worker_t::work() {
                                         }
                                     } else if (action == "disable") {
                                         {
+                                            /** structural mutation of an iterated registry map */
+                                            std::shared_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                                             tbb::concurrent_hash_map<
                                                 std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor
                                                 global_accessor;
@@ -3894,7 +2522,7 @@ void worker_t::work() {
                  try {
                      std::string_view apiKey = req->getHeader("api-key");
 
-                     if (apiKey != UserData::getInstance().adminApiKey) {
+                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
                          if (!*isAborted) {
                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
@@ -3911,6 +2539,8 @@ void worker_t::work() {
 
                      nlohmann::json data = nlohmann::json::array();
 
+                     /** EXCLUSIVE: iteration vs concurrent insert/erase (see registryIterationGuard) */
+                     std::unique_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                      for (const auto& [rid, users] : ThreadSafe::bannedConnections) {
                          nlohmann::json roomData;
                          roomData["rid"] = rid;
@@ -3961,7 +2591,7 @@ void worker_t::work() {
                  try {
                      std::string_view apiKey = req->getHeader("api-key");
 
-                     if (apiKey != UserData::getInstance().adminApiKey) {
+                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
                          if (!*isAborted) {
                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
@@ -3978,6 +2608,8 @@ void worker_t::work() {
 
                      nlohmann::json json_response = nlohmann::json::array();
 
+                     /** EXCLUSIVE: iteration vs concurrent insert/erase (see registryIterationGuard) */
+                     std::unique_lock<std::shared_mutex> iterGuard(registryIterationGuard);
                      for (const auto& [rid, users] : ThreadSafe::disabledConnections) {
                          nlohmann::json roomData;
                          roomData["rid"] = rid;
@@ -4030,6 +2662,39 @@ void worker_t::work() {
                      std::string_view apiKey = req->getHeader("api-key");
                      std::string_view uid = req->getHeader("uid");
 
+                     /** API key FIRST: the membership checks below return distinguishable
+                      *  errors, so running them pre-auth let unauthenticated callers probe
+                      *  which rooms exist and who is in them. */
+                     if (!constantTimeEquals(apiKey, UserData::getInstance().clientApiKey)) {
+
+                         if (!*isAborted) {
+                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                             res->cork([res]() {
+                                 res->writeStatus("403 Forbidden");
+                                 res->writeHeader("Content-Type", "application/json");
+                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
+                             });
+                         }
+
+                         return;
+                     }
+
+                     /** per-user token (no-op while connection_token_secret is unset) */
+                     if (!verifyConnectionToken(std::string(uid), req->getHeader("token"))) {
+                         if (!*isAborted) {
+                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+
+                             res->cork([res]() {
+                                 res->writeStatus("401 Unauthorized");
+                                 res->writeHeader("Content-Type", "application/json");
+                                 res->end(R"({"message": "Invalid or expired token!"})");
+                             });
+                         }
+
+                         return;
+                     }
+
                      {
                          tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor
                              outer_accessor;
@@ -4070,30 +2735,36 @@ void worker_t::work() {
                          }
                      }
 
-                     write_worker(std::string(rid), "", true);
+                     /** Cache-room messages sit in PER-WORKER thread-local LMDB write
+                      *  batches, so flushing on this thread alone (the old behavior) missed
+                      *  everything buffered by the other workers and returned stale data.
+                      *  Fan a flush out to every worker loop and only read + respond once
+                      *  the last one has committed. `rid` is copied out of the request
+                      *  (string_views into req die when this handler returns). */
+                     auto pending = std::make_shared<std::atomic<size_t>>(::workers.size());
+                     uWS::Loop* httpLoop = uWS::Loop::get();
+                     std::string ridStr(rid);
 
-                     if (apiKey != UserData::getInstance().clientApiKey) {
+                     for (auto& w : ::workers) {
+                         w.loop_->defer([pending, httpLoop, res, isAborted, ridStr]() {
+                             /** flushes THIS worker's thread-local batch */
+                             write_worker(ridStr, "", true);
 
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+                             if (pending->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                                 /** last flush done — respond on the thread that owns `res`
+                  *  (isAborted is only read there, same thread as onAborted) */
+                                 httpLoop->defer([res, isAborted, ridStr]() {
+                                     if (!*isAborted) {
+                                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                             res->cork([res]() {
-                                 res->writeStatus("403 Forbidden");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
-                         return;
-                     }
-
-                     if (!*isAborted) {
-                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res, rid]() {
-                             res->writeStatus("200 OK");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(read_worker(std::string(rid)));
+                                         res->cork([res, ridStr]() {
+                                             res->writeStatus("200 OK");
+                                             res->writeHeader("Content-Type", "application/json");
+                                             res->end(read_worker(ridStr));
+                                         });
+                                     }
+                                 });
+                             }
                          });
                      }
                  } catch (std::exception& e) {
@@ -4122,7 +2793,7 @@ void worker_t::work() {
                  try {
                      std::string_view apiKey = req->getHeader("api-key");
 
-                     if (apiKey != UserData::getInstance().adminApiKey) {
+                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
                          if (!*isAborted) {
                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
@@ -4264,79 +2935,7 @@ void worker_t::work() {
 
     app_->run();
 
-    io_context.stop();
+    stopWebhookIoContext();
 
     log(LogLevel::INFO, "Thread ", std::this_thread::get_id(), " exiting");
-}
-
-
-int main() {
-    /** SL_LOG_LEVEL=debug|info|warn|error (default info) */
-    if (const char* lv = std::getenv("SL_LOG_LEVEL")) {
-        std::string v(lv);
-        if (v == "debug")
-            g_logLevel = static_cast<int>(LogLevel::DEBUG);
-        else if (v == "info")
-            g_logLevel = static_cast<int>(LogLevel::INFO);
-        else if (v == "warn")
-            g_logLevel = static_cast<int>(LogLevel::WARN);
-        else if (v == "error")
-            g_logLevel = static_cast<int>(LogLevel::ERROR);
-    }
-
-    log(LogLevel::INFO, "Main thread Id : ", std::this_thread::get_id());
-
-    /** Raise the fd soft limit to the hard limit: every connection costs an fd, and
-     *  the common 10240 soft default caps the server at ~10k connections — worse,
-     *  accept() then fails with EMFILE in a hot loop and the server appears hung. */
-    {
-        struct rlimit rl;
-        if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < rl.rlim_max) {
-            rl.rlim_cur = rl.rlim_max;
-            setrlimit(RLIMIT_NOFILE, &rl);
-            getrlimit(RLIMIT_NOFILE, &rl);
-        }
-        log(LogLevel::INFO, "File descriptor limit : ", (unsigned long long)rl.rlim_cur);
-    }
-
-    /** Config is compiled in (UserData defaults); just init the feature-status map. */
-    populateFeatureStatus(UserData::getInstance().features);
-
-    if (UserData::getInstance().clientApiKey == "change-me-client-key" ||
-        UserData::getInstance().adminApiKey == "change-me-admin-key") {
-        log(LogLevel::WARN, "SECURITY WARNING: default API key(s) in use. "
-                            "Set real keys in UserData (clientApiKey / adminApiKey) and rebuild, "
-                            "or override them via /api/v1/invalidate before exposing this server.");
-    }
-
-    init_env();
-    log(LogLevel::INFO,
-        "Standalone mode (plaintext HTTP/WS; TLS terminated upstream), in-memory config, port=", SL_LISTEN_PORT);
-
-    int numThreads = std::thread::hardware_concurrency();
-    /** Optional override: cap worker threads independent of core count (e.g. when
-     *  the process is pinned to fewer cores than the host reports). */
-    if (const char* t = std::getenv("SL_THREADS")) {
-        int n = std::atoi(t);
-        if (n > 0)
-            numThreads = n;
-    }
-    if (numThreads < 1)
-        numThreads = 1;
-
-    log(LogLevel::INFO, "Number of threads available : ", numThreads);
-
-    workers.resize(numThreads);
-
-    for (auto& w : workers) {
-        w.thread_ = std::make_shared<std::thread>([&w]() { w.work(); });
-    }
-
-    std::for_each(workers.begin(), workers.end(), [](worker_t& w) { w.thread_->join(); });
-
-    log(LogLevel::INFO, "All workers exited; shutting down.");
-
-    mdb_env_close(env);
-
-    return 0;
 }
