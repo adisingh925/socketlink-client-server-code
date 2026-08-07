@@ -73,6 +73,47 @@ the per-delivery `send()` syscall. Capping `SO_SNDBUF` cost **no** throughput:
 the 1-CPU container measured 989,294 deliveries/s before the fix and 987,198
 after, with memory dropping from hundreds of MiB to 14 MiB at the same load.
 
+## Pure WebSocket pub/sub — one 1 CPU / 1 GB container
+
+`tests/run_capacity_1gb.sh`. No MySQL, no webhooks, no LMDB (plain `pub-grp-*`
+rooms never touch the store — confirmed by `total_local_db_writes` = 0 in every
+phase). Fresh container per phase; `loadgen` client container on `slnet`.
+
+**Fan-out ceiling** (5,000 connections, rooms of 100, 256 B):
+
+| Offered | Delivered | Bandwidth | Drops |
+|---|---|---|---|
+| 495k/s | 493,489/s | 149 MB/s | **0** |
+| 990k/s | **987,517/s** | **298 MB/s** | **0** ← lossless ceiling |
+| 1.49M/s | 201,375/s | 61 MB/s | 76,853 (saturated) |
+
+**Payload sweep** (5,000 connections, rooms of 10, 225k deliveries/s offered):
+
+| Payload | Delivered | Bandwidth | Drops |
+|---|---|---|---|
+| 64 B | 224,914/s | 25 MB/s | 0 |
+| 1 KB | 224,912/s | 241 MB/s | 0 |
+| 10 KB | 69,605/s | **699 MB/s** | 112,904 (bandwidth-bound) |
+
+64 B and 1 KB deliver at an *identical* message rate — proof the cost is
+per-message (the `send()` syscall), not per-byte, until bandwidth binds at 10 KB.
+
+**Connections and overload:**
+
+| Test | Result | Memory |
+|---|---|---|
+| 10,000 connections | 0 drops | 21 MiB |
+| 20,000 connections | 0 drops | 41 MiB |
+| **45,000 attempted** | exactly **21,299 admitted** (the self-clamp), 23,701 rejected, 376,505 deliveries/s, **0 drops**, `OOMKilled=false` | 40 MiB |
+
+Note how cheap *lightly loaded* connections are: 20k cost 41 MiB (~2 KB each),
+versus the ~40 KB the clamp budgets for a connection under heavy fan-out. The
+clamp is deliberately sized for the worst case. For a light-traffic workload
+(chat presence, notifications) you can raise the ceiling by lowering the
+estimate — `SL_BYTES_PER_CONN=8192` yields a ~106k cap on 1 GB — but only if you
+are confident the fan-out stays light, because the memory it protects against is
+the kind admission control cannot reclaim.
+
 ## Ceilings (C++ `loadgen`, rooms of 100)
 
 | Target | Command | Delivered | Bandwidth | Drops |
