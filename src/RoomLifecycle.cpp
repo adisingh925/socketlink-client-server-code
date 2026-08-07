@@ -52,7 +52,10 @@ void closeConnection(SLWebSocket* ws, worker_t* worker, std::string rid, std::st
         }
     }
 
-    int size = 0;
+    /** -1 = the room was not in `topics` at all, which is NOT the same as "the
+     *  room is now empty". Using 0 for both made a missing room wipe the cache
+     *  entry and fire ON_ROOM_VACATED for a room that may still have members. */
+    int size = -1;
 
     /** remove the user from the room in topics (mutation: shared iteration guard,
      *  scoped so it is NOT held across the defers/webhooks below) */
@@ -172,26 +175,21 @@ void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t 
             std::shared_lock<std::shared_mutex> iterGuard(registryIterationGuard);
             tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor topicsAccessor;
 
-            if (ThreadSafe::topics.find(topicsAccessor, rid)) {
-                auto& innerMap = topicsAccessor->second;
+            /** Single insert covers both cases: it creates the room entry if absent
+             *  and otherwise hands back the existing one. The old find-then-insert
+             *  pair was not atomic — if another thread created the room in between,
+             *  insert() returned false, the locally built inner map (holding THIS
+             *  uid) was discarded, and the subscriber went missing from `topics`
+             *  while `size` was reported as 1. */
+            ThreadSafe::topics.insert(topicsAccessor, rid);
+            auto& innerMap = topicsAccessor->second;
 
-                tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
-
-                if (innerMap.insert(innerAccessor, uid)) {
-                    innerAccessor->second = true;
-                }
-
-                size = innerMap.size();
-            } else {
-                tbb::concurrent_hash_map<std::string, bool> newInnerMap;
-                newInnerMap.emplace(uid, true);
-
-                if (ThreadSafe::topics.insert(topicsAccessor, rid)) {
-                    topicsAccessor->second = std::move(newInnerMap);
-                }
-
-                size = 1;
+            tbb::concurrent_hash_map<std::string, bool>::accessor innerAccessor;
+            if (innerMap.insert(innerAccessor, uid)) {
+                innerAccessor->second = true;
             }
+
+            size = static_cast<int>(innerMap.size());
         }
 
         log(LogLevel::DEBUG, "Subscribed: uid=", uid, " rid=", rid, " (room size ", size, ")");

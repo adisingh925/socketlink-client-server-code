@@ -30,7 +30,7 @@
 #include "ServerState.h"
 #include "Util.h"
 
-/** map to store enabled webhooks and features (no need to make it thread safe) */
+/** enabled-webhook bitmap; guarded by webhookMutex (read on every event) */
 std::unordered_map<Webhooks, int> webhookStatus;
 std::shared_mutex webhookMutex;
 

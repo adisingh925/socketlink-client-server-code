@@ -1,8 +1,6 @@
 #include "LmdbStore.h"
 
-#include <cerrno>
 #include <cstdlib>
-#include <mutex>
 #include <tuple>
 #include <vector>
 
@@ -16,7 +14,6 @@ MDB_env* env;
  *  opening/closing one inside every transaction takes a lock and is wasteful. */
 MDB_dbi g_dbi;
 
-std::mutex write_worker_mutex;
 
 void init_env() {
     if (mdb_env_create(&env) != 0) {
@@ -77,7 +74,10 @@ void write_worker(const std::string& room_id, const std::string& message_content
     }
 
     /** commit once the batch reaches its size limit, or when a commit is forced */
-    if (batch.size() >= UserData::getInstance().lmdbCommitBatchSize || (needsCommit && batch.size() > 0)) {
+    /** cast the (clamped, >= 1) configured size so the comparison is not
+     *  size_t-vs-int, which would make a negative value compare as enormous */
+    if (batch.size() >= static_cast<size_t>(UserData::getInstance().lmdbCommitBatchSize) ||
+        (needsCommit && batch.size() > 0)) {
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             log(LogLevel::ERROR, "Failed to begin write transaction.");
             batch.clear();
@@ -117,8 +117,10 @@ void delete_worker(const std::string& room_id) {
     MDB_txn* txn;
     MDB_val key;
 
-    std::lock_guard<std::mutex> lock(write_worker_mutex);
-
+    /** No mutex needed: LMDB serialises write transactions itself (mdb_txn_begin
+     *  for a write txn blocks until the single writer slot is free). The mutex
+     *  that used to be here guarded only this function, never write_worker(),
+     *  so it protected nothing the library did not already guarantee. */
     if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
         log(LogLevel::ERROR, "Failed to begin delete transaction.");
         return;
@@ -143,8 +145,9 @@ std::string read_worker(const std::string& room_id) {
     MDB_txn* txn;
     MDB_val key, value;
 
-    if (mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn) != 0) {
-        log(LogLevel::ERROR, "Failed to begin read transaction : ", mdb_strerror(errno));
+    /** LMDB returns its error code; it does not set errno */
+    if (int rc = mdb_txn_begin(env, nullptr, MDB_RDONLY, &txn); rc != 0) {
+        log(LogLevel::ERROR, "Failed to begin read transaction : ", mdb_strerror(rc));
         return "{}";
     }
 
@@ -154,7 +157,7 @@ std::string read_worker(const std::string& room_id) {
     if (mdb_get(txn, g_dbi, &key, &value) == 0) {
         std::string message_content((char*)value.mv_data, value.mv_size);
 
-        mdb_txn_commit(txn);
+        mdb_txn_abort(txn); /** read-only txn: abort is the cheap, idiomatic close */
 
         return message_content;
     }

@@ -221,6 +221,11 @@ inline unsigned long long totalDroppedMessages() {
  *  get the optimisation; beyond it the publish path falls back to waking all. */
 inline constexpr size_t MAX_MASKED_WORKERS = 64;
 
+/** Cap on an admin/REST request body. Without it a client can stream unbounded
+ *  bytes into the per-request accumulation string; the largest legitimate body
+ *  is a bulk ban/broadcast list, which is far below this. */
+inline constexpr size_t MAX_REQUEST_BODY_BYTES = 8u * 1024u * 1024u;
+
 /** Index of a worker within the global `workers` vector. */
 inline size_t workerIndex(const worker_t* w) { return (size_t)(w - ::workers.data()); }
 
@@ -282,17 +287,10 @@ inline void roomWorkersRemove(const std::string& rid, size_t idx) {
  * Keep lock scopes tight: never hold this across defers, webhooks, or sends.
  */
 
-/** Sending Constants */
-constexpr const char* ROOM_NAME_INVALID = "ROOM_NAME_INVALID";
-constexpr const char* API_KEY_INVALID = "API_KEY_INVALID";
-constexpr const char* CONNECTION_LIMIT_EXCEEDED = "CONNECTION_LIMIT_EXCEEDED";
-constexpr const char* SOMEONE_JOINED_THE_ROOM = "SOMEONE_JOINED_THE_ROOM";
-constexpr const char* CONNECTED_TO_ROOM = "CONNECTED_TO_ROOM";
-constexpr const char* SOMEONE_LEFT_THE_ROOM = "SOMEONE_LEFT_THE_ROOM";
-constexpr const char* YOU_ARE_RATE_LIMITED = "YOU_ARE_RATE_LIMITED";
-constexpr const char* RATE_LIMIT_LIFTED = "RATE_LIMIT_LIFTED";
+/** Topic every connection is subscribed to, for server-wide admin broadcasts.
+ *  (The other event-name constants that used to live here were never referenced —
+ *  every send site writes the string inline — so they were removed.) */
 constexpr const char* BROADCAST = "SOCKETLINK_BROADCAST";
-constexpr const char* YOU_HAVE_BEEN_BANNED = "YOU_HAVE_BEEN_BANNED";
 
 /**
  * Run `fn(ws, worker)` on the event-loop thread that owns `uid`'s websocket, but

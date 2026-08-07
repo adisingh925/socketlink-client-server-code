@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 #include <thread>
 
 #include "Config.h"
@@ -148,7 +147,7 @@ namespace {
     }
 } // namespace
 
-unsigned long long currentAnonRssBytes() {
+unsigned long long currentMemoryWorkingSetBytes() {
     /**
      * The number that matters is the one the OOM killer uses: the cgroup's
      * charge, NOT this process's anonymous RSS. With ~100k sockets most of the
@@ -356,14 +355,14 @@ void startMemoryGuard() {
 
     /** memory in use before any connections exist — everything above this is
      *  attributable to connections, which is what the adaptive cap divides by */
-    g_baselineBytes.store(currentAnonRssBytes(), std::memory_order_relaxed);
+    g_baselineBytes.store(currentMemoryWorkingSetBytes(), std::memory_order_relaxed);
 
     std::thread([limit]() {
         const unsigned long long high = (unsigned long long)(limit * kHighWatermark);
         const unsigned long long low = (unsigned long long)(limit * kLowWatermark);
         int tick = 0;
         while (true) {
-            unsigned long long rss = currentAnonRssBytes();
+            unsigned long long rss = currentMemoryWorkingSetBytes();
             bool paused = g_paused.load(std::memory_order_relaxed);
 
             /** Re-size the cap every ~500ms. Fast on purpose: a 1-core server

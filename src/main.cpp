@@ -74,7 +74,7 @@ int main() {
      *  The compiled-in default (100k) exceeds a 1 GB budget by ~2.5x, and an
      *  unreachable cap is worse than none: the kernel OOM-kills the process —
      *  taking every established connection with it — before the cap sheds
-     *  anything. ~15 KB/connection measured (incl. kernel socket buffers). */
+     *  anything. ~40 KB/connection measured for an ACTIVE connection. */
     /** The operator's intent, captured before clamping: the adaptive cap may grow
      *  back up to this but never past it. SL_MAX_CONNECTIONS overrides the
      *  compiled-in default without a rebuild (memory still governs — the clamp

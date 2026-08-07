@@ -33,10 +33,11 @@ unsigned long long memoryLimitBytes();
  *  (which includes KERNEL socket buffers — the dominant cost at high connection
  *  counts) minus reclaimable file cache. Falls back to process RSS when not
  *  containerized. 0 if unavailable. */
-unsigned long long currentAnonRssBytes();
+unsigned long long currentMemoryWorkingSetBytes();
 
 /** How many connections fit in `limitBytes`, after reserving a base allowance.
- *  Uses ~15 KB/connection (measured: 12-15 KB incl. kernel socket buffers).
+ *  Uses ~40 KB/connection (measured cost of an ACTIVE connection: ~8 KB app
+ *  state plus ~32 KB of kernel socket buffers).
  *  SL_BYTES_PER_CONN overrides the per-connection estimate. */
 int safeConnectionCap(unsigned long long limitBytes);
 

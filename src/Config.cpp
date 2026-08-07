@@ -1,5 +1,6 @@
 #include "Config.h"
 
+#include <algorithm>
 #include <ctime>
 #include <mutex>
 #include <shared_mutex>
@@ -33,6 +34,9 @@ void populateFeatureStatus(uint32_t bitmask) {
         featureStatus[feature] = (bitmask & (1 << i)) ? 1 : 0;
     }
 }
+
+/** defined below; declared here because populateUserData calls it */
+static bool applyBackpressureInvariant(UserData& ud);
 
 int populateUserData(std::string data) {
     nlohmann::json parsedJson = nlohmann::json::parse(data);
@@ -110,12 +114,15 @@ int populateUserData(std::string data) {
         }
     }
 
+    /** Batch sizes are used as a divisor (`% batchSize`) and as a size comparison,
+     *  so 0 is a SIGFPE and a negative value converts to a huge size_t that never
+     *  triggers a commit. Clamp both to at least 1. */
     if (parsedJson.contains("lmdb_commit_batch_size") && !parsedJson["lmdb_commit_batch_size"].is_null()) {
-        userData.lmdbCommitBatchSize = parsedJson["lmdb_commit_batch_size"].get<int>();
+        userData.lmdbCommitBatchSize = std::max(1, parsedJson["lmdb_commit_batch_size"].get<int>());
     }
 
     if (parsedJson.contains("db_commit_batch_size") && !parsedJson["db_commit_batch_size"].is_null()) {
-        userData.mysqlDBCommitBatchSize = parsedJson["db_commit_batch_size"].get<int>();
+        userData.mysqlDBCommitBatchSize = std::max(1, parsedJson["db_commit_batch_size"].get<int>());
     }
 
     /** Socket-level settings are frozen into the uWS behavior at startup — an
@@ -201,14 +208,15 @@ int populateUserData(std::string data) {
         needsDBUpdate = -1;
     }
 
+    /** keep the backpressure budget consistent with any new message-size limit,
+     *  BEFORE publishing (and without re-taking the lock we already hold) */
+    if (applyBackpressureInvariant(userData)) {
+        needsDBUpdate = 2; /** socket-level setting changed: needs the restart path */
+    }
+
     /** Publish the fully-built config snapshot atomically (readers switch over on
      *  their next getInstance()). The previous snapshot is intentionally leaked. */
     UserData::publish(new UserData(std::move(userData)));
-
-    /** keep the backpressure budget consistent with any new message-size limit */
-    if (enforceBackpressureInvariant()) {
-        needsDBUpdate = 2; /** socket-level setting changed: needs the restart path */
-    }
 
     return needsDBUpdate;
 }
@@ -225,24 +233,34 @@ void refreshWebhookIP() {
     UserData::publish(new UserData(std::move(userData)));
 }
 
-bool enforceBackpressureInvariant() {
-    std::lock_guard<std::mutex> writeLock(configWriteMutex);
-    UserData userData = UserData::getInstance();
-
+/** Raise `ud`'s backpressure budget if it cannot hold several max-size messages.
+ *  Takes no lock — callers either already hold configWriteMutex (populateUserData)
+ *  or take it themselves (enforceBackpressureInvariant). Locking here as well
+ *  self-deadlocked every /api/v1/invalidate on the non-recursive mutex. */
+static bool applyBackpressureInvariant(UserData& ud) {
     /** four messages' worth: enough that a momentary stall buffers rather than
      *  drops, while still bounding per-connection memory */
-    unsigned long long required = (unsigned long long)userData.msgSizeAllowedInBytes * 4;
+    unsigned long long required = (unsigned long long)ud.msgSizeAllowedInBytes * 4;
     if (required > 0xFFFFFFFFULL) {
         required = 0xFFFFFFFFULL;
     }
-    if (userData.maxBackpressureInBytes >= required) {
+    if (ud.maxBackpressureInBytes >= required) {
         return false;
     }
 
-    log(LogLevel::WARN, "max_backpressure_in_bytes (", userData.maxBackpressureInBytes,
-        ") is below the message size limit (", userData.msgSizeAllowedInBytes,
+    log(LogLevel::WARN, "max_backpressure_in_bytes (", ud.maxBackpressureInBytes,
+        ") is below the message size limit (", ud.msgSizeAllowedInBytes,
         "); a single large message would overflow it and be dropped — raising to ", required);
-    userData.maxBackpressureInBytes = (unsigned int)required;
+    ud.maxBackpressureInBytes = (unsigned int)required;
+    return true;
+}
+
+bool enforceBackpressureInvariant() {
+    std::lock_guard<std::mutex> writeLock(configWriteMutex);
+    UserData userData = UserData::getInstance();
+    if (!applyBackpressureInvariant(userData)) {
+        return false;
+    }
     UserData::publish(new UserData(std::move(userData)));
     return true;
 }

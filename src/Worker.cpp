@@ -358,14 +358,14 @@ void worker_t::work() {
                          }
                      }
 
-                     if (ws->getUserData()->sendingAllowed) {
+                     if (userData.sendingAllowed) {
                          /** check if the backpressure exceeded the given limit */
                          if (ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes) {
                              ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT,
                                       true);
                              workerCounters[workerIndex(this)].droppedMessages.fetch_add(
                                  1, std::memory_order_relaxed);
-                             ws->getUserData()->sendingAllowed = false;
+                             userData.sendingAllowed = false;
                          } else {
                              auto sendInvalidJson = [&]() {
                                  ws->send(R"({"data":"INVALID_JSON","source":"server"})", uWS::OpCode::TEXT, true);
@@ -401,7 +401,7 @@ void worker_t::work() {
 
                                      /** publish this thread's EMA so /metrics can average across
                       *  workers instead of reporting whichever thread served it */
-                                     size_t workerIdx = static_cast<size_t>(this - ::workers.data());
+                                     size_t workerIdx = workerIndex(this);
                                      if (workerIdx < 256) {
                                          workerEmaLatencyMs[workerIdx].store(localEma, std::memory_order_relaxed);
                                      }
@@ -417,9 +417,14 @@ void worker_t::work() {
                                      return;
                                  }
 
-                                 std::string message;
+                                 /** string_view into the parse buffer, not a copy: this is the
+                     *  largest field on the hot path and everything downstream
+                     *  (escaping, persistence, webhook) accepts a view. Named
+                     *  msgBody because `message` is the enclosing handler's
+                     *  parameter — the old local shadowed it. */
+                                 std::string_view msgBody;
                                  if (auto msgField = parsedData["message"]; !msgField.error()) {
-                                     message = std::string(msgField.get_string().value());
+                                     msgBody = msgField.get_string().value();
                                  } else {
                                      sendInvalidJson();
                                      return;
@@ -470,38 +475,44 @@ void worker_t::work() {
 
                                  /** Build the published envelope once, escaping the user-controlled
                      *  message and room id so a quote/backslash/control char cannot break
-                     *  out of the JSON string or inject fields. */
-                                 auto data = std::make_shared<std::string>();
-                                 data->reserve(message.size() + rid.size() + 40);
-                                 *data += "{\"data\":\"";
-                                 appendJsonEscaped(*data, message);
-                                 *data += "\",\"source\":\"user\",\"rid\":\"";
-                                 appendJsonEscaped(*data, rid);
-                                 *data += "\"}";
+                     *  out of the JSON string or inject fields. Built in a reused
+                     *  thread-local buffer, so a room served entirely by this worker
+                     *  publishes with ZERO heap allocations. */
+                                 static thread_local std::string envelope;
+                                 envelope.clear();
+                                 envelope.reserve(msgBody.size() + rid.size() + 40);
+                                 envelope += "{\"data\":\"";
+                                 appendJsonEscaped(envelope, msgBody);
+                                 envelope += "\",\"source\":\"user\",\"rid\":\"";
+                                 appendJsonEscaped(envelope, rid);
+                                 envelope += "\"}";
 
                                  /** publish locally on this worker */
-                                 ws->publish(rid, *data, opCode, true);
+                                 ws->publish(rid, envelope, opCode, true);
 
-                                 /** Publish on every other worker's loop. The payload and room id are
-                     *  shared via shared_ptr so they are not copied once per worker thread. */
-                                 auto ridShared = std::make_shared<std::string>(rid);
                                  const size_t selfIdx = workerIndex(this);
                                  /** SL_NO_WORKER_MASK=1 restores the old wake-everyone behaviour,
                       *  for A/B measurement of this optimisation */
                                  static const bool maskDisabled = std::getenv("SL_NO_WORKER_MASK") != nullptr;
                                  const bool maskUsable = !maskDisabled && ::workers.size() <= MAX_MASKED_WORKERS;
 
-                                 for (size_t wi = 0; wi < ::workers.size(); ++wi) {
-                                     if (wi == selfIdx) {
-                                         continue; /** already published locally above */
-                                     }
-                                     /** Skip workers with no subscriber of this room. This is the
-                          *  scaling fix: previously every publish woke every other
-                          *  worker's loop, so most wakeups delivered nothing. */
-                                     if (maskUsable && !(workerMask & (1ULL << wi))) {
-                                         continue;
-                                     }
-                                     {
+                                 /** which OTHER workers need this message */
+                                 uint64_t remoteMask = maskUsable ? workerMask : ~0ULL;
+                                 if (::workers.size() < MAX_MASKED_WORKERS) {
+                                     remoteMask &= (1ULL << ::workers.size()) - 1ULL;
+                                 }
+                                 remoteMask &= ~(1ULL << selfIdx);
+
+                                 /** Only pay for the shared copies when there is somewhere to send
+                     *  them; a room confined to this worker skips both allocations. */
+                                 if (remoteMask != 0) {
+                                     auto data = std::make_shared<std::string>(envelope);
+                                     auto ridShared = std::make_shared<std::string>(rid);
+
+                                     for (size_t wi = 0; wi < ::workers.size(); ++wi) {
+                                         if (!(remoteMask & (1ULL << wi))) {
+                                             continue;
+                                         }
                                          worker_t& w = ::workers[wi];
                                          w.loop_->defer([&w, data, ridShared, opCode]() {
                                              w.app_->publish(*ridShared, *data, opCode, true);
@@ -535,7 +546,7 @@ void worker_t::work() {
                                  workerCounters[selfIdx].messagesSent.fetch_add(
                                      static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
                                  workerCounters[selfIdx].payloadSent.fetch_add(
-                                     static_cast<unsigned long long>(data->size()) *
+                                     static_cast<unsigned long long>(envelope.size()) *
                                          static_cast<unsigned long long>(subscribers),
                                      std::memory_order_relaxed);
 
@@ -546,14 +557,14 @@ void worker_t::work() {
                                      roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
                                      /** store the latest message under the room id (batched; the read
                          *  endpoint forces a flush before reading) */
-                                     write_worker(rid, std::string(message));
+                                     write_worker(rid, std::string(msgBody));
                                      totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
 
                                      /** SQL integration works in cache channels only */
                                      if (getFeatureStatus(Features::ENABLE_MYSQL_INTEGRATION) == 1) {
                                          /** hand the row to the dedicated writer thread — the
                           *  blocking batched INSERT no longer runs on this loop */
-                                         MySQLWriter::getInstance().enqueue(getCurrentSQLTime(), std::string(message),
+                                         MySQLWriter::getInstance().enqueue(getCurrentSQLTime(), std::string(msgBody),
                                                                             uid, rid);
                                      }
                                  }
@@ -562,7 +573,7 @@ void worker_t::work() {
                                      std::ostringstream payload;
                                      payload << "{\"event\":\"ON_MESSAGE\", " << "\"uid\":\"" << jsonEscape(uid)
                                              << "\", " << "\"rid\":\"" << jsonEscape(rid) << "\", " << "\"message\":\""
-                                             << jsonEscape(message) << "\"}";
+                                             << jsonEscape(msgBody) << "\"}";
 
                                      std::string body = payload.str();
 
@@ -734,7 +745,7 @@ void worker_t::work() {
                                       R"(,"dropped_webhook_events": )" + std::to_string(droppedWebhookCount()) +
                                       R"(,"dropped_db_rows": )" +
                                       std::to_string(MySQLWriter::getInstance().droppedCount()) +
-                                      R"(,"memory_working_set_bytes": )" + std::to_string(currentAnonRssBytes()) +
+                                      R"(,"memory_working_set_bytes": )" + std::to_string(currentMemoryWorkingSetBytes()) +
                                       R"(,"memory_limit_bytes": )" + std::to_string(memoryLimitBytes()) +
                                       R"(,"admission_paused": )" + (admissionPaused() ? "true" : "false") +
                                       R"(,"rejected_memory_pressure": )" + std::to_string(memoryRejectionCount()) +
@@ -744,7 +755,7 @@ void worker_t::work() {
                                       std::to_string(measuredBytesPerConnection()) + R"(})");
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -792,8 +803,11 @@ void worker_t::work() {
                       body.reserve(1024);
 
                       res->onData(
-                          [res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
-                              body.append(data.data(), data.length());
+                          [res, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
+                              if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating */
+                        }
+                        body.append(data.data(), data.length());
 
                               if (last) {
                                   try {
@@ -843,7 +857,7 @@ void worker_t::work() {
                                               std::_Exit(0);
                                           }).detach();
                                       }
-                                  } catch (std::exception& e) {
+                                  } catch (const std::exception&) {
                                       if (!*isAborted) {
                                           totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -856,7 +870,7 @@ void worker_t::work() {
                                   }
                               }
                           });
-                  } catch (std::exception& e) {
+                  } catch (const std::exception&) {
                       if (!*isAborted) {
                           totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -923,7 +937,7 @@ void worker_t::work() {
                              res->end(R"({"message": "MySQL data synced successfully!"})");
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -992,7 +1006,7 @@ void worker_t::work() {
                              res->end(data.dump());
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -1054,7 +1068,7 @@ void worker_t::work() {
                              res->end(data.dump());
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -1101,8 +1115,11 @@ void worker_t::work() {
 
                     body.reserve(1024);
 
-                    res->onData([res, req, body = std::move(body), isAborted](std::string_view data,
+                    res->onData([res, body = std::move(body), isAborted](std::string_view data,
                                                                               bool last) mutable {
+                        if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating */
+                        }
                         body.append(data.data(), data.length());
 
                         if (last) {
@@ -1150,11 +1167,11 @@ void worker_t::work() {
                                         res->end(data.dump());
                                     });
                                 }
-                            } catch (std::exception& e) {
+                            } catch (const std::exception&) {
                                 if (!*isAborted) {
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                                    res->cork([res, e]() {
+                                    res->cork([res]() {
                                         res->writeStatus("400 Bad Request");
                                         res->writeHeader("Content-Type", "application/json");
                                         res->end(R"({"message": "Invalid JSON format!"})");
@@ -1163,7 +1180,7 @@ void worker_t::work() {
                             }
                         }
                     });
-                } catch (std::exception& e) {
+                } catch (const std::exception&) {
                     if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -1437,7 +1454,7 @@ void worker_t::work() {
                             res->end(R"({"message": "Successfully subscribed to the given room!"})");
                         });
                     }
-                } catch (std::exception& e) {
+                } catch (const std::exception&) {
                     if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -1510,7 +1527,7 @@ void worker_t::work() {
                              res->end(response);
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -1556,8 +1573,11 @@ void worker_t::work() {
                       body.reserve(1024);
 
                       res->onData(
-                          [res, req, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
-                              body.append(data.data(), data.length());
+                          [res, body = std::move(body), isAborted](std::string_view data, bool last) mutable {
+                              if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating */
+                        }
+                        body.append(data.data(), data.length());
 
                               if (last) {
                                   try {
@@ -1604,11 +1624,11 @@ void worker_t::work() {
                                               res->end(data.dump());
                                           });
                                       }
-                                  } catch (std::exception& e) {
+                                  } catch (const std::exception&) {
                                       if (!*isAborted) {
                                           totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                                          res->cork([res, e]() {
+                                          res->cork([res]() {
                                               res->writeStatus("400 Bad Request");
                                               res->writeHeader("Content-Type", "application/json");
                                               res->end(R"({"message": "Invalid JSON format!"})");
@@ -1617,7 +1637,7 @@ void worker_t::work() {
                                   }
                               }
                           });
-                  } catch (std::exception& e) {
+                  } catch (const std::exception&) {
                       if (!*isAborted) {
                           totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -1783,7 +1803,7 @@ void worker_t::work() {
                              res->end(R"({"message": "Successfully unsubscribed from the given room!"})");
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -1827,8 +1847,11 @@ void worker_t::work() {
 
                     body.reserve(1024);
 
-                    res->onData([res, req, body = std::move(body), isAborted](std::string_view data,
+                    res->onData([res, body = std::move(body), isAborted](std::string_view data,
                                                                               bool last) mutable {
+                        if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating */
+                        }
                         body.append(data.data(), data.length());
 
                         if (last) {
@@ -1858,11 +1881,11 @@ void worker_t::work() {
                                             R"({"message": "Successfully broadcasted the message to everyone on the server!"})");
                                     });
                                 }
-                            } catch (std::exception& e) {
+                            } catch (const std::exception&) {
                                 if (!*isAborted) {
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                                    res->cork([res, e]() {
+                                    res->cork([res]() {
                                         res->writeStatus("400 Bad Request");
                                         res->writeHeader("Content-Type", "application/json");
                                         res->end(R"({"message": "Invalid JSON format!"})");
@@ -1871,7 +1894,7 @@ void worker_t::work() {
                             }
                         }
                     });
-                } catch (std::exception& e) {
+                } catch (const std::exception&) {
                     if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -1905,7 +1928,7 @@ void worker_t::work() {
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                             res->cork([res]() {
-                                res->writeStatus("403");
+                                res->writeStatus("401 Unauthorized");
                                 res->writeHeader("Content-Type", "application/json");
                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                             });
@@ -1918,8 +1941,11 @@ void worker_t::work() {
 
                     body.reserve(1024);
 
-                    res->onData([res, req, body = std::move(body), isAborted](std::string_view data,
+                    res->onData([res, body = std::move(body), isAborted](std::string_view data,
                                                                               bool last) mutable {
+                        if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating */
+                        }
                         body.append(data.data(), data.length());
 
                         if (last) {
@@ -1954,7 +1980,7 @@ void worker_t::work() {
                                             R"({"message": "Successfully broadcasted the message to the given rooms!"})");
                                     });
                                 }
-                            } catch (std::exception& e) {
+                            } catch (const std::exception&) {
                                 if (!*isAborted) {
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -1967,7 +1993,7 @@ void worker_t::work() {
                             }
                         }
                     });
-                } catch (std::exception& e) {
+                } catch (const std::exception&) {
                     if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2001,7 +2027,7 @@ void worker_t::work() {
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                             res->cork([res]() {
-                                res->writeStatus("403");
+                                res->writeStatus("401 Unauthorized");
                                 res->writeHeader("Content-Type", "application/json");
                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                             });
@@ -2014,8 +2040,11 @@ void worker_t::work() {
 
                     body.reserve(1024);
 
-                    res->onData([res, req, body = std::move(body), isAborted](std::string_view data,
+                    res->onData([res, body = std::move(body), isAborted](std::string_view data,
                                                                               bool last) mutable {
+                        if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating */
+                        }
                         body.append(data.data(), data.length());
 
                         if (last) {
@@ -2050,7 +2079,7 @@ void worker_t::work() {
                                             R"({"message": "Successfully broadcasted the message to the given connections!"})");
                                     });
                                 }
-                            } catch (std::exception& e) {
+                            } catch (const std::exception&) {
                                 if (!*isAborted) {
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2063,7 +2092,7 @@ void worker_t::work() {
                             }
                         }
                     });
-                } catch (std::exception& e) {
+                } catch (const std::exception&) {
                     if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2097,7 +2126,7 @@ void worker_t::work() {
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                             res->cork([res]() {
-                                res->writeStatus("403");
+                                res->writeStatus("401 Unauthorized");
                                 res->writeHeader("Content-Type", "application/json");
                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                             });
@@ -2110,8 +2139,11 @@ void worker_t::work() {
 
                     body.reserve(1024);
 
-                    res->onData([res, req, body = std::move(body), isAborted](std::string_view data,
+                    res->onData([res, body = std::move(body), isAborted](std::string_view data,
                                                                               bool last) mutable {
+                        if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating */
+                        }
                         body.append(data.data(), data.length());
 
                         if (last) {
@@ -2223,7 +2255,7 @@ void worker_t::work() {
                                             R"({"message": "Given users are successfully banned from the given rooms!"})");
                                     });
                                 }
-                            } catch (std::exception& e) {
+                            } catch (const std::exception&) {
                                 if (!*isAborted) {
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2236,7 +2268,7 @@ void worker_t::work() {
                             }
                         }
                     });
-                } catch (std::exception& e) {
+                } catch (const std::exception&) {
                     if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2270,7 +2302,7 @@ void worker_t::work() {
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                             res->cork([res]() {
-                                res->writeStatus("403");
+                                res->writeStatus("401 Unauthorized");
                                 res->writeHeader("Content-Type", "application/json");
                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                             });
@@ -2283,8 +2315,11 @@ void worker_t::work() {
 
                     body.reserve(1024);
 
-                    res->onData([res, req, body = std::move(body), isAborted](std::string_view data,
+                    res->onData([res, body = std::move(body), isAborted](std::string_view data,
                                                                               bool last) mutable {
+                        if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating */
+                        }
                         body.append(data.data(), data.length());
 
                         if (last) {
@@ -2332,7 +2367,7 @@ void worker_t::work() {
                                         log(LogLevel::INFO, "Admin API: users unbanned via /api/v1/rooms/users/unban");
                                     });
                                 }
-                            } catch (std::exception& e) {
+                            } catch (const std::exception&) {
                                 if (!*isAborted) {
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2345,7 +2380,7 @@ void worker_t::work() {
                             }
                         }
                     });
-                } catch (std::exception& e) {
+                } catch (const std::exception&) {
                     if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2379,7 +2414,7 @@ void worker_t::work() {
                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                              res->cork([res]() {
-                                 res->writeStatus("403");
+                                 res->writeStatus("401 Unauthorized");
                                  res->writeHeader("Content-Type", "application/json");
                                  res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                              });
@@ -2420,7 +2455,7 @@ void worker_t::work() {
                                  res->end(R"({"message": "Messaging successfully disabled for everyone!"})");
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2446,7 +2481,10 @@ void worker_t::work() {
 
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
-                    std::string_view action = req->getParameter("action");
+                    /** COPY, not a view: `action` is read inside the onData callback, which
+                     *  runs after this handler returns and the HttpRequest is destroyed —
+                     *  a dangling view here decided enable-vs-disable. */
+                    std::string action(req->getParameter("action"));
 
                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
@@ -2455,7 +2493,7 @@ void worker_t::work() {
                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                             res->cork([res]() {
-                                res->writeStatus("403");
+                                res->writeStatus("401 Unauthorized");
                                 res->writeHeader("Content-Type", "application/json");
                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                             });
@@ -2464,12 +2502,32 @@ void worker_t::work() {
                         return;
                     }
 
+                    /** reject an unknown action up front rather than mid-loop, where an
+                     *  empty body would skip validation entirely and still report success */
+                    if (action != "enable" && action != "disable") {
+                        if (!*isAborted) {
+                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+                            res->cork([res]() {
+                                res->writeStatus("400 Bad Request");
+                                res->writeHeader("Content-Type", "application/json");
+                                res->end(R"({"message": "Invalid action!"})");
+                            });
+                        }
+                        return;
+                    }
+
                     std::string body;
 
                     body.reserve(1024);
 
-                    res->onData([res, req, body = std::move(body), action, isAborted](std::string_view data,
-                                                                                      bool last) mutable {
+                    res->onData([res, body = std::move(body), action, isAborted](std::string_view data,
+                                                                                bool last) mutable {
+                        if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating (see MAX_REQUEST_BODY_BYTES) */
+                        }
+                        if (body.size() + data.size() > MAX_REQUEST_BODY_BYTES) {
+                            return; /** oversized body: stop accumulating */
+                        }
                         body.append(data.data(), data.length());
 
                         if (last) {
@@ -2559,7 +2617,7 @@ void worker_t::work() {
                                                 R"({"message": "Messaging successfully disabled for the given members in the given rooms!"})");
                                     });
                                 }
-                            } catch (std::exception& e) {
+                            } catch (const std::exception&) {
                                 if (!*isAborted) {
                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2572,7 +2630,7 @@ void worker_t::work() {
                             }
                         }
                     });
-                } catch (std::exception& e) {
+                } catch (const std::exception&) {
                     if (!*isAborted) {
                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2604,7 +2662,7 @@ void worker_t::work() {
                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                              res->cork([res]() {
-                                 res->writeStatus("403");
+                                 res->writeStatus("401 Unauthorized");
                                  res->writeHeader("Content-Type", "application/json");
                                  res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                              });
@@ -2641,7 +2699,7 @@ void worker_t::work() {
                              res->end(data.dump());
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2673,7 +2731,7 @@ void worker_t::work() {
                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
                              res->cork([res]() {
-                                 res->writeStatus("403");
+                                 res->writeStatus("401 Unauthorized");
                                  res->writeHeader("Content-Type", "application/json");
                                  res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
                              });
@@ -2710,7 +2768,7 @@ void worker_t::work() {
                              res->end(json_response.dump());
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2843,7 +2901,7 @@ void worker_t::work() {
                              }
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2891,13 +2949,18 @@ void worker_t::work() {
                              throw std::runtime_error("Failed to begin transaction.");
                          }
 
-                         /** drop all keys but keep the database structure (0 = truncate) */
+                         /** drop all keys but keep the database structure (0 = truncate).
+                          *  Null the handle after abort/commit: both FREE the txn, and the
+                          *  catch below aborts it again — a double free. */
                          if (mdb_drop(txn, g_dbi, 0) != 0) {
                              mdb_txn_abort(txn);
+                             txn = nullptr;
                              throw std::runtime_error("Failed to drop database.");
                          }
 
-                         if (mdb_txn_commit(txn) != 0) {
+                         int commitRc = mdb_txn_commit(txn);
+                         txn = nullptr; /** freed by mdb_txn_commit, success or not */
+                         if (commitRc != 0) {
                              throw std::runtime_error("Failed to commit transaction.");
                          }
 
@@ -2920,14 +2983,14 @@ void worker_t::work() {
                          if (!*isAborted) {
                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
-                             res->cork([res, e]() {
+                             res->cork([res]() {
                                  res->writeStatus("500 Internal Server Error");
                                  res->writeHeader("Content-Type", "application/json");
                                  res->end(R"({"message": "Internal server error!"})");
                              });
                          }
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2957,7 +3020,7 @@ void worker_t::work() {
                              res->end("pong!");
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 
@@ -2988,7 +3051,7 @@ void worker_t::work() {
                              res->end(R"({"message": "The requested resource is not found!"})");
                          });
                      }
-                 } catch (std::exception& e) {
+                 } catch (const std::exception&) {
                      if (!*isAborted) {
                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
 

@@ -52,6 +52,7 @@ private:
             conn = mysql_init(NULL);
             if (!conn) {
                 log(LogLevel::ERROR, "MySQL Initialization Error");
+                return; /** every call below would dereference a null handle */
             }
 
             /** connect timeout in seconds */
