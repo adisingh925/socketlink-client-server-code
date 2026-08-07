@@ -120,3 +120,6 @@ void refreshWebhookIP();
 /** Verify a `token` header proves ownership of `uid` (see connectionTokenSecret).
  *  Always true while token auth is disabled (empty secret). */
 bool verifyConnectionToken(const std::string& uid, std::string_view token);
+
+/** Publish a new snapshot with `connections` set to `n` (startup memory clamp). */
+void setConnectionLimit(int n);

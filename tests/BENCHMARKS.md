@@ -144,12 +144,59 @@ Measured by ramping connections until the container died
 socket buffers; ramp bursts cost more than steady state — 40k peaked at 592 MiB
 while ramping and settled to 216 MiB).
 
-> **Sizing rule:** the `connections` cap must be set from the memory budget.
-> The compiled-in default of **100,000 is unsafe for a 1 GB container** — the
-> process is OOM-killed long before the cap can shed load, so the hard limit
-> never protects the deployment. Use ≈ **40,000 per GB** (leaving headroom for
-> ramp bursts), i.e. `{"connections": 40000}` via `/api/v1/invalidate` for a
-> 1 GB container.
+> **This is now handled automatically** — see *OOM protection* below. The server
+> clamps its own `connections` cap to what the detected memory limit can hold
+> (~21k per GB for actively streaming connections) and pauses admission under
+> memory pressure. The numbers above were measured *before* that protection and
+> show the failure mode it prevents.
+
+## OOM protection
+
+The OOM was not simply "too many connections": the runaway term was **kernel
+socket buffer memory** (`sock` in `memory.stat`), which grew 55 → 293 → 604 MiB
+as a single CPU fell behind on draining fan-out.
+
+**Root cause (a real defect):** backpressure was measured at the wrong layer.
+`maxBackpressureInBytes` / `ws->getBufferedAmount()` only see uWS's *userspace*
+queue, while Linux autotunes the *kernel* send buffer in front of it into the
+megabytes. A slow consumer therefore looked healthy (4 KB limit never tripped)
+while memory piled up invisibly until the cgroup OOM-killed the process — taking
+every established connection with it.
+
+Three defences, in order of importance:
+
+1. **Bounded socket buffers** — `SO_SNDBUF`/`SO_RCVBUF` are set to 8 KB
+   (`SL_SOCKET_SNDBUF`) on every accepted socket. Writes then hit `EAGAIN`
+   quickly and uWS buffers in userspace, where the existing backpressure limit
+   and `.dropped` path actually engage.
+2. **Self-clamping connection cap** — at startup the server reads its cgroup
+   memory limit and clamps `connections` to `(limit − 192 MiB) / 40 KB`
+   (≈21k per GB). 40 KB is the measured cost of an *active* connection: ~8 KB
+   app/anon plus ~32 KB of kernel buffers. Override with `SL_BYTES_PER_CONN`.
+3. **Memory watchdog** — samples the cgroup working set (usage minus reclaimable
+   file cache — *not* process RSS, which excludes the kernel socket memory that
+   actually kills you) every 100 ms and pauses new connections above 80% of the
+   limit, resuming below 70%. Rejects with `503 SERVER_UNDER_MEMORY_PRESSURE`;
+   established connections keep running. Exposed as `admission_paused` and
+   `rejected_memory_pressure` in `/metrics`.
+
+Verified: the load that previously OOM-killed the container (100k connection
+attempts, 512-byte fan-out, two client containers) now peaks at 448 MiB with
+`sock` bounded at 181 MiB, delivers 32M messages and survives — without the
+watchdog even needing to fire. The watchdog was separately verified in isolation
+(with the clamp neutralised via `SL_BYTES_PER_CONN=1000`): it paused at 878 MiB,
+rejected 24,715 connections, recovered at 744 MiB, no OOM.
+
+Recommended run (the sysctls cap per-socket autotuning; `net.ipv4.tcp_mem` is
+*not* namespaced and Docker will refuse it):
+
+```
+docker run -d --name sl-server --cpus=1 --memory=1g \
+  --ulimit nofile=1048576:1048576 \
+  --sysctl net.ipv4.tcp_wmem="4096 8192 65536" \
+  --sysctl net.ipv4.tcp_rmem="4096 8192 65536" \
+  --network slnet -p 8080:8080 -e SL_THREADS=1 sl-server
+```
 
 Plaintext connections cost far less than the old TLS build's ~50 KB each, but
 more than the earlier ~11 KB estimate once kernel socket memory (charged to the

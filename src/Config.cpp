@@ -219,6 +219,13 @@ void refreshWebhookIP() {
     UserData::publish(new UserData(std::move(userData)));
 }
 
+void setConnectionLimit(int n) {
+    std::lock_guard<std::mutex> writeLock(configWriteMutex);
+    UserData userData = UserData::getInstance();
+    userData.connections = n;
+    UserData::publish(new UserData(std::move(userData)));
+}
+
 bool verifyConnectionToken(const std::string& uid, std::string_view token) {
     const std::string& secret = UserData::getInstance().connectionTokenSecret;
     if (secret.empty()) {

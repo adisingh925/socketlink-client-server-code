@@ -10,6 +10,7 @@
 #include "Config.h"
 #include "LmdbStore.h"
 #include "Logging.h"
+#include "MemoryGuard.h"
 #include "ServerState.h"
 
 int main() {
@@ -63,6 +64,31 @@ int main() {
                             "or override them at runtime via POST /api/v1/invalidate "
                             "{\"client_api_key\":..., \"admin_api_key\":...}.");
     }
+
+    /** Clamp the advertised connection limit to what memory can actually hold.
+     *  The compiled-in default (100k) exceeds a 1 GB budget by ~2.5x, and an
+     *  unreachable cap is worse than none: the kernel OOM-kills the process —
+     *  taking every established connection with it — before the cap sheds
+     *  anything. ~15 KB/connection measured (incl. kernel socket buffers). */
+    {
+        unsigned long long memLimit = memoryLimitBytes();
+        int safeCap = safeConnectionCap(memLimit);
+        int configured = UserData::getInstance().connections;
+        if (safeCap > 0 && configured > safeCap) {
+            log(LogLevel::WARN, "Connection limit ", configured, " exceeds what ", memLimit / (1024 * 1024),
+                " MiB can hold; clamping to ", safeCap,
+                " (override the estimate with SL_BYTES_PER_CONN, or raise the memory limit)");
+            setConnectionLimit(safeCap);
+        } else if (memLimit > 0) {
+            log(LogLevel::INFO, "Connection limit ", configured, " fits the ", memLimit / (1024 * 1024),
+                " MiB memory budget (headroom for ~", safeCap, ")");
+        }
+    }
+
+    /** Backstop for everything the static estimate cannot predict (large
+     *  payloads, backpressure buffers, queue growth): pause admission under
+     *  real memory pressure instead of dying. */
+    startMemoryGuard();
 
     init_env();
     log(LogLevel::INFO,

@@ -2,9 +2,12 @@
  * worker_t::work(): one uWS event loop per thread — the websocket behavior
  * (upgrade/open/message/drain/close) and every REST endpoint.
  */
+#include <sys/socket.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <shared_mutex>
 #include <sstream>
@@ -18,6 +21,7 @@
 #include "Config.h"
 #include "LmdbStore.h"
 #include "Logging.h"
+#include "MemoryGuard.h"
 #include "MySQLHandler.h"
 #include "RoomLifecycle.h"
 #include "ServerState.h"
@@ -190,6 +194,27 @@ void worker_t::work() {
                          return;
                      }
 
+                     /** Shed new connections while under memory pressure. Without this the
+         *  process is OOM-killed once admissions outrun the memory budget (a
+         *  1 GB container died at ~50k connections) — killing every established
+         *  connection too. Rejecting here keeps the server alive and serving. */
+                     if (admissionPaused()) {
+                         countMemoryRejection();
+                         totalConnectionErrors.fetch_add(1, std::memory_order_relaxed);
+
+                         static std::atomic<unsigned long long> memRejections{0};
+                         if (memRejections.fetch_add(1, std::memory_order_relaxed) % 1000 == 0) {
+                             log(LogLevel::WARN, "Rejecting connections: memory pressure (total rejected: ",
+                                 memoryRejectionCount(), ")");
+                         }
+
+                         res->cork([res]() {
+                             res->writeStatus("503 Service Unavailable")->end("SERVER_UNDER_MEMORY_PRESSURE");
+                         });
+
+                         return;
+                     }
+
                      /** Reserve a connection slot atomically so the limit is a HARD cap with no
          *  overshoot. Previously the check (here) and the increment (in .open) were at
          *  different lifecycle points, so concurrent upgrades could all pass the check
@@ -269,6 +294,30 @@ void worker_t::work() {
                              /** UID already exists, something went wrong */
                              ws->end();
                              return;
+                         }
+                     }
+
+                     /** Bound this socket's kernel send/receive buffers. Linux auto-tunes
+         *  them upward under load (tcp_wmem max is megabytes) and that memory is
+         *  charged to the container's cgroup, where it dominates at high
+         *  connection counts — it is what OOM-killed a 1 GB container even after
+         *  admission control was in place, because no amount of refusing NEW
+         *  connections reclaims buffers held by established ones. */
+                     {
+                         /** 8 KB (the kernel doubles it internally, so ~16 KB each
+             *  way). Measured: cgroup `sock` was the term that ran away —
+             *  55 MiB -> 293 MiB and beyond as a single CPU fell behind on
+             *  draining — because Linux autotunes send buffers into the
+             *  megabytes. Pair this with net.ipv4.tcp_mem as a hard ceiling. */
+                         static const int sndBuf = []() {
+                             const char* e = std::getenv("SL_SOCKET_SNDBUF");
+                             int v = e ? std::atoi(e) : 8192;
+                             return v > 0 ? v : 8192;
+                         }();
+                         int fd = (int)(intptr_t)ws->getNativeHandle();
+                         if (fd >= 0) {
+                             setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndBuf, sizeof(sndBuf));
+                             setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sndBuf, sizeof(sndBuf));
                          }
                      }
 
@@ -653,7 +702,12 @@ void worker_t::work() {
                                       std::to_string(AsyncLogger::getInstance().droppedCount()) +
                                       R"(,"dropped_webhook_events": )" + std::to_string(droppedWebhookCount()) +
                                       R"(,"dropped_db_rows": )" +
-                                      std::to_string(MySQLWriter::getInstance().droppedCount()) + R"(})");
+                                      std::to_string(MySQLWriter::getInstance().droppedCount()) +
+                                      R"(,"memory_working_set_bytes": )" + std::to_string(currentAnonRssBytes()) +
+                                      R"(,"memory_limit_bytes": )" + std::to_string(memoryLimitBytes()) +
+                                      R"(,"admission_paused": )" + (admissionPaused() ? "true" : "false") +
+                                      R"(,"rejected_memory_pressure": )" + std::to_string(memoryRejectionCount()) +
+                                      R"(})");
                          });
                      }
                  } catch (std::exception& e) {
