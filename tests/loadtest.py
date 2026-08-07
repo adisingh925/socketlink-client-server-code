@@ -20,7 +20,9 @@ import http.client
 
 CLIENT_KEY = "change-me-client-key"
 ADMIN_KEY  = "change-me-admin-key"
-PAYLOAD = b'{"rid":"%s","message":"x"}'  # filled per room
+def build_payload(rid: bytes, size: int) -> bytes:
+    """Publish frame body with a message field of `size` bytes (min 1)."""
+    return b'{"rid":"%s","message":"%s"}' % (rid, b"x" * max(1, size))
 
 def raise_fds():
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -156,7 +158,7 @@ async def worker_async(cfg, shard_start, shard_end, ready_q, result_q, go_time):
                     ok = await subscribe(pool, host, rid, uid)
                     if not ok:
                         w.close(); return
-                    frame = build_text_frame(PAYLOAD % rid.encode())
+                    frame = build_text_frame(build_payload(rid.encode(), cfg["size"]))
                     conns.append((r, w, frame))
                     reader_tasks.append(asyncio.create_task(reader_task(r, w)))
                     connected += 1
@@ -228,13 +230,14 @@ def main():
     ap.add_argument("--concurrency", type=int, default=400, help="concurrent handshakes per worker")
     ap.add_argument("--src-ips", default="127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4,127.0.0.5,127.0.0.6,127.0.0.7,127.0.0.8")
     ap.add_argument("--no-tls", action="store_true", help="plaintext ws:// (TLS terminated upstream)")
+    ap.add_argument("--size", type=int, default=1, help="message body size in bytes (server cap: 10 KB frame)")
     args = ap.parse_args()
 
     tls = not args.no_tls
     src_ips = args.src_ips.split(",")
     cfg = dict(host=args.host, port=args.port, group=args.group, rate=args.rate,
                duration=args.duration, pool=args.pool, concurrency=args.concurrency,
-               src_ips=src_ips, tls=tls)
+               src_ips=src_ips, tls=tls, size=args.size)
 
     per = args.conns // args.procs
     shards = [(i * per, (i + 1) * per if i < args.procs - 1 else args.conns) for i in range(args.procs)]
@@ -301,20 +304,21 @@ def main():
         "setup_s": round(setup_s, 1),
         "group_size": args.group,
         "rate_per_conn": args.rate,
+        "msg_body_bytes": args.size,
         "window_s": window,
         "client": {
             "sent": total_sent,
             "recv": total_recv,
             "send_rate_msgs_s": round(total_sent / window),
             "recv_rate_msgs_s": round(total_recv / window),
+            "recv_MB_s": round(total_recv * (args.size + 47) / window / 1e6, 1),
         },
         "connections_reported_start": conns_at_start,
         "connections_reported_end": conns_at_end,
         "server_metrics_delta": {
-            # NOTE: server messages_sent counts only *local* (same-worker) subscribers
-            # per publish (numSubscribers is per-app), so it undercounts cross-thread
-            # fan-out. client.recv is the truer delivery count.
-            "messages_sent_local_only": d_msgs,
+            # server messages_sent now counts every worker's local subscribers per
+            # publish (true cross-worker fan-out); should track client.recv closely.
+            "server_deliveries": d_msgs,
             "payload_bytes": d_pay,
             "payload_MB_s": round(d_pay / window / 1e6, 2),
             "dropped_messages": d_drop,

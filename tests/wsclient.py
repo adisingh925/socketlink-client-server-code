@@ -1,27 +1,20 @@
 #!/usr/bin/env python3
-"""Pure-stdlib WebSocket(TLS) client + test driver for SocketlinkClientServer.
+"""Pure-stdlib WebSocket client + test driver for the standalone Socketlink server
+(plaintext ws:// on 8080; TLS is terminated upstream by a load balancer in prod).
 Tests: functional parity (incl. JSON-escaping), latency, throughput (fan-out).
 Usage: wsclient.py <host> <port> <label>
 """
-import socket, ssl, base64, os, struct, json, time, sys, threading, http.client, statistics
+import socket, base64, os, struct, json, time, sys, threading, http.client, statistics
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
-PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9001
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
 LABEL = sys.argv[3] if len(sys.argv) > 3 else "server"
-CLIENT_KEY = "test-client-key"
-
-def _ctx():
-    c = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    c.check_hostname = False
-    c.verify_mode = ssl.CERT_NONE
-    return c
-CTX = _ctx()
+CLIENT_KEY = "change-me-client-key"
 
 class WS:
     def __init__(self, uid):
         self.uid = uid
-        raw = socket.create_connection((HOST, PORT), timeout=10)
-        self.sock = CTX.wrap_socket(raw, server_hostname="localtest.socketlink.io")
+        self.sock = socket.create_connection((HOST, PORT), timeout=10)
         key = base64.b64encode(os.urandom(16)).decode()
         req = (
             f"GET / HTTP/1.1\r\nHost: {HOST}:{PORT}\r\n"
@@ -123,7 +116,7 @@ class WS:
 
 def rest_subscribe(uid, rid, retries=15):
     for _ in range(retries):
-        conn = http.client.HTTPSConnection(HOST, PORT, context=CTX, timeout=10)
+        conn = http.client.HTTPConnection(HOST, PORT, timeout=10)
         try:
             conn.request("GET", f"/api/v1/users/subscribe/room/{rid}",
                          headers={"api-key": CLIENT_KEY, "uid": uid})

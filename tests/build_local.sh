@@ -17,14 +17,12 @@ REPO="$(cd "$SP/.." && pwd)"
 D="${SL_DEPS:-$HOME/sl-deps}"
 OUT_DIR="${OUT_DIR:-$HOME/sl-bin}"
 mkdir -p "$OUT_DIR"
-SRC="$REPO/examples/SocketlinkClientServer.cpp"
-
 INC="-I$D/uWebSockets/src -I$D/uWebSockets/uSockets/src -I$D/include -I/usr/include/mysql"
 LIB="$D/uWebSockets/uSockets/uSockets.a -lssl -lcrypto -lz -llmdb -ltbb -lmysqlclient -lpthread"
 STD="-std=c++17 -O2"
 
-echo "=== building $OUT_DIR/sl_new (current tree, -DLOCAL_TEST) ==="
-g++ $STD -DLOCAL_TEST $INC "$SRC" "$D/simdjson.cpp" $LIB -o "$OUT_DIR/sl_new"
+echo "=== building $OUT_DIR/sl_new (current tree: modular src/ via make) ==="
+make -C "$REPO" -j"$(nproc)" SL_DEPS="$D" && cp "$REPO/build/socketlink" "$OUT_DIR/sl_new"
 echo "new exit $?"
 
 echo "=== building $OUT_DIR/sl_orig (master baseline, LOCAL_TEST bypass patched in) ==="

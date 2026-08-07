@@ -18,14 +18,15 @@ cd "$RUN" || exit 1
 SRVPID=$!
 ok=0
 for i in $(seq 1 150); do
-  if (exec 3<>/dev/tcp/127.0.0.1/9001) 2>/dev/null; then exec 3>&- 3<&-; ok=1; break; fi
+  if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then exec 3>&- 3<&-; ok=1; break; fi
   if ! kill -0 $SRVPID 2>/dev/null; then echo "SERVER DIED"; tail -20 /tmp/srv_load.log; exit 1; fi
   sleep 0.2
 done
 [ "$ok" = 1 ] || { echo "no listen"; kill -9 $SRVPID 2>/dev/null; exit 1; }
 sleep 0.5
 
-python3 "$SP/loadtest.py" --host 127.0.0.1 --port 9001 "$@"
+# standalone server: plaintext ws:// on 8080 (TLS terminated upstream in prod)
+python3 "$SP/loadtest.py" --host 127.0.0.1 --port 8080 --no-tls "$@"
 RC=$?
 
 kill -9 $SRVPID 2>/dev/null; wait $SRVPID 2>/dev/null
