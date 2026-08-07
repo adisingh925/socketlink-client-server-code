@@ -57,6 +57,22 @@ Command shape: `loadtest.py --conns 20000 --procs 16 --group 10 --rate 5 --durat
 | native | 1 KB | 656,994 | 704 MB/s | 0 |
 | docker 1cpu (5k conns) | 1 KB | 224,980 | 241 MB/s | 0 (69% CPU, 386 MiB) |
 
+## Capacity per deployment size (post-OOM-fix, protections active)
+
+Rooms of 100, 256-byte bodies, measured with `loadgen` client containers on the
+docker network. "Lossless" = server `dropped_messages` delta of ~0.
+
+| Deployment | Connection cap (self-clamped) | Lossless deliveries/s | Bandwidth | Saturates at |
+|---|---|---|---|---|
+| 1 CPU / 1 GB container | 21,299 | **987,198** | 298 MB/s | ~1.5M offered → sheds |
+| 4 CPU / 4 GB container | 99,942 | **2,962,711** (51 drops in 44.4M) | 894 MB/s | ~2.33M sustained plateau |
+| 20-core native (no cgroup limit) | — | 7,790,000 | 2.35 GB/s | ~8.4M |
+
+Scaling is sub-linear but healthy (1→4 CPU ≈ 3×; 4→20 CPU ≈ 2.6×), limited by
+the per-delivery `send()` syscall. Capping `SO_SNDBUF` cost **no** throughput:
+the 1-CPU container measured 989,294 deliveries/s before the fix and 987,198
+after, with memory dropping from hundreds of MiB to 14 MiB at the same load.
+
 ## Ceilings (C++ `loadgen`, rooms of 100)
 
 | Target | Command | Delivered | Bandwidth | Drops |
