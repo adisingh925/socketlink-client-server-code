@@ -145,15 +145,31 @@ struct WebSocketData {
 /** Global atomic variables and data structures (all thread safe) */
 /** these variables mainly stores the metrics */
 inline std::atomic<int> globalConnectionCounter(0);
-inline std::atomic<unsigned long long> globalMessagesSent{0};
-inline std::atomic<unsigned long long> totalPayloadSent{0};
+/**
+ * Per-worker delivery counters.
+ *
+ * These used to be two process-wide atomics incremented on EVERY publish by
+ * EVERY worker, so at millions of publishes/s the two cache lines holding them
+ * ping-ponged between cores — pure contention on the hot path, and the likely
+ * reason per-core efficiency fell from 404k deliveries/s at 4 cores to 303k at
+ * 8. Each worker now bumps its own cache-line-aligned slot and /metrics sums
+ * them on read (a read happens once per request, not millions of times a second).
+ */
+struct alignas(64) WorkerCounters {
+    std::atomic<unsigned long long> messagesSent{0};
+    std::atomic<unsigned long long> payloadSent{0};
+    std::atomic<unsigned long long> droppedMessages{0};
+    /** pad to a full cache line so neighbouring workers never share one */
+    char padding[64 - (3 * sizeof(std::atomic<unsigned long long>)) % 64];
+};
+inline WorkerCounters workerCounters[256];
+
 inline std::atomic<unsigned long long> totalConnectionErrors{0};    /** Websocket connections rejected due to some error */
 inline std::atomic<unsigned long long> totalFailedApiCalls{0};      /** API calls rejected due to 4XX or 5XX codes */
 inline std::atomic<unsigned long long> totalSuccessApiCalls{0};     /** API calls with 2XX code */
 inline std::atomic<unsigned long long> totalLMDBWrites{0};          /** Total writes to the LMDB database */
 inline std::atomic<unsigned long long> totalSuccessWebhookCalls{0}; /** Total webhook calls */
 inline std::atomic<unsigned long long> totalFailedWebhookCalls{0};  /** Total failed webhook calls */
-inline std::atomic<unsigned long long> droppedMessages{0};
 inline std::atomic<bool> isMessagingDisabled(false);
 
 /** Per-worker latency EMA snapshots (indexed by worker position in `workers`,
@@ -180,6 +196,26 @@ namespace ThreadSafe {
 inline std::shared_mutex registryIterationGuard;
 
 inline std::vector<worker_t> workers;
+
+/** Aggregates for /metrics (summed on read, never on the hot path). */
+inline unsigned long long totalMessagesSent() {
+    unsigned long long sum = 0;
+    for (size_t i = 0; i < workers.size() && i < 256; ++i)
+        sum += workerCounters[i].messagesSent.load(std::memory_order_relaxed);
+    return sum;
+}
+inline unsigned long long totalPayloadBytesSent() {
+    unsigned long long sum = 0;
+    for (size_t i = 0; i < workers.size() && i < 256; ++i)
+        sum += workerCounters[i].payloadSent.load(std::memory_order_relaxed);
+    return sum;
+}
+inline unsigned long long totalDroppedMessages() {
+    unsigned long long sum = 0;
+    for (size_t i = 0; i < workers.size() && i < 256; ++i)
+        sum += workerCounters[i].droppedMessages.load(std::memory_order_relaxed);
+    return sum;
+}
 
 /** Worker masks address workers by bit position, so this many workers at most
  *  get the optimisation; beyond it the publish path falls back to waking all. */

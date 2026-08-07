@@ -56,6 +56,11 @@ int main() {
     /** Config is compiled in (UserData defaults); just init the feature-status map. */
     populateFeatureStatus(UserData::getInstance().features);
 
+    /** A backpressure budget smaller than one maximum-size message means large
+     *  messages are dropped under the slightest congestion — check before the
+     *  websocket behavior is built from these values. */
+    enforceBackpressureInvariant();
+
     /** The compiled-in defaults are placeholders: anyone who reads the source knows
      *  them, so running with them means every client is effectively an admin. */
     if (UserData::getInstance().clientApiKey == "change-me-client-key" ||

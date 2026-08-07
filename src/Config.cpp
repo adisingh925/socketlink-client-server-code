@@ -5,6 +5,7 @@
 #include <shared_mutex>
 #include <unordered_map>
 
+#include "Logging.h"
 #include "Util.h"
 #include "Webhooks.h"
 #include "json.hpp"
@@ -204,6 +205,11 @@ int populateUserData(std::string data) {
      *  their next getInstance()). The previous snapshot is intentionally leaked. */
     UserData::publish(new UserData(std::move(userData)));
 
+    /** keep the backpressure budget consistent with any new message-size limit */
+    if (enforceBackpressureInvariant()) {
+        needsDBUpdate = 2; /** socket-level setting changed: needs the restart path */
+    }
+
     return needsDBUpdate;
 }
 
@@ -217,6 +223,28 @@ void refreshWebhookIP() {
 
     resolveAndStoreIPAddress(userData, userData.webHookBaseUrl);
     UserData::publish(new UserData(std::move(userData)));
+}
+
+bool enforceBackpressureInvariant() {
+    std::lock_guard<std::mutex> writeLock(configWriteMutex);
+    UserData userData = UserData::getInstance();
+
+    /** four messages' worth: enough that a momentary stall buffers rather than
+     *  drops, while still bounding per-connection memory */
+    unsigned long long required = (unsigned long long)userData.msgSizeAllowedInBytes * 4;
+    if (required > 0xFFFFFFFFULL) {
+        required = 0xFFFFFFFFULL;
+    }
+    if (userData.maxBackpressureInBytes >= required) {
+        return false;
+    }
+
+    log(LogLevel::WARN, "max_backpressure_in_bytes (", userData.maxBackpressureInBytes,
+        ") is below the message size limit (", userData.msgSizeAllowedInBytes,
+        "); a single large message would overflow it and be dropped — raising to ", required);
+    userData.maxBackpressureInBytes = (unsigned int)required;
+    UserData::publish(new UserData(std::move(userData)));
+    return true;
 }
 
 void setConnectionLimit(int n) {

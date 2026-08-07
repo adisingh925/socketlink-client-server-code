@@ -29,7 +29,13 @@ public:
      *  standalone mode (there is no config file); /api/v1/invalidate can override
      *  any of them at runtime. */
     unsigned int msgSizeAllowedInBytes = 10240; /* 10 KB max message */
-    unsigned int maxBackpressureInBytes = 4096;
+    /** Must comfortably exceed msgSizeAllowedInBytes. It was 4096 against a 10 KB
+     *  message limit, i.e. a single maximum-size message was 2.5x the ENTIRE
+     *  buffer allowance — so one message overflowed the limit the instant a
+     *  subscriber was briefly slow and was dropped. That alone accounted for
+     *  112,904 drops in a 10 KB payload benchmark. Kept at >= 4x the message
+     *  size by enforceBackpressureInvariant(). */
+    unsigned int maxBackpressureInBytes = 40960;
     unsigned short idleTimeoutInSeconds = 120;
     unsigned short maxLifetimeInMinutes = 0; /* 0 = no forced lifetime */
 
@@ -123,3 +129,9 @@ bool verifyConnectionToken(const std::string& uid, std::string_view token);
 
 /** Publish a new snapshot with `connections` set to `n` (startup memory clamp). */
 void setConnectionLimit(int n);
+
+/** Raise maxBackpressureInBytes if it is too small to hold several messages of
+ *  the configured maximum size; returns true if it changed anything. A buffer
+ *  smaller than one message means large messages are dropped under the slightest
+ *  congestion. */
+bool enforceBackpressureInvariant();

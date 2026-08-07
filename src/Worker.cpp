@@ -363,7 +363,8 @@ void worker_t::work() {
                          if (ws->getBufferedAmount() > UserData::getInstance().maxBackpressureInBytes) {
                              ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT,
                                       true);
-                             droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                             workerCounters[workerIndex(this)].droppedMessages.fetch_add(
+                                 1, std::memory_order_relaxed);
                              ws->getUserData()->sendingAllowed = false;
                          } else {
                              auto sendInvalidJson = [&]() {
@@ -510,11 +511,12 @@ void worker_t::work() {
                               *  fan-out (previously only the publisher's worker counted
                               *  and the totals undercounted by ~worker-count) */
                                              unsigned int subs = w.app_->numSubscribers(*ridShared);
-                                             globalMessagesSent.fetch_add(static_cast<unsigned long long>(subs),
-                                                                          std::memory_order_relaxed);
-                                             totalPayloadSent.fetch_add(static_cast<unsigned long long>(data->size()) *
-                                                                            static_cast<unsigned long long>(subs),
-                                                                        std::memory_order_relaxed);
+                                             WorkerCounters& wc = workerCounters[workerIndex(&w)];
+                                             wc.messagesSent.fetch_add(static_cast<unsigned long long>(subs),
+                                                                       std::memory_order_relaxed);
+                                             wc.payloadSent.fetch_add(static_cast<unsigned long long>(data->size()) *
+                                                                          static_cast<unsigned long long>(subs),
+                                                                      std::memory_order_relaxed);
                                          });
                                      }
                                  }
@@ -530,11 +532,12 @@ void worker_t::work() {
                                  }
 
                                  unsigned int subscribers = app_->numSubscribers(rid);
-                                 globalMessagesSent.fetch_add(static_cast<unsigned long long>(subscribers),
-                                                              std::memory_order_relaxed);
-                                 totalPayloadSent.fetch_add(static_cast<unsigned long long>(data->size()) *
-                                                                static_cast<unsigned long long>(subscribers),
-                                                            std::memory_order_relaxed);
+                                 workerCounters[selfIdx].messagesSent.fetch_add(
+                                     static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
+                                 workerCounters[selfIdx].payloadSent.fetch_add(
+                                     static_cast<unsigned long long>(data->size()) *
+                                         static_cast<unsigned long long>(subscribers),
+                                     std::memory_order_relaxed);
 
                                  /** cache rooms persist their messages (LMDB / SQL) */
                                  if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE) ||
@@ -572,11 +575,11 @@ void worker_t::work() {
                          }
                      } else {
                          ws->send("{\"data\":\"YOU_ARE_RATE_LIMITED\",\"source\":\"server\"}", uWS::OpCode::TEXT, true);
-                         droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                         workerCounters[workerIndex(this)].droppedMessages.fetch_add(1, std::memory_order_relaxed);
                      }
                  },
              .dropped =
-                 [](auto* /*ws*/, std::string_view /*message*/, uWS::OpCode /*opCode*/) {
+                 [this](auto* /*ws*/, std::string_view /*message*/, uWS::OpCode /*opCode*/) {
                      /** A message was dropped because this connection is over its backpressure
          *  limit. Do NOT ws->send() a notification here: the send buffer is already
          *  full, so that send would itself be dropped and re-invoke this handler
@@ -584,7 +587,7 @@ void worker_t::work() {
          *  under sustained backpressure. Just count the drop; the client learns it is
          *  rate-limited via the YOU_ARE_RATE_LIMITED path when it next sends, and via
          *  RATE_LIMIT_LIFTED (in .drain) once its buffer drains. */
-                     droppedMessages.fetch_add(1, std::memory_order_relaxed);
+                     workerCounters[workerIndex(this)].droppedMessages.fetch_add(1, std::memory_order_relaxed);
                  },
              .drain =
                  [](auto* ws) {
@@ -706,9 +709,9 @@ void worker_t::work() {
                              res->end(R"({"connections": )" +
                                       std::to_string(globalConnectionCounter.load(std::memory_order_relaxed)) +
                                       R"(,"messages_sent": )" +
-                                      std::to_string(globalMessagesSent.load(std::memory_order_relaxed)) +
+                                      std::to_string(totalMessagesSent()) +
                                       R"(,"total_payload_sent": )" +
-                                      std::to_string(totalPayloadSent.load(std::memory_order_relaxed)) +
+                                      std::to_string(totalPayloadBytesSent()) +
                                       R"(,"total_failed_api_calls": )" +
                                       std::to_string(totalFailedApiCalls.load(std::memory_order_relaxed)) +
                                       R"(,"total_success_api_calls": )" +
@@ -725,7 +728,7 @@ void worker_t::work() {
                                       std::to_string(totalFailedWebhookCalls.load(std::memory_order_relaxed)) +
                                       R"(,"average_latency": )" + std::to_string(avgLatencyMs) +
                                       R"(,"dropped_messages": )" +
-                                      std::to_string(droppedMessages.load(std::memory_order_relaxed)) +
+                                      std::to_string(totalDroppedMessages()) +
                                       R"(,"dropped_log_lines": )" +
                                       std::to_string(AsyncLogger::getInstance().droppedCount()) +
                                       R"(,"dropped_webhook_events": )" + std::to_string(droppedWebhookCount()) +
