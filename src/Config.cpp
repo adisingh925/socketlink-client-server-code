@@ -77,9 +77,11 @@ int populateUserData(std::string data) {
     }
 
     if (parsedJson.contains("webhooks") && !parsedJson["webhooks"].is_null()) {
-        userData.webhooks = parsedJson["webhooks"].get<uint8_t>();
+        /** the mask only defines bits 1..6; parsing as uint8_t silently truncated
+         *  anything wider, so read it at the field's own width and narrow once */
+        userData.webhooks = parsedJson["webhooks"].get<uint64_t>();
 
-        populateWebhookStatus(userData.webhooks);
+        populateWebhookStatus(static_cast<uint8_t>(userData.webhooks & 0xFF));
     }
 
     if (parsedJson.contains("features") && !parsedJson["features"].is_null()) {
@@ -198,11 +200,18 @@ int populateUserData(std::string data) {
         }
     }
 
+    /** Mirror the change into userData.features as well as the live status map.
+     *  Without it the bit was only ever set in featureStatus, so the NEXT
+     *  /invalidate — for any unrelated setting — re-ran
+     *  populateFeatureStatus(userData.features) over a features word that still
+     *  had the bit clear and silently switched MySQL integration back off. */
     if (is_sql_integration_enabled == 1) {
+        userData.features |= static_cast<uint32_t>(Features::ENABLE_MYSQL_INTEGRATION);
         std::unique_lock<std::shared_mutex> lock(featureMutex);
         featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 1;
         needsDBUpdate = 1;
     } else if (is_sql_integration_enabled == -1) {
+        userData.features &= ~static_cast<uint32_t>(Features::ENABLE_MYSQL_INTEGRATION);
         std::unique_lock<std::shared_mutex> lock(featureMutex);
         featureStatus[Features::ENABLE_MYSQL_INTEGRATION] = 0;
         needsDBUpdate = -1;
@@ -222,14 +231,22 @@ int populateUserData(std::string data) {
 }
 
 void refreshWebhookIP() {
-    std::lock_guard<std::mutex> writeLock(configWriteMutex);
-    UserData userData = UserData::getInstance();
-
-    if (userData.webHookBaseUrl.empty()) {
+    /** Resolve BEFORE taking the lock: getaddrinfo can block for seconds on a
+     *  slow or unreachable DNS server, and holding configWriteMutex across it
+     *  stalls every config writer — including the memory guard's cap updates. */
+    std::string host = UserData::getInstance().webHookBaseUrl;
+    if (host.empty()) {
         return;
     }
 
-    resolveAndStoreIPAddress(userData, userData.webHookBaseUrl);
+    std::string ip = resolveHostToIPv4(host);
+    if (ip.empty()) {
+        return; /** resolution failed; keep the previous address */
+    }
+
+    std::lock_guard<std::mutex> writeLock(configWriteMutex);
+    UserData userData = UserData::getInstance();
+    userData.webhookIP = ip;
     UserData::publish(new UserData(std::move(userData)));
 }
 

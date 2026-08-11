@@ -43,8 +43,13 @@ int sendHTTPSPOSTRequestFireAndForget(const std::string& baseURL, const std::str
                                       const std::map<std::string, std::string>& headers = {},
                                       bool waitForResponse = false);
 
-/** Resolves the IPv4 address for `hostname` into the config snapshot being built. */
+/** Resolves the IPv4 address for `hostname` into the config snapshot being built.
+ *  Blocks on getaddrinfo — see the note in Webhooks.cpp about holding locks. */
 void resolveAndStoreIPAddress(UserData& ud, const std::string& hostname);
+
+/** Resolve a hostname to a dotted-quad IPv4 address ("" on failure). Blocking;
+ *  call it OUTSIDE any lock. */
+std::string resolveHostToIPv4(const std::string& hostname);
 
 /** Stop the calling thread's webhook io_context (workers call this on shutdown). */
 void stopWebhookIoContext();

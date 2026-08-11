@@ -61,9 +61,16 @@ loadgen: $(BUILD)/loadgen
 $(BUILD)/loadgen: tests/loadgen.cpp | $(BUILD)
 	$(CXX) -std=c++17 -O2 -pthread $< -o $@
 
+## Unit tests for the pure functions — seconds to run, no server needed.
+test: $(BUILD)/unit_tests
+	@$(BUILD)/unit_tests
+
+$(BUILD)/unit_tests: tests/unit_tests.cpp src/Util.cpp src/Util.h | $(BUILD)
+	$(CXX) -std=c++17 -O2 -g tests/unit_tests.cpp src/Util.cpp -lssl -lcrypto -o $@
+
 clean:
 	rm -rf build build-uring
 
 -include $(OBJS:.o=.d)
 
-.PHONY: all clean loadgen
+.PHONY: all clean loadgen test

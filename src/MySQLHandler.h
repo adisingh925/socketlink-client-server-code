@@ -377,6 +377,9 @@ private:
                 }
             }
 
+            /** guarded: an exception escaping this thread body would terminate
+             *  the whole process */
+            try {
             if (haveCmd) {
                 switch (cmd) {
                     case Command::FLUSH:
@@ -392,6 +395,11 @@ private:
                 }
             } else if (haveRow) {
                 handler->insertSingleData(row.insertTime, row.message, row.uid, row.rid);
+            }
+            } catch (const std::exception& e) {
+                log(LogLevel::ERROR, "MySQL writer: ", e.what());
+            } catch (...) {
+                log(LogLevel::ERROR, "MySQL writer: unknown exception");
             }
         }
 

@@ -338,8 +338,15 @@ private:
                 job = std::move(queue_.front());
                 queue_.pop_front();
             }
-            /** Blocking send happens on this dedicated thread, never on an event loop */
-            sendWebhookBlocking(job.baseURL, job.path, job.body, job.headers, false);
+            /** Blocking send happens on this dedicated thread, never on an event loop.
+             *  Guarded: an exception escaping a std::thread body calls std::terminate. */
+            try {
+                sendWebhookBlocking(job.baseURL, job.path, job.body, job.headers, false);
+            } catch (const std::exception& e) {
+                log(LogLevel::ERROR, "Webhook dispatcher: ", e.what());
+            } catch (...) {
+                log(LogLevel::ERROR, "Webhook dispatcher: unknown exception");
+            }
         }
     }
 
@@ -372,11 +379,7 @@ int sendHTTPSPOSTRequestFireAndForget(const std::string& baseURL, const std::str
     return 0;
 }
 
-/**
- * Resolves the IPv4 address for `hostname` and stores it in the config snapshot
- * `ud` being built (ud.webhookIP).
- */
-void resolveAndStoreIPAddress(UserData& ud, const std::string& hostname) {
+std::string resolveHostToIPv4(const std::string& hostname) {
     struct addrinfo hints, *res = nullptr;
     char ipAddress[INET_ADDRSTRLEN];
 
@@ -385,17 +388,29 @@ void resolveAndStoreIPAddress(UserData& ud, const std::string& hostname) {
     hints.ai_socktype = SOCK_STREAM;
 
     int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &res);
-    if (status != 0) {
+    if (status != 0 || !res) {
         log(LogLevel::ERROR, "getaddrinfo error : ", gai_strerror(status));
-        return;
+        return "";
     }
 
     struct sockaddr_in* ipv4 = (struct sockaddr_in*)res->ai_addr;
     inet_ntop(AF_INET, &(ipv4->sin_addr), ipAddress, sizeof(ipAddress));
 
-    ud.webhookIP = ipAddress;
-
     freeaddrinfo(res);
+    return ipAddress;
+}
+
+/**
+ * Resolves the IPv4 address for `hostname` into the config snapshot being built.
+ * NOTE: this blocks (getaddrinfo); callers holding configWriteMutex stall every
+ * other config writer for the duration — prefer resolveHostToIPv4() outside the
+ * lock where possible (see refreshWebhookIP).
+ */
+void resolveAndStoreIPAddress(UserData& ud, const std::string& hostname) {
+    std::string ip = resolveHostToIPv4(hostname);
+    if (!ip.empty()) {
+        ud.webhookIP = std::move(ip);
+    }
 }
 
 void stopWebhookIoContext() {
@@ -474,8 +489,20 @@ private:
                 job = std::move(queue_.front());
                 queue_.pop_front();
             }
-            int status = sendWebhookBlocking(job.baseURL, job.path, job.body, {}, true);
-            job.onDone(status);
+            /** guarded: std::terminate otherwise (see the dispatcher above) */
+            int status = 0;
+            try {
+                status = sendWebhookBlocking(job.baseURL, job.path, job.body, {}, true);
+            } catch (const std::exception& e) {
+                log(LogLevel::ERROR, "Verification webhook: ", e.what());
+            } catch (...) {
+                log(LogLevel::ERROR, "Verification webhook: unknown exception");
+            }
+            try {
+                job.onDone(status);
+            } catch (...) {
+                log(LogLevel::ERROR, "Verification callback threw");
+            }
         }
     }
 

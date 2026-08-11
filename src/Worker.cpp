@@ -43,6 +43,79 @@ void update_ema(double newLatency) {
     localEma = alpha * newLatency + (1 - alpha) * localEma;
 }
 
+/* ------------------------------------------------------------------------- *
+ *  REST handler helpers
+ *
+ *  Every endpoint used to repeat the same three blocks by hand: an abort-flag
+ *  prologue, an api-key check with its rejection response, and a corked JSON
+ *  reply guarded by the abort flag. That was ~100 copies of the reply pattern
+ *  alone, and the copies had drifted — eight rejections answered a bare "403"
+ *  where the rest answered "401 Unauthorized". These helpers make the shape
+ *  impossible to get wrong; the endpoint bodies below now read as logic.
+ * ------------------------------------------------------------------------- */
+
+/** Response type for the plaintext (non-TLS) app. */
+using SLRes = uWS::HttpResponse<false>;
+
+/** (MAX_REQUEST_BODY_BYTES lives in ServerState.h) */
+
+/** Install the abort flag. uWS may abort a request at any time; every write must
+ *  be guarded by this, and it must outlive the handler (async completions). */
+static std::shared_ptr<bool> makeAbortFlag(SLRes* res) {
+    auto aborted = std::make_shared<bool>(false);
+    res->onAborted([aborted]() {
+        *aborted = true;
+        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
+    });
+    return aborted;
+}
+
+/** Send a JSON reply, unless the client already went away. The api-call counters
+ *  follow the status: 2xx counts as success, anything else as failure. */
+static void replyJson(SLRes* res, const std::shared_ptr<bool>& aborted, const char* status, std::string body) {
+    if (*aborted) {
+        return;
+    }
+    (status[0] == '2' ? totalSuccessApiCalls : totalFailedApiCalls).fetch_add(1, std::memory_order_relaxed);
+    res->cork([res, status, body = std::move(body)]() {
+        res->writeStatus(status);
+        res->writeHeader("Content-Type", "application/json");
+        res->end(body);
+    });
+}
+
+/** Reject with 500 — the shared body of every handler's outermost catch. */
+static void replyInternalError(SLRes* res, const std::shared_ptr<bool>& aborted) {
+    replyJson(res, aborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
+}
+
+/** Reject with 400 for a malformed JSON body — the shared body of every
+ *  onData catch. */
+static void replyInvalidJson(SLRes* res, const std::shared_ptr<bool>& aborted) {
+    replyJson(res, aborted, "400 Bad Request", R"({"message": "Invalid JSON format!"})");
+}
+
+/** True when the request carries the admin key; otherwise answers 401 and
+ *  returns false so the caller can simply `return`. */
+static bool requireAdminKey(SLRes* res, uWS::HttpRequest* req, const std::shared_ptr<bool>& aborted) {
+    if (constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
+        return true;
+    }
+    log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
+    replyJson(res, aborted, "401 Unauthorized", R"({"message": "Unauthorized access, Invalid API key!"})");
+    return false;
+}
+
+/** Same for the client key (WS/pub-sub clients). */
+static bool requireClientKey(SLRes* res, uWS::HttpRequest* req, const std::shared_ptr<bool>& aborted) {
+    if (constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().clientApiKey)) {
+        return true;
+    }
+    log(LogLevel::WARN, "Client API: request rejected (invalid client api key)");
+    replyJson(res, aborted, "401 Unauthorized", R"({"message": "Unauthorized access, Invalid API key!"})");
+    return false;
+}
+
 /* uWebSocket worker thread function. */
 void worker_t::work() {
     /** Fixed plaintext HTTP/WS listen port. */
@@ -673,27 +746,10 @@ void worker_t::work() {
              [](auto* res, auto* req) {
                  /** fetch all the server metrics */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
-                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
-                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireAdminKey(res, req, isAborted)) {
                          return;
                      }
 
@@ -756,45 +812,20 @@ void worker_t::work() {
                          });
                      }
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .post("/api/v1/invalidate",
               [](auto* res, auto* req) {
                   /** update the metadata used by the server */
 
-                  auto isAborted = std::make_shared<bool>(false);
-
-                  res->onAborted([isAborted]() {
-                      *isAborted = true;
-                      totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                  });
+                  auto isAborted = makeAbortFlag(res);
 
                   try {
                       std::string_view apiKey = req->getHeader("api-key");
 
                       /** Admin-key auth (self-hosted: no master shared-secret signature) */
-                      if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                          if (!*isAborted) {
-                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                              res->cork([res]() {
-                                  res->writeStatus("401 Unauthorized");
-                                  res->writeHeader("Content-Type", "application/json");
-                                  res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                              });
-                          }
-
+                      if (!requireAdminKey(res, req, isAborted)) {
                           return;
                       }
 
@@ -824,15 +855,8 @@ void worker_t::work() {
 
                                       log(LogLevel::INFO, "Config updated via /api/v1/invalidate");
 
-                                      if (!*isAborted) {
-                                          totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                          res->cork([res]() {
-                                              res->writeStatus("200 OK");
-                                              res->writeHeader("Content-Type", "application/json");
-                                              res->end(R"({"message": "Metadata invalidated successfully!"})");
-                                          });
-                                      }
+                                      replyJson(res, isAborted, "200 OK",
+                                                R"({"message": "Metadata invalidated successfully!"})");
 
                                       if (action == 2) {
                                           log(LogLevel::INFO, "socket-level settings changed: exiting shortly so the "
@@ -858,68 +882,29 @@ void worker_t::work() {
                                           }).detach();
                                       }
                                   } catch (const std::exception&) {
-                                      if (!*isAborted) {
-                                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                          res->cork([res]() {
-                                              res->writeStatus("400 Bad Request");
-                                              res->writeHeader("Content-Type", "application/json");
-                                              res->end(R"({"message": "Invalid JSON format!"})");
-                                          });
-                                      }
+                                      replyJson(res, isAborted, "400 Bad Request",
+                                                R"({"message": "Invalid JSON format!"})");
                                   }
                               }
                           });
                   } catch (const std::exception&) {
-                      if (!*isAborted) {
-                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                          res->cork([res]() {
-                              res->writeStatus("500 Internal Server Error");
-                              res->writeHeader("Content-Type", "application/json");
-                              res->end(R"({"message": "Internal server error!"})");
-                          });
-                      }
+                      replyJson(res, isAborted, "500 Internal Server Error",
+                                R"({"message": "Internal server error!"})");
                   }
               })
         .get("/api/v1/mysql/sync",
              [](auto* res, auto* req) {
                  /** sync all the data in the buffers to integrated mysql server */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
-                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
-                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireAdminKey(res, req, isAborted)) {
                          return;
                      }
 
                      if (getFeatureStatus(Features::ENABLE_MYSQL_INTEGRATION) == 0) {
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("403 Forbidden");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "MySQL integration is disabled!"})");
-                             });
-                         }
+                         replyJson(res, isAborted, "403 Forbidden", R"({"message": "MySQL integration is disabled!"})");
 
                          return;
                      }
@@ -928,52 +913,19 @@ void worker_t::work() {
 
                      log(LogLevel::INFO, "Admin API: MySQL flush requested via /api/v1/mysql/sync");
 
-                     if (!*isAborted) {
-                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("200 OK");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "MySQL data synced successfully!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "200 OK", R"({"message": "MySQL data synced successfully!"})");
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .get("/api/v1/rooms/users/all",
              [this](auto* res, auto* req) {
                  /** fetch all the rooms present on the server */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
-                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
-                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireAdminKey(res, req, isAborted)) {
                          return;
                      }
 
@@ -997,52 +949,19 @@ void worker_t::work() {
                          data.push_back(std::move(roomData));
                      }
 
-                     if (!*isAborted) {
-                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res, data]() {
-                             res->writeStatus("200 OK");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(data.dump());
-                         });
-                     }
+                     replyJson(res, isAborted, "200 OK", data.dump());
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .get("/api/v1/users/orphan",
              [this](auto* res, auto* req) {
                  /** fetch all the rooms present on the server */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
-                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
-                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireAdminKey(res, req, isAborted)) {
                          return;
                      }
 
@@ -1059,25 +978,9 @@ void worker_t::work() {
                      nlohmann::json data;
                      data["uid"] = orphanUids;
 
-                     if (!*isAborted) {
-                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res, data]() {
-                             res->writeStatus("200 OK");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(data.dump());
-                         });
-                     }
+                     replyJson(res, isAborted, "200 OK", data.dump());
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .post(
@@ -1085,29 +988,12 @@ void worker_t::work() {
             [this](auto* res, auto* req) {
                 /** get all the connectiond for a room */
 
-                auto isAborted = std::make_shared<bool>(false);
-
-                res->onAborted([isAborted]() {
-                    *isAborted = true;
-                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                });
+                auto isAborted = makeAbortFlag(res);
 
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                        log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("401 Unauthorized");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                            });
-                        }
-
+                    if (!requireAdminKey(res, req, isAborted)) {
                         return;
                     }
 
@@ -1158,38 +1044,14 @@ void worker_t::work() {
                                     data.push_back(roomData);
                                 }
 
-                                if (!*isAborted) {
-                                    totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res, data]() {
-                                        res->writeStatus("200 OK");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(data.dump());
-                                    });
-                                }
+                                replyJson(res, isAborted, "200 OK", data.dump());
                             } catch (const std::exception&) {
-                                if (!*isAborted) {
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("400 Bad Request");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(R"({"message": "Invalid JSON format!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "400 Bad Request", R"({"message": "Invalid JSON format!"})");
                             }
                         }
                     });
                 } catch (const std::exception&) {
-                    if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("500 Internal Server Error");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Internal server error!"})");
-                        });
-                    }
+                    replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                 }
             })
         .get(
@@ -1209,31 +1071,13 @@ void worker_t::work() {
                 });
 
                 try {
-                    if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().clientApiKey)) {
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("401 Unauthorized");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                            });
-                        }
-
+                    if (!requireClientKey(res, req, isAborted)) {
                         return;
                     }
 
                     /** per-user token (no-op while connection_token_secret is unset) */
                     if (!verifyConnectionToken(uid, req->getHeader("token"))) {
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("401 Unauthorized");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Invalid or expired token!"})");
-                            });
-                        }
+                        replyJson(res, isAborted, "401 Unauthorized", R"({"message": "Invalid or expired token!"})");
 
                         return;
                     }
@@ -1249,15 +1093,7 @@ void worker_t::work() {
                         tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
                         if (!ThreadSafe::connections.find(accessor, uid)) {
-                            if (!*isAborted) {
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("404 Not Found");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "Invalid uid!"})");
-                                });
-                            }
+                            replyJson(res, isAborted, "404 Not Found", R"({"message": "Invalid uid!"})");
 
                             return;
                         }
@@ -1266,15 +1102,8 @@ void worker_t::work() {
                     }
 
                     if (rid.empty() || rid.size() > 160) {
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "The room ID length should be between 1 to 160 characters!"})");
-                            });
-                        }
+                        replyJson(res, isAborted, "400 Bad Request",
+                                  R"({"message": "The room ID length should be between 1 to 160 characters!"})");
 
                         return;
                     }
@@ -1282,15 +1111,8 @@ void worker_t::work() {
                     /** checking if the correct room type is received */
                     uint8_t roomType = parseRoomType(rid);
                     if (roomType == 255) {
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end("{\"message\": \"The provided room type is invalid!\"}");
-                            });
-                        }
+                        replyJson(res, isAborted, "400 Bad Request",
+                                  "{\"message\": \"The provided room type is invalid!\"}");
 
                         return;
                     }
@@ -1306,15 +1128,8 @@ void worker_t::work() {
 
                             tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
                             if (inner_map.find(inner_accessor, rid)) {
-                                if (!*isAborted) {
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("400 Bad Request");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(R"({"message": "You are already subscribed to the given room!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "400 Bad Request",
+                                          R"({"message": "You are already subscribed to the given room!"})");
 
                                 return;
                             }
@@ -1329,15 +1144,8 @@ void worker_t::work() {
                         if (ThreadSafe::bannedConnections.find(outer_accessor, rid) &&
                             outer_accessor->second.count(uid)) {
 
-                            if (!*isAborted) {
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("403 Forbidden");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end(R"({"message": "You have been banned from this room!"})");
-                                });
-                            }
+                            replyJson(res, isAborted, "403 Forbidden",
+                                      R"({"message": "You have been banned from this room!"})");
 
                             return;
                         }
@@ -1407,29 +1215,14 @@ void worker_t::work() {
                             if (!queued) {
                                 /** verification pool saturated (endpoint slow/down) — shed
                      *  load instead of queueing unbounded latency */
-                                if (!*isAborted) {
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("503 Service Unavailable");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(R"({"message": "Verification is temporarily unavailable!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "503 Service Unavailable",
+                                          R"({"message": "Verification is temporarily unavailable!"})");
                             }
 
                             return; /** response completes asynchronously above */
                         } else {
-                            if (!*isAborted) {
-                                totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                res->cork([res]() {
-                                    res->writeStatus("403 Forbidden");
-                                    res->writeHeader("Content-Type", "application/json");
-                                    res->end("{\"message\": \"The ON_VERIFICATION_REQUEST webhook must be enabled to "
-                                             "activate private rooms!\"}");
-                                });
-                            }
+                            replyJson(res, isAborted, "403 Forbidden",
+                                      "{\"message\": \"The ON_VERIFICATION_REQUEST webhook must be enabled to " "activate private rooms!\"}");
 
                             return;
                         }
@@ -1445,54 +1238,21 @@ void worker_t::work() {
                         openConnection(aliveWs, owner, rid, roomType);
                     });
 
-                    if (!*isAborted) {
-                        totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("200 OK");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Successfully subscribed to the given room!"})");
-                        });
-                    }
+                    replyJson(res, isAborted, "200 OK", R"({"message": "Successfully subscribed to the given room!"})");
                 } catch (const std::exception&) {
-                    if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("500 Internal Server Error");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Internal server error!"})");
-                        });
-                    }
+                    replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                 }
             })
         .get("/api/v1/users/subscriptions/all",
              [this](auto* res, auto* req) {
                  /** get all the subscribed rooms from the given UIDs */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
                      std::string_view apiKey = req->getHeader("api-key");
 
-                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireAdminKey(res, req, isAborted)) {
                          return;
                      }
 
@@ -1518,53 +1278,21 @@ void worker_t::work() {
 
                      std::string response = data.dump();
 
-                     if (!*isAborted) {
-                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res, response]() {
-                             res->writeStatus("200 OK");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(response);
-                         });
-                     }
+                     replyJson(res, isAborted, "200 OK", response);
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .post("/api/v1/users/subscriptions",
               [this](auto* res, auto* req) {
                   /** get all the subscribed rooms from the given UIDs */
 
-                  auto isAborted = std::make_shared<bool>(false);
-
-                  res->onAborted([isAborted]() {
-                      *isAborted = true;
-                      totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                  });
+                  auto isAborted = makeAbortFlag(res);
 
                   try {
                       std::string_view apiKey = req->getHeader("api-key");
 
-                      if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                          log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-                          if (!*isAborted) {
-                              totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                              res->cork([res]() {
-                                  res->writeStatus("401 Unauthorized");
-                                  res->writeHeader("Content-Type", "application/json");
-                                  res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                              });
-                          }
-
+                      if (!requireAdminKey(res, req, isAborted)) {
                           return;
                       }
 
@@ -1615,38 +1343,16 @@ void worker_t::work() {
                                           data.push_back(roomData);
                                       }
 
-                                      if (!*isAborted) {
-                                          totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                          res->cork([res, data]() {
-                                              res->writeStatus("200 OK");
-                                              res->writeHeader("Content-Type", "application/json");
-                                              res->end(data.dump());
-                                          });
-                                      }
+                                      replyJson(res, isAborted, "200 OK", data.dump());
                                   } catch (const std::exception&) {
-                                      if (!*isAborted) {
-                                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                          res->cork([res]() {
-                                              res->writeStatus("400 Bad Request");
-                                              res->writeHeader("Content-Type", "application/json");
-                                              res->end(R"({"message": "Invalid JSON format!"})");
-                                          });
-                                      }
+                                      replyJson(res, isAborted, "400 Bad Request",
+                                                R"({"message": "Invalid JSON format!"})");
                                   }
                               }
                           });
                   } catch (const std::exception&) {
-                      if (!*isAborted) {
-                          totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                          res->cork([res]() {
-                              res->writeStatus("500 Internal Server Error");
-                              res->writeHeader("Content-Type", "application/json");
-                              res->end(R"({"message": "Internal server error!"})");
-                          });
-                      }
+                      replyJson(res, isAborted, "500 Internal Server Error",
+                                R"({"message": "Internal server error!"})");
                   }
               })
         .get("/api/v1/users/unsubscribe/room/:rid",
@@ -1661,31 +1367,13 @@ void worker_t::work() {
                  });
 
                  try {
-                     if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().clientApiKey)) {
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireClientKey(res, req, isAborted)) {
                          return;
                      }
 
                      /** per-user token (no-op while connection_token_secret is unset) */
                      if (!verifyConnectionToken(uid, req->getHeader("token"))) {
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Invalid or expired token!"})");
-                             });
-                         }
+                         replyJson(res, isAborted, "401 Unauthorized", R"({"message": "Invalid or expired token!"})");
 
                          return;
                      }
@@ -1699,15 +1387,7 @@ void worker_t::work() {
                          tbb::concurrent_hash_map<std::string, WebSocketData>::const_accessor accessor;
 
                          if (!ThreadSafe::connections.find(accessor, uid)) {
-                             if (!*isAborted) {
-                                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                 res->cork([res]() {
-                                     res->writeStatus("404 Not Found");
-                                     res->writeHeader("Content-Type", "application/json");
-                                     res->end(R"({"message": "Invalid uid!"})");
-                                 });
-                             }
+                             replyJson(res, isAborted, "404 Not Found", R"({"message": "Invalid uid!"})");
 
                              return;
                          }
@@ -1717,16 +1397,8 @@ void worker_t::work() {
 
                      /** checking if the room length is valid */
                      if (rid.empty() || rid.length() > 160) {
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("400 Bad Request");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(
-                                     R"({"message": "The room id length should be between 1 to 160 characters!"})");
-                             });
-                         }
+                         replyJson(res, isAborted, "400 Bad Request",
+                                    R"({"message": "The room id length should be between 1 to 160 characters!"})");
 
                          return;
                      }
@@ -1734,15 +1406,8 @@ void worker_t::work() {
                      /** checking if the correct room type is received */
                      uint8_t roomType = parseRoomType(rid);
                      if (roomType == 255) {
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("400 Bad Request");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end("{\"message\": \"The provided room type is invalid!\"}");
-                             });
-                         }
+                         replyJson(res, isAborted, "400 Bad Request",
+                                   "{\"message\": \"The provided room type is invalid!\"}");
 
                          return;
                      }
@@ -1760,28 +1425,14 @@ void worker_t::work() {
                              tbb::concurrent_hash_map<std::string, uint8_t>::const_accessor inner_accessor;
                              if (!inner_map.find(inner_accessor, rid)) {
 
-                                 if (!*isAborted) {
-                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                     res->cork([res]() {
-                                         res->writeStatus("400 Bad Request");
-                                         res->writeHeader("Content-Type", "application/json");
-                                         res->end(R"({"message": "You are not subscribed to the given room!"})");
-                                     });
-                                 }
+                                 replyJson(res, isAborted, "400 Bad Request",
+                                           R"({"message": "You are not subscribed to the given room!"})");
 
                                  return;
                              }
                          } else {
-                             if (!*isAborted) {
-                                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                 res->cork([res]() {
-                                     res->writeStatus("400 Bad Request");
-                                     res->writeHeader("Content-Type", "application/json");
-                                     res->end(R"({"message": "You are not subscribed to the given room!"})");
-                                 });
-                             }
+                             replyJson(res, isAborted, "400 Bad Request",
+                                       R"({"message": "You are not subscribed to the given room!"})");
 
                              return;
                          }
@@ -1794,52 +1445,20 @@ void worker_t::work() {
                          closeConnection(aliveWs, owner, rid, uid, roomType);
                      });
 
-                     if (!*isAborted) {
-                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("200 OK");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Successfully unsubscribed from the given room!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "200 OK",
+                               R"({"message": "Successfully unsubscribed from the given room!"})");
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .post(
             "/api/v1/broadcast",
             [this](auto* res, auto* req) {
                 /** broadcast a message to everyone connected to the server */
-                auto isAborted = std::make_shared<bool>(false);
-
-                res->onAborted([isAborted]() {
-                    *isAborted = true;
-                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                });
+                auto isAborted = makeAbortFlag(res);
 
                 try {
-                    if (!constantTimeEquals(req->getHeader("api-key"), UserData::getInstance().adminApiKey)) {
-                        log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("401 Unauthorized");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                            });
-                        }
-
+                    if (!requireAdminKey(res, req, isAborted)) {
                         return;
                     }
 
@@ -1871,39 +1490,15 @@ void worker_t::work() {
                                     });
                                 });
 
-                                if (!*isAborted) {
-                                    totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("200 OK");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(
-                                            R"({"message": "Successfully broadcasted the message to everyone on the server!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "200 OK",
+                                           R"({"message": "Successfully broadcasted the message to everyone on the server!"})");
                             } catch (const std::exception&) {
-                                if (!*isAborted) {
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("400 Bad Request");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(R"({"message": "Invalid JSON format!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "400 Bad Request", R"({"message": "Invalid JSON format!"})");
                             }
                         }
                     });
                 } catch (const std::exception&) {
-                    if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("500 Internal Server Error");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Internal server error!"})");
-                        });
-                    }
+                    replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                 }
             })
         .post(
@@ -1911,29 +1506,12 @@ void worker_t::work() {
             [this](auto* res, auto* req) {
                 /** broadcast a message to a particular room */
 
-                auto isAborted = std::make_shared<bool>(false);
-
-                res->onAborted([isAborted]() {
-                    *isAborted = true;
-                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                });
+                auto isAborted = makeAbortFlag(res);
 
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                        log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("401 Unauthorized");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                            });
-                        }
-
+                    if (!requireAdminKey(res, req, isAborted)) {
                         return;
                     }
 
@@ -1970,39 +1548,15 @@ void worker_t::work() {
                                         });
                                 }
 
-                                if (!*isAborted) {
-                                    totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("200 OK");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(
-                                            R"({"message": "Successfully broadcasted the message to the given rooms!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "200 OK",
+                                           R"({"message": "Successfully broadcasted the message to the given rooms!"})");
                             } catch (const std::exception&) {
-                                if (!*isAborted) {
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("400 Bad Request");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(R"({"message": "Invalid JSON format!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "400 Bad Request", R"({"message": "Invalid JSON format!"})");
                             }
                         }
                     });
                 } catch (const std::exception&) {
-                    if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("500 Internal Server Error");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Internal server error!"})");
-                        });
-                    }
+                    replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                 }
             })
         .post(
@@ -2010,29 +1564,12 @@ void worker_t::work() {
             [this](auto* res, auto* req) {
                 /** broadcast a message to a particular connection */
 
-                auto isAborted = std::make_shared<bool>(false);
-
-                res->onAborted([isAborted]() {
-                    *isAborted = true;
-                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                });
+                auto isAborted = makeAbortFlag(res);
 
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                        log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("401 Unauthorized");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                            });
-                        }
-
+                    if (!requireAdminKey(res, req, isAborted)) {
                         return;
                     }
 
@@ -2069,39 +1606,15 @@ void worker_t::work() {
                                         });
                                 }
 
-                                if (!*isAborted) {
-                                    totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("200 OK");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(
-                                            R"({"message": "Successfully broadcasted the message to the given connections!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "200 OK",
+                                           R"({"message": "Successfully broadcasted the message to the given connections!"})");
                             } catch (const std::exception&) {
-                                if (!*isAborted) {
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("400 Bad Request");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(R"({"message": "Invalid JSON format!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "400 Bad Request", R"({"message": "Invalid JSON format!"})");
                             }
                         }
                     });
                 } catch (const std::exception&) {
-                    if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("500 Internal Server Error");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Internal server error!"})");
-                        });
-                    }
+                    replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                 }
             })
         .post(
@@ -2109,29 +1622,12 @@ void worker_t::work() {
             [this](auto* res, auto* req) {
                 /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
 
-                auto isAborted = std::make_shared<bool>(false);
-
-                res->onAborted([isAborted]() {
-                    *isAborted = true;
-                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                });
+                auto isAborted = makeAbortFlag(res);
 
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                        log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("401 Unauthorized");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                            });
-                        }
-
+                    if (!requireAdminKey(res, req, isAborted)) {
                         return;
                     }
 
@@ -2160,15 +1656,8 @@ void worker_t::work() {
                              *  ("global" is a valid ban target that has no room prefix) */
                                     uint8_t roomType = parseRoomType(rid);
                                     if (roomType == 255 && rid != "global") {
-                                        if (!*isAborted) {
-                                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                            res->cork([res]() {
-                                                res->writeStatus("400 Bad Request");
-                                                res->writeHeader("Content-Type", "application/json");
-                                                res->end("{\"message\": \"The provided room type is invalid!\"}");
-                                            });
-                                        }
+                                        replyJson(res, isAborted, "400 Bad Request",
+                                                  "{\"message\": \"The provided room type is invalid!\"}");
 
                                         return;
                                     }
@@ -2245,39 +1734,15 @@ void worker_t::work() {
 
                                 log(LogLevel::INFO, "Admin API: users banned via /api/v1/rooms/users/ban");
 
-                                if (!*isAborted) {
-                                    totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("200 OK");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(
-                                            R"({"message": "Given users are successfully banned from the given rooms!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "200 OK",
+                                           R"({"message": "Given users are successfully banned from the given rooms!"})");
                             } catch (const std::exception&) {
-                                if (!*isAborted) {
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("400 Bad Request");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(R"({"message": "Invalid JSON format!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "400 Bad Request", R"({"message": "Invalid JSON format!"})");
                             }
                         }
                     });
                 } catch (const std::exception&) {
-                    if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("500 Internal Server Error");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Internal server error!"})");
-                        });
-                    }
+                    replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                 }
             })
         .post(
@@ -2285,29 +1750,12 @@ void worker_t::work() {
             [this](auto* res, auto* req) {
                 /** ban all the users in a room and prevent them from connecting again (it will disconnect the user from the server) */
 
-                auto isAborted = std::make_shared<bool>(false);
-
-                res->onAborted([isAborted]() {
-                    *isAborted = true;
-                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                });
+                auto isAborted = makeAbortFlag(res);
 
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
 
-                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                        log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("401 Unauthorized");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                            });
-                        }
-
+                    if (!requireAdminKey(res, req, isAborted)) {
                         return;
                     }
 
@@ -2368,58 +1816,25 @@ void worker_t::work() {
                                     });
                                 }
                             } catch (const std::exception&) {
-                                if (!*isAborted) {
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("400 Bad Request");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(R"({"message": "Invalid JSON format!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "400 Bad Request", R"({"message": "Invalid JSON format!"})");
                             }
                         }
                     });
                 } catch (const std::exception&) {
-                    if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("500 Internal Server Error");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Internal server error!"})");
-                        });
-                    }
+                    replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                 }
             })
         .put("/api/v1/server/messaging/:action",
              [this](auto* res, auto* req) {
                  /** enable or disable message sending at the server level (for everyone) */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
                      std::string_view apiKey = req->getHeader("api-key");
                      std::string_view action = req->getParameter("action");
 
-                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireAdminKey(res, req, isAborted)) {
                          return;
                      }
 
@@ -2428,15 +1843,7 @@ void worker_t::work() {
                      } else if (action == "disable") {
                          isMessagingDisabled.store(true, std::memory_order_relaxed);
                      } else {
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("400 Bad Request");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Invalid action!"})");
-                             });
-                         }
+                         replyJson(res, isAborted, "400 Bad Request", R"({"message": "Invalid action!"})");
                          return;
                      }
 
@@ -2456,15 +1863,7 @@ void worker_t::work() {
                          });
                      }
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .post(
@@ -2472,12 +1871,7 @@ void worker_t::work() {
             [this](auto* res, auto* req) {
                 /** enable or disable messaging at room level */
 
-                auto isAborted = std::make_shared<bool>(false);
-
-                res->onAborted([isAborted]() {
-                    *isAborted = true;
-                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                });
+                auto isAborted = makeAbortFlag(res);
 
                 try {
                     std::string_view apiKey = req->getHeader("api-key");
@@ -2486,33 +1880,14 @@ void worker_t::work() {
                      *  a dangling view here decided enable-vs-disable. */
                     std::string action(req->getParameter("action"));
 
-                    if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                        log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                            res->cork([res]() {
-                                res->writeStatus("401 Unauthorized");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                            });
-                        }
-
+                    if (!requireAdminKey(res, req, isAborted)) {
                         return;
                     }
 
                     /** reject an unknown action up front rather than mid-loop, where an
                      *  empty body would skip validation entirely and still report success */
                     if (action != "enable" && action != "disable") {
-                        if (!*isAborted) {
-                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                            res->cork([res]() {
-                                res->writeStatus("400 Bad Request");
-                                res->writeHeader("Content-Type", "application/json");
-                                res->end(R"({"message": "Invalid action!"})");
-                            });
-                        }
+                        replyJson(res, isAborted, "400 Bad Request", R"({"message": "Invalid action!"})");
                         return;
                     }
 
@@ -2586,15 +1961,8 @@ void worker_t::work() {
                                             }
                                         }
                                     } else {
-                                        if (!*isAborted) {
-                                            totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                            res->cork([res]() {
-                                                res->writeStatus("400 Bad Request");
-                                                res->writeHeader("Content-Type", "application/json");
-                                                res->end(R"({"message": "Invalid action!"})");
-                                            });
-                                        }
+                                        replyJson(res, isAborted, "400 Bad Request",
+                                                  R"({"message": "Invalid action!"})");
 
                                         return;
                                     }
@@ -2618,56 +1986,24 @@ void worker_t::work() {
                                     });
                                 }
                             } catch (const std::exception&) {
-                                if (!*isAborted) {
-                                    totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                    res->cork([res]() {
-                                        res->writeStatus("400 Bad Request");
-                                        res->writeHeader("Content-Type", "application/json");
-                                        res->end(R"({"message": "Invalid JSON format!"})");
-                                    });
-                                }
+                                replyJson(res, isAborted, "400 Bad Request", R"({"message": "Invalid JSON format!"})");
                             }
                         }
                     });
                 } catch (const std::exception&) {
-                    if (!*isAborted) {
-                        totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                        res->cork([res]() {
-                            res->writeStatus("500 Internal Server Error");
-                            res->writeHeader("Content-Type", "application/json");
-                            res->end(R"({"message": "Internal server error!"})");
-                        });
-                    }
+                    replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                 }
             })
         .get("/api/v1/users/banned",
              [this](auto* res, auto* req) {
                  /** Handle the request to fetch all banned connections */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
                      std::string_view apiKey = req->getHeader("api-key");
 
-                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireAdminKey(res, req, isAborted)) {
                          return;
                      }
 
@@ -2690,53 +2026,21 @@ void worker_t::work() {
                          data.push_back(std::move(roomData));
                      }
 
-                     if (!*isAborted) {
-                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res, data]() {
-                             res->writeStatus("200 OK");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(data.dump());
-                         });
-                     }
+                     replyJson(res, isAborted, "200 OK", data.dump());
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .get("/api/v1/users/messaging/disabled",
              [this](auto* res, auto* req) {
                  /** Handle the request to fetch all disabled connections */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
                      std::string_view apiKey = req->getHeader("api-key");
 
-                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireAdminKey(res, req, isAborted)) {
                          return;
                      }
 
@@ -2759,37 +2063,16 @@ void worker_t::work() {
                          json_response.push_back(std::move(roomData));
                      }
 
-                     if (!*isAborted) {
-                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res, json_response]() {
-                             res->writeStatus("200 OK");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(json_response.dump());
-                         });
-                     }
+                     replyJson(res, isAborted, "200 OK", json_response.dump());
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .get("/api/v1/messages/room/:rid",
              [this](auto* res, auto* req) {
                  /** retrieve the messages for cache rooms (for other rooms no data will be returned) */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
                      std::string_view rid = req->getParameter("rid");
@@ -2799,32 +2082,13 @@ void worker_t::work() {
                      /** API key FIRST: the membership checks below return distinguishable
                       *  errors, so running them pre-auth let unauthenticated callers probe
                       *  which rooms exist and who is in them. */
-                     if (!constantTimeEquals(apiKey, UserData::getInstance().clientApiKey)) {
-
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("403 Forbidden");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireClientKey(res, req, isAborted)) {
                          return;
                      }
 
                      /** per-user token (no-op while connection_token_secret is unset) */
                      if (!verifyConnectionToken(std::string(uid), req->getHeader("token"))) {
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("401 Unauthorized");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Invalid or expired token!"})");
-                             });
-                         }
+                         replyJson(res, isAborted, "401 Unauthorized", R"({"message": "Invalid or expired token!"})");
 
                          return;
                      }
@@ -2834,15 +2098,7 @@ void worker_t::work() {
                              outer_accessor;
 
                          if (!ThreadSafe::topics.find(outer_accessor, std::string(rid))) {
-                             if (!*isAborted) {
-                                 totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                 res->cork([res]() {
-                                     res->writeStatus("403 Forbidden");
-                                     res->writeHeader("Content-Type", "application/json");
-                                     res->end(R"({"message": "Access denied!"})");
-                                 });
-                             }
+                             replyJson(res, isAborted, "403 Forbidden", R"({"message": "Access denied!"})");
 
                              return;
                          } else {
@@ -2854,15 +2110,7 @@ void worker_t::work() {
 
                              /** Check if value exists in the inner map (uid) */
                              if (!inner_map.find(inner_accessor, std::string(uid))) {
-                                 if (!*isAborted) {
-                                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                     res->cork([res]() {
-                                         res->writeStatus("403 Forbidden");
-                                         res->writeHeader("Content-Type", "application/json");
-                                         res->end(R"({"message": "Access denied!"})");
-                                     });
-                                 }
+                                 replyJson(res, isAborted, "403 Forbidden", R"({"message": "Access denied!"})");
 
                                  return;
                              }
@@ -2888,57 +2136,25 @@ void worker_t::work() {
                                  /** last flush done — respond on the thread that owns `res`
                   *  (isAborted is only read there, same thread as onAborted) */
                                  httpLoop->defer([res, isAborted, ridStr]() {
-                                     if (!*isAborted) {
-                                         totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                                         res->cork([res, ridStr]() {
-                                             res->writeStatus("200 OK");
-                                             res->writeHeader("Content-Type", "application/json");
-                                             res->end(read_worker(ridStr));
-                                         });
-                                     }
+                                     replyJson(res, isAborted, "200 OK", read_worker(ridStr));
                                  });
                              }
                          });
                      }
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .del("/api/v1/database",
              [this](auto* res, auto* req) {
                  /** delete all the data present in the LMDB database */
 
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
                      std::string_view apiKey = req->getHeader("api-key");
 
-                     if (!constantTimeEquals(apiKey, UserData::getInstance().adminApiKey)) {
-                         log(LogLevel::WARN, "Admin API: request rejected (invalid admin api key)");
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("403 Forbidden");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Unauthorized access, Invalid API key!"})");
-                             });
-                         }
-
+                     if (!requireAdminKey(res, req, isAborted)) {
                          return;
                      }
 
@@ -2966,50 +2182,22 @@ void worker_t::work() {
 
                          log(LogLevel::WARN, "Admin API: LMDB message store TRUNCATED via DELETE /api/v1/database");
 
-                         if (!*isAborted) {
-                             totalSuccessApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("200 OK");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Database truncated successfully!"})");
-                             });
-                         }
+                         replyJson(res, isAborted, "200 OK", R"({"message": "Database truncated successfully!"})");
                      } catch (const std::exception& e) {
                          /** abort the transaction so it doesn't leak on the error path */
                          if (txn)
                              mdb_txn_abort(txn);
 
-                         if (!*isAborted) {
-                             totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                             res->cork([res]() {
-                                 res->writeStatus("500 Internal Server Error");
-                                 res->writeHeader("Content-Type", "application/json");
-                                 res->end(R"({"message": "Internal server error!"})");
-                             });
-                         }
+                         replyJson(res, isAborted, "500 Internal Server Error",
+                                   R"({"message": "Internal server error!"})");
                      }
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .get("/api/v1/ping",
              [](auto* res, auto* /*req*/) {
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
                      if (!*isAborted) {
@@ -3021,46 +2209,18 @@ void worker_t::work() {
                          });
                      }
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .any("/*",
              [](auto* res, auto* /*req*/) {
-                 auto isAborted = std::make_shared<bool>(false);
-
-                 res->onAborted([isAborted]() {
-                     *isAborted = true;
-                     totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-                 });
+                 auto isAborted = makeAbortFlag(res);
 
                  try {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("404 Not Found");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "The requested resource is not found!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "404 Not Found",
+                               R"({"message": "The requested resource is not found!"})");
                  } catch (const std::exception&) {
-                     if (!*isAborted) {
-                         totalFailedApiCalls.fetch_add(1, std::memory_order_relaxed);
-
-                         res->cork([res]() {
-                             res->writeStatus("500 Internal Server Error");
-                             res->writeHeader("Content-Type", "application/json");
-                             res->end(R"({"message": "Internal server error!"})");
-                         });
-                     }
+                     replyJson(res, isAborted, "500 Internal Server Error", R"({"message": "Internal server error!"})");
                  }
              })
         .listen(listenPort, [this, listenPort](auto* token) {
