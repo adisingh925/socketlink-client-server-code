@@ -53,6 +53,14 @@ struct Config {
     int size = 1024; /* message body bytes */
     std::string prefix = "pub-grp-";
     std::string uidPrefix = "lg";
+    /** --idle: connect and hold, never publish. Isolates connection capacity
+     *  from message throughput (keepalive pings are still answered, so the
+     *  server does not time the connections out). */
+    bool idle = false;
+    /** --no-subscribe: skip the REST room subscribe, leaving each connection
+     *  subscribed only to the topics the server adds itself (its uid and the
+     *  broadcast topic). */
+    bool noSubscribe = false;
     std::string clientKey = "change-me-client-key";
     /** Source IPs to rotate over. One local IP affords only ~28k ephemeral ports
      *  toward a given destination, which caps a co-located client at ~28k
@@ -320,7 +328,7 @@ static void worker(const Config& cfg, int firstConn, int lastConn) {
         }
 
         /* REST subscribe (keep-alive; response drained via Content-Length in head read) */
-        if (http >= 0) {
+        if (http >= 0 && !cfg.noSubscribe) {
             std::string sreq = "GET /api/v1/users/subscribe/room/" + rid +
                                " HTTP/1.1\r\nHost: h\r\nConnection: keep-alive\r\napi-key: " + cfg.clientKey +
                                "\r\nuid: " + uid + "\r\n\r\n";
@@ -369,6 +377,19 @@ static void worker(const Config& cfg, int firstConn, int lastConn) {
     while (!g_go.load(std::memory_order_acquire)) {
         pump(); /* keep answering pings while other shards finish connecting */
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    /* --idle: hold the connections open and answer pings, never publish */
+    if (cfg.idle) {
+        while (!g_stop.load(std::memory_order_acquire)) {
+            pump();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        for (auto& c : conns)
+            if (c.fd >= 0)
+                close(c.fd);
+        close(ep);
+        return;
     }
 
     const bool flood = cfg.rate <= 0.0;
@@ -489,6 +510,10 @@ int main(int argc, char** argv) {
             cfg.size = atoi(next());
         else if (a == "--prefix")
             cfg.prefix = next();
+        else if (a == "--idle")
+            cfg.idle = true;
+        else if (a == "--no-subscribe")
+            cfg.noSubscribe = true;
         else if (a == "--uid-prefix")
             cfg.uidPrefix = next();
         else if (a == "--key")

@@ -26,9 +26,33 @@ namespace {
     constexpr double kAdaptiveTarget = 0.70;
     /** Don't trust a measurement taken from a handful of connections. */
     constexpr int kMinSampleConns = 500;
-    /** Never believe a per-connection cost below this (guards against a cap so
-     *  large that a traffic change cannot be absorbed). */
-    constexpr unsigned long long kMinBytesPerConn = 12ULL * 1024;
+    /**
+     * Never believe a per-connection cost below this.
+     *
+     * A genuinely idle connection measures ~5 KB, but idle is not a promise: the
+     * moment those sockets start carrying fan-out they cost ~40 KB each, and a
+     * cap sized on the idle figure would already have admitted far more than the
+     * box can then hold — and admission control cannot take a connection back.
+     * So the cap assumes at least this much even when it measures less, which is
+     * what limits a 1 GB box to ~61k idle connections rather than the ~160k that
+     * would physically fit.
+     *
+     * SL_MIN_BYTES_PER_CONN lowers it for a workload known to stay idle (and for
+     * measuring the physical ceiling). Doing so trades the safety margin for
+     * capacity: if that traffic assumption is wrong, the box OOMs.
+     */
+    unsigned long long minBytesPerConn() {
+        static unsigned long long v = []() -> unsigned long long {
+            if (const char* e = std::getenv("SL_MIN_BYTES_PER_CONN")) {
+                unsigned long long n = std::strtoull(e, nullptr, 10);
+                if (n > 0) {
+                    return n;
+                }
+            }
+            return 12ULL * 1024;
+        }();
+        return v;
+    }
     /** Growth is capped per step: the cost of being wrong in the "too many
      *  connections" direction is death, the cost of being wrong the other way is
      *  a few refused connections. Shrink immediately, grow 20% at a time. */
@@ -259,8 +283,8 @@ namespace {
         }
 
         unsigned long long perConn = (workingSet - baseline) / (unsigned long long)conns;
-        if (perConn < kMinBytesPerConn) {
-            perConn = kMinBytesPerConn;
+        if (perConn < minBytesPerConn()) {
+            perConn = minBytesPerConn();
         }
         g_bytesPerConn.store(perConn, std::memory_order_relaxed);
 

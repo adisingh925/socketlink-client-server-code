@@ -114,7 +114,37 @@ estimate — `SL_BYTES_PER_CONN=8192` yields a ~106k cap on 1 GB — but only if
 are confident the fan-out stays light, because the memory it protects against is
 the kind admission control cannot reclaim.
 
-## Idle connection capacity (one core)
+## Max idle connections (no messages at all)
+
+`tests/run_max_connections.sh` — connect, answer keepalive pings, hold; nothing
+is ever published and no room is subscribed. This is the number that matters for
+presence/notification workloads where sockets vastly outnumber messages. A level
+counts as held only when the SERVER's own `connections` metric reaches the
+target and the container survives the hold.
+
+On **1 CPU / 1 GB**:
+
+| Configuration | Max held | Memory | Limited by |
+|---|---|---|---|
+| **server defaults** | **60,915** | 303 MiB (30%) | the adaptive cap's safety floor |
+| floor lowered to the measured cost (`SL_MIN_BYTES_PER_CONN=5120`) | **135,528** | 686 MiB (67%) | memory |
+
+A bare idle connection costs **~5 KB** (80k → 399 MiB, 110k → 555 MiB,
+135k → 686 MiB) — less than half the ~11.7 KB of a connection that has joined a
+room and carries light traffic.
+
+**Why the default stops at 61k when memory is only 30% used.** The adaptive cap
+refuses to assume a per-connection cost below 12 KB even when it measures 5 KB,
+because *idle is not a promise*: if those sockets start carrying fan-out they
+cost ~40 KB each, and 135k of them would need 5.4 GB — while admission control
+can refuse a new connection but can never take back one already granted. The
+floor is what stops the server writing a cheque its memory cannot honour later.
+
+`SL_MIN_BYTES_PER_CONN` lowers it for a workload known to stay idle. That is a
+deliberate trade: it roughly doubles capacity and removes the margin that
+protects against those connections waking up.
+
+## Idle connection capacity with light traffic (one core)
 
 Essentially-idle connections (0.02 msgs/s each, so keepalive pings dominate).
 Cost is consistently **~11.7 KB per idle connection**, so RAM decides until the
