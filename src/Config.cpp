@@ -116,6 +116,11 @@ int populateUserData(std::string data) {
         }
     }
 
+    if (parsedJson.contains("cache_history_bytes_per_room") &&
+        !parsedJson["cache_history_bytes_per_room"].is_null()) {
+        userData.cacheHistoryBytesPerRoom = parsedJson["cache_history_bytes_per_room"].get<unsigned long long>();
+    }
+
     /** Batch sizes are used as a divisor (`% batchSize`) and as a size comparison,
      *  so 0 is a SIGFPE and a negative value converts to a huge size_t that never
      *  triggers a commit. Clamp both to at least 1. */

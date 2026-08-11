@@ -646,7 +646,7 @@ void worker_t::work() {
                                      roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) ||
                                      roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
                                      roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
-                                     /** store the latest message under the room id (batched; the read
+                                     /** append to the room's bounded history (batched; the read
                          *  endpoint forces a flush before reading) */
                                      write_worker(rid, std::string(msgBody));
                                      totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
@@ -2163,16 +2163,29 @@ void worker_t::work() {
                      uWS::Loop* httpLoop = uWS::Loop::get();
                      std::string ridStr(rid);
 
+                     /** ?limit=N caps how many recent messages are returned (newest
+                      *  first); default 100, clamped to [1, 1000]. */
+                     size_t limit = 100;
+                     {
+                         std::string_view lv = req->getQuery("limit");
+                         if (!lv.empty()) {
+                             char* endp = nullptr;
+                             unsigned long parsed = std::strtoul(std::string(lv).c_str(), &endp, 10);
+                             if (parsed >= 1)
+                                 limit = parsed > 1000 ? 1000 : parsed;
+                         }
+                     }
+
                      for (auto& w : ::workers) {
-                         w.loop_->defer([pending, httpLoop, res, isAborted, ridStr]() {
+                         w.loop_->defer([pending, httpLoop, res, isAborted, ridStr, limit]() {
                              /** flushes THIS worker's thread-local batch */
                              write_worker(ridStr, "", true);
 
                              if (pending->fetch_sub(1, std::memory_order_acq_rel) == 1) {
                                  /** last flush done — respond on the thread that owns `res`
                   *  (isAborted is only read there, same thread as onAborted) */
-                                 httpLoop->defer([res, isAborted, ridStr]() {
-                                     replyJson(res, isAborted, "200 OK", read_worker(ridStr));
+                                 httpLoop->defer([res, isAborted, ridStr, limit]() {
+                                     replyJson(res, isAborted, "200 OK", read_worker(ridStr, limit));
                                  });
                              }
                          });

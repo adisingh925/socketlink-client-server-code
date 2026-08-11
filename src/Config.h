@@ -75,6 +75,10 @@ public:
     /** lmdb configurations */
     int lmdbCommitBatchSize = 1000;
     unsigned long long lmdbDatabaseSizeInBytes = 1ULL << 30; /* 1 GB message store */
+    /** Cache rooms keep a bounded history (newest messages) up to this many bytes
+     *  of message content per room; oldest are evicted past it. 0 keeps only the
+     *  latest message (legacy behaviour). */
+    unsigned long long cacheHistoryBytesPerRoom = 5ULL * 1024 * 1024; /* 5 MB */
 
     /** auto populated according to the values of above variables */
     uint32_t features = 0;
