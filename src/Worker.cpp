@@ -38,6 +38,14 @@ static thread_local simdjson::ondemand::parser parser;
 /** smoothing factor */
 constexpr double alpha = 0.05;
 
+/** One cross-worker fan-out message: room id + built envelope in a single
+ *  allocation, so the deferred publish holds ONE shared_ptr control block rather
+ *  than two (halves the cross-core refcount traffic — see the publish path). */
+struct FanoutMsg {
+    std::string rid;
+    std::string data;
+};
+
 /** calculate latency for each thread */
 void update_ema(double newLatency) {
     localEma = alpha * newLatency + (1 - alpha) * localEma;
@@ -576,29 +584,33 @@ void worker_t::work() {
                                  }
                                  remoteMask &= ~(1ULL << selfIdx);
 
-                                 /** Only pay for the shared copies when there is somewhere to send
-                     *  them; a room confined to this worker skips both allocations. */
+                                 /** Only pay for the shared copy when there is somewhere to send it;
+                     *  a room confined to this worker skips the allocation entirely.
+                     *  rid and payload share ONE control block (one make_shared, one
+                     *  refcount) — profiling the 8-core saturated case showed the
+                     *  shared_ptr refcount release at ~3% of CPU because each remote
+                     *  worker previously decremented TWO control blocks; merging them
+                     *  halves that cross-core atomic traffic and one allocation. */
                                  if (remoteMask != 0) {
-                                     auto data = std::make_shared<std::string>(envelope);
-                                     auto ridShared = std::make_shared<std::string>(rid);
+                                     auto fan = std::make_shared<FanoutMsg>(FanoutMsg{rid, envelope});
 
                                      for (size_t wi = 0; wi < ::workers.size(); ++wi) {
                                          if (!(remoteMask & (1ULL << wi))) {
                                              continue;
                                          }
                                          worker_t& w = ::workers[wi];
-                                         w.loop_->defer([&w, data, ridShared, opCode]() {
-                                             w.app_->publish(*ridShared, *data, opCode, true);
+                                         w.loop_->defer([&w, fan, opCode]() {
+                                             w.app_->publish(fan->rid, fan->data, opCode, true);
 
                                              /** count THIS worker's local subscribers too, so the
                               *  messages_sent/payload metrics reflect true cross-worker
                               *  fan-out (previously only the publisher's worker counted
                               *  and the totals undercounted by ~worker-count) */
-                                             unsigned int subs = w.app_->numSubscribers(*ridShared);
+                                             unsigned int subs = w.app_->numSubscribers(fan->rid);
                                              WorkerCounters& wc = workerCounters[workerIndex(&w)];
                                              wc.messagesSent.fetch_add(static_cast<unsigned long long>(subs),
                                                                        std::memory_order_relaxed);
-                                             wc.payloadSent.fetch_add(static_cast<unsigned long long>(data->size()) *
+                                             wc.payloadSent.fetch_add(static_cast<unsigned long long>(fan->data.size()) *
                                                                           static_cast<unsigned long long>(subs),
                                                                       std::memory_order_relaxed);
                                          });
