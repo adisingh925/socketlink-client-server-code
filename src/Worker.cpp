@@ -700,7 +700,7 @@ void worker_t::work() {
                       *  grow so cautiously — this is the missing half. A socket reaching
                       *  .dropped is by definition failing to keep up, so it is both the
                       *  cheapest to lose and the most expensive to keep. */
-                     if (admissionPaused()) {
+                     if (admissionPaused() && !ws->getUserData()->shedScheduled) {
                          static std::atomic<unsigned long long> shed{0};
                          unsigned long long n = shed.fetch_add(1, std::memory_order_relaxed);
                          if (n % 1000 == 0) {
@@ -708,7 +708,22 @@ void worker_t::work() {
                                  "Memory pressure: closing backpressured connections (total shed: ", n + 1, ")");
                          }
                          countConnectionShed();
-                         ws->end(1013 /* try again later */, "SERVER_UNDER_MEMORY_PRESSURE");
+
+                         /** Do NOT ws->end() here: .dropped fires from inside
+                          *  uWS::TopicTree::drain(), which is mid-walk of its subscriber
+                          *  list (for s = ...; s; s = s->next). Ending the socket frees
+                          *  this Subscriber, so the next s->next dereferences freed memory
+                          *  — a use-after-free that segfaulted the server under an all-on
+                          *  flood the instant memory-pressure shedding engaged
+                          *  (crash at TopicTree.h:274). Defer the close to the next loop
+                          *  tick, past drain, and re-validate the socket by uid on the way
+                          *  (runOnOwnerThread) so a socket that closes meanwhile is skipped
+                          *  rather than dangled. shedScheduled stops a storm of dropped
+                          *  callbacks from queueing one close per message. */
+                         ws->getUserData()->shedScheduled = true;
+                         runOnOwnerThread(this, ws->getUserData()->uid, [](SLWebSocket* aliveWs, worker_t*) {
+                             aliveWs->end(1013 /* try again later */, "SERVER_UNDER_MEMORY_PRESSURE");
+                         });
                      }
                  },
              .drain =

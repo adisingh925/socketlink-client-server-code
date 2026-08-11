@@ -70,6 +70,11 @@ struct PerSocketData {
      * false - sending not allowed
      */
     bool sendingAllowed = true;
+
+    /** Set once this socket has been scheduled for memory-pressure shedding, so a
+     *  storm of .dropped callbacks does not queue one deferred close per dropped
+     *  message (see the .dropped handler in Worker.cpp). */
+    bool shedScheduled = false;
 };
 
 /**
