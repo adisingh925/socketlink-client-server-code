@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(wsl.exe -e bash -lc '~/sl-deps/build.sh 2>&1 | grep -vE \"warning:|note:|deprecated|declared here|^ *[0-9]+ \\\\||^ *\\\\||\\\\^|~~~|In file included|In member function|In function|In lambda\" | tail -30; echo \"=== done ===\"')",
+      "Bash(wsl.exe -e bash -lc '~/sl-deps/build.sh /tmp/socketlink_test 2>&1 | grep -iE \"WebhookDispatcher|jsonBuffer|sendWebhookBlocking|deque|condition_variable\" | grep -i warning; echo \"=== new-code warnings above \\(none = clean\\) ===\"')",
+      "Bash(wsl.exe -e bash -lc 'grep -vE \"listening on port|^\\\\[2026\" /tmp/load_55k.log 2>/dev/null | tail -20; echo \"---wsl alive check---\"; free -h 2>&1 | head -2')",
+      "Bash(wsl.exe -e bash -lc 'pkill -9 -f sl_new 2>/dev/null; pkill -9 -f loadtest.py 2>/dev/null; sleep 1; echo \"cleaned; procs: $\\(pgrep -f \"sl_new|loadtest.py\" | wc -l\\)\"; free -h | head -2')",
+      "Bash(wsl.exe -e bash -lc ' *)",
+      "Bash(wsl.exe -e bash -lc 'pkill -9 -f sl_new 2>/dev/null; pkill -9 -f sl_prof 2>/dev/null; sleep 1; \\(exec 3<>/dev/tcp/127.0.0.1/9001\\) 2>/dev/null && echo \"port busy\" || echo \"port free\"; ls -la ~/sl-bin/sl_new | awk \"{print \\\\$5, \\\\$9}\"')",
+      "Bash(wsl.exe -e bash -lc 'echo alive; uptime')",
+      "Bash(wsl.exe --shutdown)",
+      "Bash(wsl.exe -e bash -lc 'echo \"wsl reset OK\"; uptime; free -h | head -2')",
+      "Bash(wsl.exe -e bash -lc 'pkill -9 -f sl-bin/sl_new 2>/dev/null; SP=\"/mnt/c/Users/ADITYA~1/AppData/Local/Temp/claude/c--dev-socketlink-client-server-code/0723af0d-9738-45eb-9fc0-5fccf2d1225c/scratchpad\"; grep -vE \"^\\\\[test\\\\] slow\" \"$SP/bp4.txt\" 2>/dev/null | tail -20 || echo \"\\(no bp4 output\\)\"')",
+      "Bash(wsl.exe -e bash -lc 'echo alive; uptime | head -1')"
+    ]
+  }
+}

@@ -73,18 +73,33 @@ drive --conns 45000 --threads 64 --group 10 --rate 2 --duration 30 --size 256 --
 report
 echo "--- container survived: oom=$("$DOCKER" inspect sl-server --format '{{.State.OOMKilled}}' | tr -d '\r') status=$("$DOCKER" inspect sl-server --format '{{.State.Status}}' | tr -d '\r')"
 
-echo "############ PHASE 5: SATURATED (measures the server, not the client) ############"
+echo "############ PHASE 5: CEILING SEARCH (measures the server, not the client) ############"
 # Phases 1-4 mostly run BELOW the server's ceiling, so they report the CLIENT's
 # limit and cannot detect a server regression — they were identical either side
-# of a 59% hot-path improvement. These offer far more than the server can
-# deliver, so the delivered rate IS the ceiling and drops are expected.
-for spec in "2 300" "10 60" "100 5"; do
-  set -- $spec
+# of a 59% hot-path improvement.
+#
+# Simply offering an enormous rate does not fix that either: past the ceiling the
+# client cannot drain, sockets back up, and DELIVERED throughput FALLS. Offering
+# 4x measured 406k/s where a gentler load sustained 987k/s — that is the collapse
+# regime, not the limit.
+#
+# So step the rate up and watch where drops begin: the last row with ~zero drops
+# is the real ceiling, and the first row with drops brackets it.
+ceiling_search() {
   GROUP=$1
-  RATE=$2
-  server_up
-  echo "--- room size $GROUP at rate $RATE (offered $((8000 * RATE * (GROUP - 1))) deliveries/s)"
-  drive --conns 8000 --threads 32 --group "$GROUP" --rate "$RATE" --duration 15 --size 128 \
-        --connect-timeout 180 --uid-prefix "p5g${GROUP}_"
-  report
-done
+  shift
+  for RATE in "$@"; do
+    server_up
+    echo "--- room size $GROUP, rate $RATE (offered $((8000 * RATE * (GROUP - 1))) deliveries/s)"
+    drive --conns 8000 --threads 32 --group "$GROUP" --rate "$RATE" --duration 15 --size 128 \
+          --connect-timeout 180 --uid-prefix "p5g${GROUP}r${RATE}_"
+    report
+  done
+}
+
+# Measured on 1 CPU / 1 GB: rate 12 (864k offered) is delivered in full, rate 16
+# (1.15M) collapses to ~454k with drops — so the single-core ceiling for rooms of
+# ten sits between 864k and 1.15M deliveries/s, and the fall past it is a cliff,
+# not a plateau.
+ceiling_search 10 8 12 16
+ceiling_search 100 2 3
