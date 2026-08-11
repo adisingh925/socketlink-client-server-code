@@ -107,7 +107,8 @@ int populateUserData(std::string data) {
     }
 
     if (parsedJson.contains("max_storage_allowed_in_gb") && !parsedJson["max_storage_allowed_in_gb"].is_null()) {
-        unsigned long long v = parsedJson["max_storage_allowed_in_gb"].get<unsigned long long>() * 1024ULL * 1024 * 1024;
+        unsigned long long v =
+            parsedJson["max_storage_allowed_in_gb"].get<unsigned long long>() * 1024ULL * 1024 * 1024;
         if (v != userData.lmdbDatabaseSizeInBytes) {
             userData.lmdbDatabaseSizeInBytes = v;
             /** the LMDB map size is set once in init_env — a change only takes
@@ -116,8 +117,7 @@ int populateUserData(std::string data) {
         }
     }
 
-    if (parsedJson.contains("cache_history_bytes_per_room") &&
-        !parsedJson["cache_history_bytes_per_room"].is_null()) {
+    if (parsedJson.contains("cache_history_bytes_per_room") && !parsedJson["cache_history_bytes_per_room"].is_null()) {
         userData.cacheHistoryBytesPerRoom = parsedJson["cache_history_bytes_per_room"].get<unsigned long long>();
     }
 
@@ -270,9 +270,8 @@ static bool applyBackpressureInvariant(UserData& ud) {
         return false;
     }
 
-    log(LogLevel::WARN, "max_backpressure_in_bytes (", ud.maxBackpressureInBytes,
-        ") is below the message size limit (", ud.msgSizeAllowedInBytes,
-        "); a single large message would overflow it and be dropped — raising to ", required);
+    log(LogLevel::WARN, "max_backpressure_in_bytes (", ud.maxBackpressureInBytes, ") is below the message size limit (",
+        ud.msgSizeAllowedInBytes, "); a single large message would overflow it and be dropped — raising to ", required);
     ud.maxBackpressureInBytes = (unsigned int)required;
     return true;
 }

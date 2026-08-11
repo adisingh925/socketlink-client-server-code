@@ -647,7 +647,7 @@ void worker_t::work() {
                                      roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
                                      roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
                                      /** append to the room's bounded history (batched; the read
-                         *  endpoint forces a flush before reading) */
+                                      *  endpoint forces a flush before reading) */
                                      write_worker(rid, std::string(msgBody));
                                      totalLMDBWrites.fetch_add(1, std::memory_order_relaxed);
 
@@ -2183,7 +2183,7 @@ void worker_t::work() {
 
                              if (pending->fetch_sub(1, std::memory_order_acq_rel) == 1) {
                                  /** last flush done — respond on the thread that owns `res`
-                  *  (isAborted is only read there, same thread as onAborted) */
+                                  *  (isAborted is only read there, same thread as onAborted) */
                                  httpLoop->defer([res, isAborted, ridStr, limit]() {
                                      replyJson(res, isAborted, "200 OK", read_worker(ridStr, limit));
                                  });

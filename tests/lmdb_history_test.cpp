@@ -25,7 +25,8 @@
 static int failures = 0;
 static void check(const char* label, bool ok) {
     printf("  %s %s\n", ok ? "ok  " : "FAIL", label);
-    if (!ok) failures++;
+    if (!ok)
+        failures++;
 }
 
 // Push a message then force a flush so it is durable immediately.
@@ -44,12 +45,18 @@ static std::vector<std::string> parseArr(const std::string& s) {
             size_t j = i + 1;
             std::string cur;
             while (j < s.size() && s[j] != '"') {
-                if (s[j] == '\\' && j + 1 < s.size()) { cur.push_back(s[j + 1]); j += 2; }
-                else { cur.push_back(s[j]); j++; }
+                if (s[j] == '\\' && j + 1 < s.size()) {
+                    cur.push_back(s[j + 1]);
+                    j += 2;
+                } else {
+                    cur.push_back(s[j]);
+                    j++;
+                }
             }
             out.push_back(cur);
             i = j + 1;
-        } else i++;
+        } else
+            i++;
     }
     return out;
 }
@@ -99,7 +106,8 @@ int main() {
     }
     const std::string er = "pub-cache-evict";
     // each message is 10 bytes -> cap 25 keeps at most 2 newest (20 bytes)
-    for (int i = 0; i < 6; i++) put(er, "0123456789");
+    for (int i = 0; i < 6; i++)
+        put(er, "0123456789");
     {
         auto a = parseArr(read_worker(er, 100));
         check("eviction keeps <=2 (cap 25 / 10B msgs)", a.size() <= 2 && a.size() >= 1);

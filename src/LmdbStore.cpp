@@ -34,8 +34,8 @@ MDB_dbi g_dbi;
  * oldest key in a room's range; all within the single batch write transaction.
  */
 namespace {
-    constexpr char SEP_MSG = '\0';   /* rid <SEP_MSG> seq  -> a message */
-    constexpr char SEP_META = '\1';  /* rid <SEP_META>     -> room byte-count meta */
+    constexpr char SEP_MSG = '\0';  /* rid <SEP_MSG> seq  -> a message */
+    constexpr char SEP_META = '\1'; /* rid <SEP_META>     -> room byte-count meta */
     const std::string GLOBAL_SEQ_KEY(1, '\0');
 
     /** global arrival sequence; seeded from GLOBAL_SEQ_KEY at startup so ordering
