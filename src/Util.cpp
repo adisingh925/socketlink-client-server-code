@@ -15,8 +15,9 @@ bool constantTimeEquals(std::string_view a, std::string_view b) {
 }
 
 /** Computes the HMAC-SHA256 of `data` under `key` into the 32-byte `output`. */
-void hmac_sha256(const char* key, size_t key_len, const char* data, size_t data_len,
-                 unsigned char output[HMAC_SHA256_DIGEST_LENGTH]) {
+void hmac_sha256(
+    const char* key, size_t key_len, const char* data, size_t data_len,
+    unsigned char output[HMAC_SHA256_DIGEST_LENGTH]) {
     HMAC_CTX* ctx = HMAC_CTX_new();
 
     HMAC_Init_ex(ctx, key, key_len, EVP_sha256(), nullptr);

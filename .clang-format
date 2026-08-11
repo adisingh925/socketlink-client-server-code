@@ -31,7 +31,12 @@ AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 
 # Misc
-AlignAfterOpenBracket: Align
+# AlwaysBreak (not Align): break after every '(' that wraps, so wrapped calls
+# indent uniformly by ContinuationIndentWidth instead of aligning to the '('
+# column. Align made the route chain (.get/.post/.put/.del) indent by the
+# method-name length and pick per-call whether to inline the first argument, so
+# sibling handlers drifted by a space. AlwaysBreak keeps them identical.
+AlignAfterOpenBracket: AlwaysBreak
 BinPackArguments: true
 BinPackParameters: true
 BreakConstructorInitializers: BeforeColon

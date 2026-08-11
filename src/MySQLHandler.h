@@ -59,9 +59,10 @@ private:
             unsigned int timeout = 3;
             mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
 
-            if (!mysql_real_connect(conn, UserData::getInstance().dbHost.c_str(),
-                                    UserData::getInstance().dbUser.c_str(), UserData::getInstance().dbPassword.c_str(),
-                                    UserData::getInstance().dbName.c_str(), UserData::getInstance().dbPort, NULL, 0)) {
+            if (!mysql_real_connect(
+                    conn, UserData::getInstance().dbHost.c_str(), UserData::getInstance().dbUser.c_str(),
+                    UserData::getInstance().dbPassword.c_str(), UserData::getInstance().dbName.c_str(),
+                    UserData::getInstance().dbPort, NULL, 0)) {
                 log(LogLevel::ERROR, "MySQL Connection Error : " + std::string(mysql_error(conn)));
                 mysql_close(conn);
                 conn = nullptr;
@@ -211,8 +212,9 @@ public:
     }
 
     /** Appends a message to the batch, flushing once a batch-size multiple is reached. */
-    void insertSingleData(const std::string& insert_time, const std::string& message, const std::string& identifier,
-                          const std::string& room) {
+    void insertSingleData(
+        const std::string& insert_time, const std::string& message, const std::string& identifier,
+        const std::string& room) {
         try {
             /** Retried up to 3 batches' worth; beyond that the batch is dropped to bound memory use */
             if (batch_data.size() <= (UserData::getInstance().mysqlDBCommitBatchSize * 3)) {
@@ -298,8 +300,7 @@ public:
                 droppedRows_.fetch_add(1, std::memory_order_relaxed);
                 droppedOne = true;
             }
-            rows_.push_back(
-                Row{std::move(insertTime), std::move(message), std::move(uid), std::move(rid), rowBytes});
+            rows_.push_back(Row{std::move(insertTime), std::move(message), std::move(uid), std::move(rid), rowBytes});
             queuedBytes_ += rowBytes;
         }
         cv_.notify_one();
@@ -388,22 +389,22 @@ private:
             /** guarded: an exception escaping this thread body would terminate
              *  the whole process */
             try {
-            if (haveCmd) {
-                switch (cmd) {
-                    case Command::FLUSH:
-                        handler->flushRemainingData();
-                        break;
-                    case Command::RECONNECT:
-                        handler->manualCreateConnection();
-                        break;
-                    case Command::DISCONNECT:
-                        handler->flushRemainingData();
-                        handler->disconnect();
-                        break;
+                if (haveCmd) {
+                    switch (cmd) {
+                        case Command::FLUSH:
+                            handler->flushRemainingData();
+                            break;
+                        case Command::RECONNECT:
+                            handler->manualCreateConnection();
+                            break;
+                        case Command::DISCONNECT:
+                            handler->flushRemainingData();
+                            handler->disconnect();
+                            break;
+                    }
+                } else if (haveRow) {
+                    handler->insertSingleData(row.insertTime, row.message, row.uid, row.rid);
                 }
-            } else if (haveRow) {
-                handler->insertSingleData(row.insertTime, row.message, row.uid, row.rid);
-            }
             } catch (const std::exception& e) {
                 log(LogLevel::ERROR, "MySQL writer: ", e.what());
             } catch (...) {

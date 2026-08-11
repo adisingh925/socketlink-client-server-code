@@ -533,8 +533,7 @@ int main(int argc, char** argv) {
             cfg.srcIps.push_back(cur);
             if (cfg.srcIps.empty())
                 cfg.srcIps.push_back("");
-        }
-        else {
+        } else {
             fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return 2;
         }
@@ -553,8 +552,9 @@ int main(int argc, char** argv) {
     }
     cfg.host = resolved;
 
-    fprintf(stderr, "[loadgen] connecting %d conns across %d threads (group=%d, rate=%.1f, size=%d)...\n", cfg.conns,
-            cfg.threads, cfg.group, cfg.rate, cfg.size);
+    fprintf(
+        stderr, "[loadgen] connecting %d conns across %d threads (group=%d, rate=%.1f, size=%d)...\n", cfg.conns,
+        cfg.threads, cfg.group, cfg.rate, cfg.size);
 
     std::vector<std::thread> threads;
     int per = cfg.conns / cfg.threads;
@@ -571,8 +571,9 @@ int main(int argc, char** argv) {
             break;
     }
     double setup = std::chrono::duration<double>(Clock::now() - t0).count();
-    fprintf(stderr, "[loadgen] connected %lld/%d in %.1fs (%lld failed)\n", (long long)g_connected.load(), cfg.conns,
-            setup, (long long)g_connectFailed.load());
+    fprintf(
+        stderr, "[loadgen] connected %lld/%d in %.1fs (%lld failed)\n", (long long)g_connected.load(), cfg.conns, setup,
+        (long long)g_connectFailed.load());
 
     /* measurement window */
     g_sent = 0;
@@ -585,14 +586,15 @@ int main(int argc, char** argv) {
     for (auto& t : threads)
         t.join();
 
-    printf("{\n"
-           "  \"connected\": %lld, \"connect_failed\": %lld, \"setup_s\": %.1f,\n"
-           "  \"group\": %d, \"rate\": %.1f, \"size\": %d, \"window_s\": %.1f,\n"
-           "  \"sent\": %lld, \"recv\": %lld,\n"
-           "  \"send_rate_msgs_s\": %.0f, \"recv_rate_msgs_s\": %.0f, \"recv_MB_s\": %.1f\n"
-           "}\n",
-           (long long)g_connected.load(), (long long)g_connectFailed.load(), setup, cfg.group, cfg.rate, cfg.size,
-           cfg.duration, sent, recvd, (double)sent / cfg.duration, (double)recvd / cfg.duration,
-           (double)rbytes / cfg.duration / 1e6);
+    printf(
+        "{\n"
+        "  \"connected\": %lld, \"connect_failed\": %lld, \"setup_s\": %.1f,\n"
+        "  \"group\": %d, \"rate\": %.1f, \"size\": %d, \"window_s\": %.1f,\n"
+        "  \"sent\": %lld, \"recv\": %lld,\n"
+        "  \"send_rate_msgs_s\": %.0f, \"recv_rate_msgs_s\": %.0f, \"recv_MB_s\": %.1f\n"
+        "}\n",
+        (long long)g_connected.load(), (long long)g_connectFailed.load(), setup, cfg.group, cfg.rate, cfg.size,
+        cfg.duration, sent, recvd, (double)sent / cfg.duration, (double)recvd / cfg.duration,
+        (double)rbytes / cfg.duration / 1e6);
     return 0;
 }

@@ -13,8 +13,8 @@
 #include "Webhooks.h"
 
 /** unsubscribe from the current room and do some cleanup */
-void closeConnection(SLWebSocket* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType,
-                     bool isClosed) {
+void closeConnection(
+    SLWebSocket* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType, bool isClosed) {
     if (isClosed == false) {
         /** drop the socket-local subscription (owner thread; the hot path reads this)
          *  and this worker's claim on the room's publish mask */
@@ -60,35 +60,35 @@ void closeConnection(SLWebSocket* ws, worker_t* worker, std::string rid, std::st
     /** remove the user from the room in topics (mutation: shared iteration guard,
      *  scoped so it is NOT held across the defers/webhooks below) */
     {
-    std::shared_lock<std::shared_mutex> topicsIterGuard(registryIterationGuard);
-    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
+        std::shared_lock<std::shared_mutex> topicsIterGuard(registryIterationGuard);
+        tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor outer_accessor;
 
-    if (ThreadSafe::topics.find(outer_accessor, rid)) {
-        auto& inner_map = outer_accessor->second;
+        if (ThreadSafe::topics.find(outer_accessor, rid)) {
+            auto& inner_map = outer_accessor->second;
 
-        {
-            tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
-            if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
-                inner_map.erase(inner_accessor);
+            {
+                tbb::concurrent_hash_map<std::string, bool>::accessor inner_accessor;
+                if (inner_map.find(inner_accessor, ws->getUserData()->uid)) {
+                    inner_map.erase(inner_accessor);
+                }
             }
-        }
 
-        size = inner_map.size();
+            size = inner_map.size();
 
-        /** room empty: drop it along with its disabled/banned entries */
-        if (size == 0) {
-            ThreadSafe::topics.erase(outer_accessor);
+            /** room empty: drop it along with its disabled/banned entries */
+            if (size == 0) {
+                ThreadSafe::topics.erase(outer_accessor);
 
-            for (auto& map : {&ThreadSafe::disabledConnections, &ThreadSafe::bannedConnections}) {
-                tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor
-                    map_accessor;
+                for (auto& map : {&ThreadSafe::disabledConnections, &ThreadSafe::bannedConnections}) {
+                    tbb::concurrent_hash_map<std::string, tbb::concurrent_hash_map<std::string, bool>>::accessor
+                        map_accessor;
 
-                if (map->find(map_accessor, rid)) {
-                    map->erase(map_accessor);
+                    if (map->find(map_accessor, rid)) {
+                        map->erase(map_accessor);
+                    }
                 }
             }
         }
-    }
     }
 
     log(LogLevel::DEBUG, "Unsubscribed: uid=", uid, " rid=", rid, " (room size ", size, ")");
@@ -143,8 +143,8 @@ void closeConnection(SLWebSocket* ws, worker_t* worker, std::string rid, std::st
 
         std::string body = payload.str();
 
-        sendHTTPSPOSTRequestFireAndForget(UserData::getInstance().webHookBaseUrl, UserData::getInstance().webhookPath,
-                                          body, {});
+        sendHTTPSPOSTRequestFireAndForget(
+            UserData::getInstance().webHookBaseUrl, UserData::getInstance().webhookPath, body, {});
     }
 
     /** room vacate webhooks */
@@ -156,8 +156,8 @@ void closeConnection(SLWebSocket* ws, worker_t* worker, std::string rid, std::st
 
             std::string body = payload.str();
 
-            sendHTTPSPOSTRequestFireAndForget(UserData::getInstance().webHookBaseUrl,
-                                              UserData::getInstance().webhookPath, body, {});
+            sendHTTPSPOSTRequestFireAndForget(
+                UserData::getInstance().webHookBaseUrl, UserData::getInstance().webhookPath, body, {});
         }
     }
 }
@@ -272,9 +272,8 @@ void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t 
                     continue;
                 }
                 worker_t& w = ::workers[wi];
-                w.loop_->defer([&w, broadcastMessage, rid]() {
-                    w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                });
+                w.loop_->defer(
+                    [&w, broadcastMessage, rid]() { w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true); });
             }
         }
 
@@ -286,8 +285,8 @@ void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t 
 
             std::string body = payload.str();
 
-            sendHTTPSPOSTRequestFireAndForget(UserData::getInstance().webHookBaseUrl,
-                                              UserData::getInstance().webhookPath, body, {});
+            sendHTTPSPOSTRequestFireAndForget(
+                UserData::getInstance().webHookBaseUrl, UserData::getInstance().webhookPath, body, {});
         }
 
         /** Room ocuupied webhooks */
@@ -299,8 +298,8 @@ void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t 
 
                 std::string body = payload.str();
 
-                sendHTTPSPOSTRequestFireAndForget(UserData::getInstance().webHookBaseUrl,
-                                                  UserData::getInstance().webhookPath, body, {});
+                sendHTTPSPOSTRequestFireAndForget(
+                    UserData::getInstance().webHookBaseUrl, UserData::getInstance().webhookPath, body, {});
             }
         }
     }

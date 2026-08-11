@@ -8,8 +8,9 @@
 constexpr int HMAC_SHA256_DIGEST_LENGTH = 32; /**< SHA-256 produces a 32-byte (256-bit) output */
 
 /** Computes the HMAC-SHA256 of `data` under `key` into the 32-byte `output`. */
-void hmac_sha256(const char* key, size_t key_len, const char* data, size_t data_len,
-                 unsigned char output[HMAC_SHA256_DIGEST_LENGTH]);
+void hmac_sha256(
+    const char* key, size_t key_len, const char* data, size_t data_len,
+    unsigned char output[HMAC_SHA256_DIGEST_LENGTH]);
 
 /** Converts binary data to a lowercase hex string. */
 std::string to_hex(const unsigned char* data, size_t len);

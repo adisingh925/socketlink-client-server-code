@@ -241,22 +241,34 @@ int safeConnectionCap(unsigned long long limitBytes) {
     return static_cast<int>(cap);
 }
 
-bool admissionPaused() { return g_paused.load(std::memory_order_relaxed); }
+bool admissionPaused() {
+    return g_paused.load(std::memory_order_relaxed);
+}
 
-unsigned long long memoryRejectionCount() { return g_rejections.load(std::memory_order_relaxed); }
+unsigned long long memoryRejectionCount() {
+    return g_rejections.load(std::memory_order_relaxed);
+}
 
-void countMemoryRejection() { g_rejections.fetch_add(1, std::memory_order_relaxed); }
+void countMemoryRejection() {
+    g_rejections.fetch_add(1, std::memory_order_relaxed);
+}
 
-unsigned long long connectionShedCount() { return g_shed.load(std::memory_order_relaxed); }
+unsigned long long connectionShedCount() {
+    return g_shed.load(std::memory_order_relaxed);
+}
 
-void countConnectionShed() { g_shed.fetch_add(1, std::memory_order_relaxed); }
+void countConnectionShed() {
+    g_shed.fetch_add(1, std::memory_order_relaxed);
+}
 
 void enableAdaptiveCap(std::atomic<int>* connCounter, int hardMax) {
     g_connCounter = connCounter;
     g_hardMax.store(hardMax, std::memory_order_relaxed);
 }
 
-unsigned long long measuredBytesPerConnection() { return g_bytesPerConn.load(std::memory_order_relaxed); }
+unsigned long long measuredBytesPerConnection() {
+    return g_bytesPerConn.load(std::memory_order_relaxed);
+}
 
 namespace {
     /**
@@ -363,8 +375,8 @@ namespace {
             return;
         }
 
-        log(LogLevel::INFO, "Adaptive cap: ", current, " -> ", newCap, " (measured ", perConn / 1024,
-            " KiB/conn at ", conns, " connections, ", workingSet / (1024 * 1024), " MiB used)");
+        log(LogLevel::INFO, "Adaptive cap: ", current, " -> ", newCap, " (measured ", perConn / 1024, " KiB/conn at ",
+            conns, " connections, ", workingSet / (1024 * 1024), " MiB used)");
         setConnectionLimit((int)newCap);
     }
 } // namespace

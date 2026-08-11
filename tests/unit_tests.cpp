@@ -42,7 +42,9 @@ static int g_checks = 0;
         }                                                                                                              \
     } while (0)
 
-static void section(const char* name) { std::printf("%s\n", name); }
+static void section(const char* name) {
+    std::printf("%s\n", name);
+}
 
 /* ------------------------------- JSON escaping ----------------------------- */
 static void test_json_escaping() {
@@ -80,7 +82,7 @@ static void test_constant_time_equals() {
 
     CHECK(constantTimeEquals("secret", "secret"));
     CHECK(!constantTimeEquals("secret", "secreT"));
-    CHECK(!constantTimeEquals("secret", "secret "));  /** length differs */
+    CHECK(!constantTimeEquals("secret", "secret ")); /** length differs */
     CHECK(!constantTimeEquals("", "x"));
     CHECK(constantTimeEquals("", ""));
     /** must compare content, not pointers */
@@ -109,8 +111,8 @@ static void test_hmac_sha256() {
     const char* data = "Hi There";
     unsigned char out[HMAC_SHA256_DIGEST_LENGTH];
     hmac_sha256((const char*)key, sizeof(key), data, std::strlen(data), out);
-    CHECK_EQ(to_hex(out, HMAC_SHA256_DIGEST_LENGTH),
-             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+    CHECK_EQ(
+        to_hex(out, HMAC_SHA256_DIGEST_LENGTH), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
 }
 
 /* -------------------------------- SQL time --------------------------------- */

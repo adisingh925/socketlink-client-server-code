@@ -114,8 +114,8 @@ static int readAndDrainWebhookResponse() {
             break; /** end of headers */
         }
         std::string lower(line);
-        std::transform(lower.begin(), lower.end(), lower.begin(),
-                       [](unsigned char c) { return (char)std::tolower(c); });
+        std::transform(
+            lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char)std::tolower(c); });
         if (lower.rfind("content-length:", 0) == 0) {
             contentLength = std::atoll(line.c_str() + 15);
         } else if (lower.rfind("transfer-encoding:", 0) == 0 && lower.find("chunked") != std::string::npos) {
@@ -135,8 +135,8 @@ static int readAndDrainWebhookResponse() {
     /** drain the body — read_until may already have buffered part of it */
     long long buffered = (long long)response_buffer.size();
     if (buffered < contentLength) {
-        boost::asio::read(*ssl_socket, response_buffer,
-                          boost::asio::transfer_exactly((size_t)(contentLength - buffered)), ec);
+        boost::asio::read(
+            *ssl_socket, response_buffer, boost::asio::transfer_exactly((size_t)(contentLength - buffered)), ec);
         if (ec) {
             ssl_socket = nullptr; /** short read — stream unusable */
         }
@@ -151,8 +151,9 @@ static int readAndDrainWebhookResponse() {
  *  sendHTTPSPOSTRequestFireAndForget wrapper, which offloads to a dispatcher thread.
  *  The synchronous path is used directly only when a status code is needed
  *  (waitForResponse == true, e.g. private-room verification). */
-static int sendWebhookBlocking(const std::string& baseURL, const std::string& path, const std::string& body,
-                               const std::map<std::string, std::string>& headers, bool waitForResponse) {
+static int sendWebhookBlocking(
+    const std::string& baseURL, const std::string& path, const std::string& body,
+    const std::map<std::string, std::string>& headers, bool waitForResponse) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         try {
             if (UserData::getInstance().webhookIP.empty()) {
@@ -193,8 +194,9 @@ static int sendWebhookBlocking(const std::string& baseURL, const std::string& pa
 
             if (UserData::getInstance().webhookSecret.length() > 0) {
                 unsigned char hmac_result[HMAC_SHA256_DIGEST_LENGTH];
-                hmac_sha256(UserData::getInstance().webhookSecret.c_str(),
-                            UserData::getInstance().webhookSecret.length(), body.c_str(), body.length(), hmac_result);
+                hmac_sha256(
+                    UserData::getInstance().webhookSecret.c_str(), UserData::getInstance().webhookSecret.length(),
+                    body.c_str(), body.length(), hmac_result);
 
                 request_stream << "POST " << path << " HTTP/1.1\r\n"
                                << "Host: " << baseURL << "\r\n"
@@ -276,8 +278,8 @@ public:
     }
 
     /** Enqueue a fire-and-forget webhook. Non-blocking; safe to call from event-loop threads. */
-    void enqueue(std::string baseURL, std::string path, std::string body,
-                 std::map<std::string, std::string> headers = {}) {
+    void
+    enqueue(std::string baseURL, std::string path, std::string body, std::map<std::string, std::string> headers = {}) {
         bool droppedOne = false;
         size_t jobBytes = body.size() + path.size() + baseURL.size() + 64;
         {
@@ -381,9 +383,9 @@ private:
  * e.g. private-room verification) the request is sent synchronously on the calling thread
  * and the HTTP status is returned.
  */
-int sendHTTPSPOSTRequestFireAndForget(const std::string& baseURL, const std::string& path, const std::string& body,
-                                      const std::map<std::string, std::string>& headers,
-                                      bool waitForResponse) {
+int sendHTTPSPOSTRequestFireAndForget(
+    const std::string& baseURL, const std::string& path, const std::string& body,
+    const std::map<std::string, std::string>& headers, bool waitForResponse) {
     if (waitForResponse) {
         return sendWebhookBlocking(baseURL, path, body, headers, true);
     }
@@ -528,8 +530,8 @@ private:
     std::vector<std::thread> threads_;
 };
 
-bool enqueueVerificationWebhook(std::string baseURL, std::string path, std::string body,
-                                std::function<void(int)> onDone) {
-    return VerificationPool::getInstance().enqueue(std::move(baseURL), std::move(path), std::move(body),
-                                                   std::move(onDone));
+bool enqueueVerificationWebhook(
+    std::string baseURL, std::string path, std::string body, std::function<void(int)> onDone) {
+    return VerificationPool::getInstance().enqueue(
+        std::move(baseURL), std::move(path), std::move(body), std::move(onDone));
 }

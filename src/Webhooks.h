@@ -39,9 +39,9 @@ int getWebhookStatus(Webhooks webhook);
  * background dispatcher thread; when waitForResponse is true the request is sent
  * synchronously on the calling thread and the HTTP status is returned.
  */
-int sendHTTPSPOSTRequestFireAndForget(const std::string& baseURL, const std::string& path, const std::string& body,
-                                      const std::map<std::string, std::string>& headers = {},
-                                      bool waitForResponse = false);
+int sendHTTPSPOSTRequestFireAndForget(
+    const std::string& baseURL, const std::string& path, const std::string& body,
+    const std::map<std::string, std::string>& headers = {}, bool waitForResponse = false);
 
 /** Resolves the IPv4 address for `hostname` into the config snapshot being built.
  *  Blocks on getaddrinfo — see the note in Webhooks.cpp about holding locks. */
@@ -66,5 +66,5 @@ unsigned long long droppedWebhookCount();
  * which let a burst of private-room subscribes spawn thousands of threads each
  * potentially stuck in a multi-second connect.
  */
-bool enqueueVerificationWebhook(std::string baseURL, std::string path, std::string body,
-                                std::function<void(int)> onDone);
+bool enqueueVerificationWebhook(
+    std::string baseURL, std::string path, std::string body, std::function<void(int)> onDone);

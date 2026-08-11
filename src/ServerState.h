@@ -164,10 +164,10 @@ struct alignas(64) WorkerCounters {
 };
 inline WorkerCounters workerCounters[256];
 
-inline std::atomic<unsigned long long> totalConnectionErrors{0};    /** Websocket connections rejected due to some error */
-inline std::atomic<unsigned long long> totalFailedApiCalls{0};      /** API calls rejected due to 4XX or 5XX codes */
-inline std::atomic<unsigned long long> totalSuccessApiCalls{0};     /** API calls with 2XX code */
-inline std::atomic<unsigned long long> totalLMDBWrites{0};          /** Total writes to the LMDB database */
+inline std::atomic<unsigned long long> totalConnectionErrors{0}; /** Websocket connections rejected due to some error */
+inline std::atomic<unsigned long long> totalFailedApiCalls{0};   /** API calls rejected due to 4XX or 5XX codes */
+inline std::atomic<unsigned long long> totalSuccessApiCalls{0};  /** API calls with 2XX code */
+inline std::atomic<unsigned long long> totalLMDBWrites{0};       /** Total writes to the LMDB database */
 inline std::atomic<unsigned long long> totalSuccessWebhookCalls{0}; /** Total webhook calls */
 inline std::atomic<unsigned long long> totalFailedWebhookCalls{0};  /** Total failed webhook calls */
 inline std::atomic<bool> isMessagingDisabled(false);
@@ -227,7 +227,9 @@ inline constexpr size_t MAX_MASKED_WORKERS = 64;
 inline constexpr size_t MAX_REQUEST_BODY_BYTES = 8u * 1024u * 1024u;
 
 /** Index of a worker within the global `workers` vector. */
-inline size_t workerIndex(const worker_t* w) { return (size_t)(w - ::workers.data()); }
+inline size_t workerIndex(const worker_t* w) {
+    return (size_t)(w - ::workers.data());
+}
 
 /**
  * Register one subscriber of `rid` on worker `idx` and return the shared record
