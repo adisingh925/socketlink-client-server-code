@@ -279,15 +279,22 @@ public:
     void enqueue(std::string baseURL, std::string path, std::string body,
                  std::map<std::string, std::string> headers = {}) {
         bool droppedOne = false;
+        size_t jobBytes = body.size() + path.size() + baseURL.size() + 64;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            /** Bound the queue to protect memory when the endpoint is slow or unreachable */
-            if (queue_.size() >= maxQueueSize_) {
+            /** Bound the queue by BOTH entry count and total bytes. A count-only bound
+             *  (100k) is a ~1 GB memory hole at the 10 KB message cap, since ON_MESSAGE
+             *  embeds the whole message — measured OOMing a 1 GB container. Drop oldest
+             *  until this job fits within both bounds (but always keep at least the room
+             *  for this one job). */
+            while ((queue_.size() >= maxQueueSize_ || queuedBytes_ + jobBytes > maxQueueBytes_) && !queue_.empty()) {
+                queuedBytes_ -= queue_.front().bytes;
                 queue_.pop_front();
                 droppedWebhookCalls_.fetch_add(1, std::memory_order_relaxed);
                 droppedOne = true;
             }
-            queue_.push_back(Job{std::move(baseURL), std::move(path), std::move(body), std::move(headers)});
+            queue_.push_back(Job{std::move(baseURL), std::move(path), std::move(body), std::move(headers), jobBytes});
+            queuedBytes_ += jobBytes;
         }
         cv_.notify_one();
 
@@ -311,6 +318,7 @@ private:
         std::string path;
         std::string body;
         std::map<std::string, std::string> headers;
+        size_t bytes = 0; /* approximate memory footprint, for the byte bound */
     };
 
     WebhookDispatcher() : worker_([this]() { run(); }) {}
@@ -336,6 +344,7 @@ private:
                     return;
                 }
                 job = std::move(queue_.front());
+                queuedBytes_ -= job.bytes;
                 queue_.pop_front();
             }
             /** Blocking send happens on this dedicated thread, never on an event loop.
@@ -355,7 +364,11 @@ private:
     std::condition_variable cv_;
     bool running_ = true;
     std::atomic<unsigned long long> droppedWebhookCalls_{0};
+    size_t queuedBytes_ = 0;
     static constexpr size_t maxQueueSize_ = 100000;
+    /** total queued payload budget: bounds memory regardless of message size.
+     *  100k entries at the 10 KB message cap would otherwise be ~1 GB. */
+    static constexpr size_t maxQueueBytes_ = 64ULL * 1024 * 1024;
     std::thread worker_;
 };
 

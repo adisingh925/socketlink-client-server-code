@@ -287,14 +287,20 @@ public:
     /** Queue one message row for insertion. Non-blocking; event-loop safe. */
     void enqueue(std::string insertTime, std::string message, std::string uid, std::string rid) {
         bool droppedOne = false;
+        size_t rowBytes = message.size() + uid.size() + rid.size() + insertTime.size() + 48;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (rows_.size() >= maxQueuedRows_) {
+            /** bound by BOTH row count and total bytes; a count-only bound (50k) is
+             *  ~500 MB at the 10 KB message cap since the whole message is queued */
+            while ((rows_.size() >= maxQueuedRows_ || queuedBytes_ + rowBytes > maxQueueBytes_) && !rows_.empty()) {
+                queuedBytes_ -= rows_.front().bytes;
                 rows_.pop_front();
                 droppedRows_.fetch_add(1, std::memory_order_relaxed);
                 droppedOne = true;
             }
-            rows_.push_back(Row{std::move(insertTime), std::move(message), std::move(uid), std::move(rid)});
+            rows_.push_back(
+                Row{std::move(insertTime), std::move(message), std::move(uid), std::move(rid), rowBytes});
+            queuedBytes_ += rowBytes;
         }
         cv_.notify_one();
 
@@ -326,6 +332,7 @@ private:
         std::string message;
         std::string uid;
         std::string rid;
+        size_t bytes = 0; /* approximate footprint, for the byte bound */
     };
 
     enum class Command : uint8_t { FLUSH, RECONNECT, DISCONNECT };
@@ -372,6 +379,7 @@ private:
                     haveCmd = true;
                 } else if (!rows_.empty()) {
                     row = std::move(rows_.front());
+                    queuedBytes_ -= row.bytes;
                     rows_.pop_front();
                     haveRow = true;
                 }
@@ -415,6 +423,9 @@ private:
     /** ~50k rows; at the 10KB message cap that bounds worst-case queue memory
      *  to ~500MB, and at typical sizes far less. DB slower than ingress -> the
      *  oldest rows drop (counted) instead of stalling loops or growing memory. */
+    size_t queuedBytes_ = 0;
     static constexpr size_t maxQueuedRows_ = 50000;
+    /** total queued payload budget: bounds memory regardless of message size */
+    static constexpr size_t maxQueueBytes_ = 64ULL * 1024 * 1024;
     std::thread writer_;
 };
