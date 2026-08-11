@@ -48,6 +48,12 @@ bool admissionPaused();
 unsigned long long memoryRejectionCount();
 void countMemoryRejection();
 
+/** Established connections closed under memory pressure because they were
+ *  backpressured (see the .dropped handler). Admission control alone cannot
+ *  reclaim memory already committed to established connections; this can. */
+unsigned long long connectionShedCount();
+void countConnectionShed();
+
 /** Start the sampling thread (idempotent; no-op if the limit is unknown). */
 void startMemoryGuard();
 

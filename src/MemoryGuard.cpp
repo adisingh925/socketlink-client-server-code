@@ -12,6 +12,7 @@ namespace {
 
     std::atomic<bool> g_paused{false};
     std::atomic<unsigned long long> g_rejections{0};
+    std::atomic<unsigned long long> g_shed{0};
     std::atomic<bool> g_started{false};
 
     /** adaptive cap state */
@@ -221,6 +222,10 @@ bool admissionPaused() { return g_paused.load(std::memory_order_relaxed); }
 unsigned long long memoryRejectionCount() { return g_rejections.load(std::memory_order_relaxed); }
 
 void countMemoryRejection() { g_rejections.fetch_add(1, std::memory_order_relaxed); }
+
+unsigned long long connectionShedCount() { return g_shed.load(std::memory_order_relaxed); }
+
+void countConnectionShed() { g_shed.fetch_add(1, std::memory_order_relaxed); }
 
 void enableAdaptiveCap(std::atomic<int>* connCounter, int hardMax) {
     g_connCounter = connCounter;

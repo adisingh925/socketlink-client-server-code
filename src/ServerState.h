@@ -253,6 +253,17 @@ inline std::shared_ptr<RoomWorkers> roomWorkersAdd(const std::string& rid, size_
     return rw;
 }
 
+/** Mask of workers holding a subscriber of `rid` (0 when the room is unknown).
+ *  For callers that do not already hold the room's RoomWorkers pointer — e.g.
+ *  the join/leave broadcasts, which fire per subscribe rather than per message. */
+inline uint64_t roomWorkerMaskFor(const std::string& rid) {
+    tbb::concurrent_hash_map<std::string, std::shared_ptr<RoomWorkers>>::const_accessor acc;
+    if (!ThreadSafe::roomWorkers.find(acc, rid)) {
+        return 0;
+    }
+    return acc->second->mask.load(std::memory_order_acquire);
+}
+
 /** Drop one subscriber of `rid` on worker `idx`; erases the record when the last
  *  subscriber anywhere leaves. Owner-thread only. */
 inline void roomWorkersRemove(const std::string& rid, size_t idx) {

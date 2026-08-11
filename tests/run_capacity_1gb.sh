@@ -72,3 +72,19 @@ echo "--- 45,000 attempted vs ~21,299 cap"
 drive --conns 45000 --threads 64 --group 10 --rate 2 --duration 30 --size 256 --connect-timeout 180 --uid-prefix p4_
 report
 echo "--- container survived: oom=$("$DOCKER" inspect sl-server --format '{{.State.OOMKilled}}' | tr -d '\r') status=$("$DOCKER" inspect sl-server --format '{{.State.Status}}' | tr -d '\r')"
+
+echo "############ PHASE 5: SATURATED (measures the server, not the client) ############"
+# Phases 1-4 mostly run BELOW the server's ceiling, so they report the CLIENT's
+# limit and cannot detect a server regression — they were identical either side
+# of a 59% hot-path improvement. These offer far more than the server can
+# deliver, so the delivered rate IS the ceiling and drops are expected.
+for spec in "2 300" "10 60" "100 5"; do
+  set -- $spec
+  GROUP=$1
+  RATE=$2
+  server_up
+  echo "--- room size $GROUP at rate $RATE (offered $((8000 * RATE * (GROUP - 1))) deliveries/s)"
+  drive --conns 8000 --threads 32 --group "$GROUP" --rate "$RATE" --duration 15 --size 128 \
+        --connect-timeout 180 --uid-prefix "p5g${GROUP}_"
+  report
+done

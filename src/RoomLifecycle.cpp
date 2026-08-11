@@ -121,8 +121,17 @@ void closeConnection(SLWebSocket* ws, worker_t* worker, std::string rid, std::st
                              jsonEscape(ws->getUserData()->metadata) + "\", \"source\":\"server\", \"rid\":\"" +
                              jsonEscape(rid) + "\"}";
 
-        /** Publish message to all workers */
-        for (auto& w : ::workers) {
+        /** Publish only to workers that still hold a subscriber of this room —
+         *  same rule the per-message path uses, so a leave in a small room does
+         *  not wake every loop on the box. (The leaver is already removed, so
+         *  the mask is exactly the remaining audience.) */
+        uint64_t mask = roomWorkerMaskFor(rid);
+        const bool maskUsable = ::workers.size() <= MAX_MASKED_WORKERS;
+        for (size_t wi = 0; wi < ::workers.size(); ++wi) {
+            if (maskUsable && !(mask & (1ULL << wi))) {
+                continue;
+            }
+            worker_t& w = ::workers[wi];
             w.loop_->defer([&w, rid, result]() { w.app_->publish(rid, result, uWS::OpCode::TEXT, true); });
         }
     }
@@ -247,19 +256,26 @@ void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t 
                                            jsonEscape(ws->getUserData()->metadata) +
                                            "\", \"source\":\"server\", \"rid\":\"" + jsonEscape(rid) + "\"}";
 
-            if (workerThreadId == currentThreadId) {
-                ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-            }
+            /** openConnection always runs on the socket's owner thread (REST and
+             *  ban callers arrive via runOnOwnerThread), so publish locally here
+             *  and defer only to the OTHER workers that hold subscribers. */
+            ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
 
-            std::for_each(::workers.begin(), ::workers.end(), [broadcastMessage, rid](worker_t& w) {
-                /** Check if the current thread ID matches the worker's thread ID */
-                if (std::this_thread::get_id() != w.thread_->get_id()) {
-                    /** Defer the message publishing to the worker's loop */
-                    w.loop_->defer([&w, broadcastMessage, rid]() {
-                        w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
-                    });
+            const size_t selfIdx = workerIndex(worker);
+            uint64_t mask = roomWorkerMaskFor(rid);
+            const bool maskUsable = ::workers.size() <= MAX_MASKED_WORKERS;
+            for (size_t wi = 0; wi < ::workers.size(); ++wi) {
+                if (wi == selfIdx) {
+                    continue;
                 }
-            });
+                if (maskUsable && !(mask & (1ULL << wi))) {
+                    continue;
+                }
+                worker_t& w = ::workers[wi];
+                w.loop_->defer([&w, broadcastMessage, rid]() {
+                    w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
+                });
+            }
         }
 
         /** fire connection open webhook */

@@ -1,0 +1,102 @@
+name: CI
+
+# Runs the checks that used to only happen by hand. A self-deadlock in
+# /api/v1/invalidate once survived a clean build and was found by re-reading the
+# code — everything here would have caught it in under a minute.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    # Fast gate: the pure functions need only OpenSSL, so this runs in seconds
+    # and does not wait for the full dependency build below.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential libssl-dev
+
+      - name: Run unit tests
+        run: make test
+
+  build-and-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential libssl-dev zlib1g-dev \
+            liblmdb-dev libtbb-dev libboost-all-dev libmysqlclient-dev git curl
+
+      - name: Cache third-party dependencies
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/sl-deps
+          key: sl-deps-uws20.67.0-simdjson3.9.4-json3.11.3
+
+      - name: Fetch and build third-party dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          mkdir -p ~/sl-deps/include
+          cd ~/sl-deps
+          # uWebSockets + uSockets (built with OpenSSL, matching the server)
+          git clone --depth 1 --branch v20.67.0 --recurse-submodules \
+            https://github.com/uNetworking/uWebSockets.git
+          make -C uWebSockets/uSockets WITH_OPENSSL=1
+          # header-only dependencies
+          curl -sSL -o include/json.hpp \
+            https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
+          curl -sSL -o simdjson.zip \
+            https://github.com/simdjson/simdjson/releases/download/v3.9.4/singleheader.zip
+          unzip -o -j simdjson.zip -d . 'simdjson.h' 'simdjson.cpp'
+          mv simdjson.h include/simdjson.h
+
+      - name: Build server
+        run: make -j"$(nproc)"
+
+      - name: Build load generator
+        run: make loadgen
+
+      - name: Endpoint smoke test
+        run: |
+          set -eux
+          mkdir -p /tmp/slrun/messages_db
+          cd /tmp/slrun
+          "$GITHUB_WORKSPACE/build/socketlink" > /tmp/server.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -fsS -m 2 http://127.0.0.1:8080/api/v1/ping >/dev/null 2>&1; then break; fi
+            sleep 0.5
+          done
+          curl -fsS -m 5 http://127.0.0.1:8080/api/v1/ping
+          python3 "$GITHUB_WORKSPACE/tests/endpoint_smoke.py" 127.0.0.1 8080
+
+      - name: Functional test (echo, JSON escaping, fan-out delivery)
+        run: python3 tests/wsclient.py 127.0.0.1 8080 ci
+
+      - name: Delivery correctness under load
+        run: |
+          set -eux
+          # recv must equal (group-1) x sent; anything less means lost messages
+          ./build/loadgen --host 127.0.0.1 --port 8080 --conns 500 --threads 8 \
+            --group 10 --rate 5 --duration 10 --size 128 --uid-prefix ci_ | tee /tmp/load.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open("/tmp/load.json"))
+          expected = d["sent"] * 9
+          ratio = d["recv"] / expected if expected else 0
+          print(f"sent={d['sent']} recv={d['recv']} expected={expected} ratio={ratio:.4f}")
+          assert ratio >= 0.99, f"lost messages: only {ratio:.2%} delivered"
+          PY
+
+      - name: Server log on failure
+        if: failure()
+        run: tail -50 /tmp/server.log || true

@@ -615,7 +615,13 @@ void worker_t::work() {
                                      threadTimestamp = now;
                                  }
 
-                                 unsigned int subscribers = app_->numSubscribers(rid);
+                                 /** numSubscribers counts the publisher too, but uWS does not
+                     *  echo a publish back to the publishing socket — counting it
+                     *  inflated messages_sent by roughly room_size/(room_size-1)
+                     *  (11% for rooms of 10). Remote workers need no such
+                     *  adjustment: the publisher is not subscribed there. */
+                                 unsigned int localSubs = app_->numSubscribers(rid);
+                                 unsigned int subscribers = localSubs > 0 ? localSubs - 1 : 0;
                                  workerCounters[selfIdx].messagesSent.fetch_add(
                                      static_cast<unsigned long long>(subscribers), std::memory_order_relaxed);
                                  workerCounters[selfIdx].payloadSent.fetch_add(
@@ -663,7 +669,7 @@ void worker_t::work() {
                      }
                  },
              .dropped =
-                 [this](auto* /*ws*/, std::string_view /*message*/, uWS::OpCode /*opCode*/) {
+                 [this](auto* ws, std::string_view /*message*/, uWS::OpCode /*opCode*/) {
                      /** A message was dropped because this connection is over its backpressure
          *  limit. Do NOT ws->send() a notification here: the send buffer is already
          *  full, so that send would itself be dropped and re-invoke this handler
@@ -672,6 +678,23 @@ void worker_t::work() {
          *  rate-limited via the YOU_ARE_RATE_LIMITED path when it next sends, and via
          *  RATE_LIMIT_LIFTED (in .drain) once its buffer drains. */
                      workerCounters[workerIndex(this)].droppedMessages.fetch_add(1, std::memory_order_relaxed);
+
+                     /** Under memory pressure, SHED this connection instead of holding its
+         *  buffers. Refusing new connections cannot reclaim memory already
+         *  committed to established ones, which is why the adaptive cap has to
+         *  grow so cautiously — this is the missing half. A socket reaching
+         *  .dropped is by definition failing to keep up, so it is both the
+         *  cheapest to lose and the most expensive to keep. */
+                     if (admissionPaused()) {
+                         static std::atomic<unsigned long long> shed{0};
+                         unsigned long long n = shed.fetch_add(1, std::memory_order_relaxed);
+                         if (n % 1000 == 0) {
+                             log(LogLevel::WARN, "Memory pressure: closing backpressured connections (total shed: ",
+                                 n + 1, ")");
+                         }
+                         countConnectionShed();
+                         ws->end(1013 /* try again later */, "SERVER_UNDER_MEMORY_PRESSURE");
+                     }
                  },
              .drain =
                  [](auto* ws) {
@@ -805,6 +828,7 @@ void worker_t::work() {
                                       R"(,"memory_limit_bytes": )" + std::to_string(memoryLimitBytes()) +
                                       R"(,"admission_paused": )" + (admissionPaused() ? "true" : "false") +
                                       R"(,"rejected_memory_pressure": )" + std::to_string(memoryRejectionCount()) +
+                                      R"(,"shed_connections": )" + std::to_string(connectionShedCount()) +
                                       R"(,"connection_limit": )" +
                                       std::to_string(UserData::getInstance().connections) +
                                       R"(,"measured_bytes_per_connection": )" +
