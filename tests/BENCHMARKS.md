@@ -57,6 +57,42 @@ Command shape: `loadtest.py --conns 20000 --procs 16 --group 10 --rate 5 --durat
 | native | 1 KB | 656,994 | 704 MB/s | 0 |
 | docker 1cpu (5k conns) | 1 KB | 224,980 | 241 MB/s | 0 (69% CPU, 386 MiB) |
 
+## Multi-core scaling (corrected) and the profile
+
+Earlier notes claimed per-core efficiency fell past 4 cores (404k→303k del/s).
+**That was a measurement artifact** — a single `loadgen` container cannot
+saturate 8 server cores, so the 8-core figure was client-limited. Re-measured
+with the client count scaled to the cores (saturated, rooms of 10, 128 B):
+
+| Cores | Deliveries/s | Per core |
+|---|---|---|
+| 1 | 449,561 | 449,561 |
+| 2 | 1,025,841 | 512,920 |
+| 4 | 2,258,962 | 564,740 |
+| 8 | 4,426,253 | 553,281 |
+
+Scaling is essentially **linear through 8 cores** at ~550k deliveries/s per core;
+there is no decline. (The 1-core row is lower per-core only because at this
+saturated rate one core also carries accept/admin work; its gentle-load knee is
+~1.0M — see the overload section.)
+
+### What the profile shows (perf, saturated)
+
+Runnable at last via a privileged `perf` sidecar container sharing the server's
+PID namespace (`--pid=container:sl-server --privileged`), which sidesteps the
+restricted host `ptrace_scope` and the missing distro package.
+
+- **~89% of CPU is the `sendto`/`tcp_sendmsg` transmit path.** The server is
+  send-syscall bound; userspace (parse, JSON escape, publish) is under ~10%.
+  This is why ingress shedding could not help — there is almost no userspace CPU
+  to reclaim — and why the overload plateau is a kernel property.
+- **~5–6% is Docker's `nft_do_chain` + conntrack**, per packet, on the bridge
+  network. Every benchmark here pays that NAT tax; a host-network / behind-LB
+  production deployment would not, so these figures are conservative.
+- At 8 cores the only notable userspace costs are the cross-worker defer (~7%)
+  and the fan-out `shared_ptr` refcount release (~3%); the latter was halved by
+  merging rid+payload into one allocation (see git log).
+
 ## Capacity per deployment size (post-OOM-fix, protections active)
 
 Rooms of 100, 256-byte bodies, measured with `loadgen` client containers on the
@@ -68,10 +104,12 @@ docker network. "Lossless" = server `dropped_messages` delta of ~0.
 | 4 CPU / 4 GB container | 99,942 | **2,962,711** (51 drops in 44.4M) | 894 MB/s | ~2.33M sustained plateau |
 | 20-core native (no cgroup limit) | — | 7,790,000 | 2.35 GB/s | ~8.4M |
 
-Scaling is sub-linear but healthy (1→4 CPU ≈ 3×; 4→20 CPU ≈ 2.6×), limited by
-the per-delivery `send()` syscall. Capping `SO_SNDBUF` cost **no** throughput:
-the 1-CPU container measured 989,294 deliveries/s before the fix and 987,198
-after, with memory dropping from hundreds of MiB to 14 MiB at the same load.
+The 4- and 20-core rows here were measured with a single client and are
+client-limited; the corrected multi-core section above shows scaling is actually
+~linear at ~550k deliveries/s per core through 8 cores, bound by the per-delivery
+`send()` syscall. Capping `SO_SNDBUF` cost **no** throughput: the 1-CPU container
+measured 989,294 deliveries/s before the fix and 987,198 after, with memory
+dropping from hundreds of MiB to 14 MiB at the same load.
 
 ## Pure WebSocket pub/sub — one 1 CPU / 1 GB container
 
