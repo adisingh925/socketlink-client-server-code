@@ -7,6 +7,7 @@
 
 #include "Config.h"
 #include "Logging.h"
+#include "MemoryGuardPolicy.h"
 
 namespace {
 
@@ -21,11 +22,10 @@ namespace {
     std::atomic<unsigned long long> g_bytesPerConn{0};
     std::atomic<unsigned long long> g_baselineBytes{0};
 
-    /** Target steady-state utilisation for the adaptive cap. Below the 80% pause
-     *  watermark so the cap does the work and the watchdog stays a backstop. */
-    constexpr double kAdaptiveTarget = 0.70;
-    /** Don't trust a measurement taken from a handful of connections. */
-    constexpr int kMinSampleConns = 500;
+    /* Adaptive-cap policy constants (kAdaptiveTarget, kMinSampleConns,
+     * kMaxGrowthPerStep, kGrowthConfirmations, kPeakDecayPerStep) live in
+     * MemoryGuardPolicy.h alongside the pure decision they drive. */
+
     /**
      * Never believe a per-connection cost below this.
      *
@@ -53,28 +53,6 @@ namespace {
         }();
         return v;
     }
-    /** Growth is capped per step: the cost of being wrong in the "too many
-     *  connections" direction is death, the cost of being wrong the other way is
-     *  a few refused connections. Shrink immediately, grow 20% at a time. */
-    constexpr double kMaxGrowthPerStep = 1.20;
-    /**
-     * Consecutive agreeing samples required before growing (at 500ms each, this
-     * is a full minute of sustained headroom).
-     *
-     * Deliberately slow. A connection's memory cost is not knowable until it
-     * carries traffic: during a ramp, connections that have not yet sent
-     * anything measure ~12 KiB and look cheap, but the same connections cost
-     * ~23 KiB once fan-out starts. Growing on a few seconds of that optimism
-     * admitted 44k connections that then became too expensive — and admission
-     * control cannot take a connection back, so the container was OOM-killed.
-     * Requiring a minute of quiet means only a genuinely steady, genuinely light
-     * workload earns a larger cap; a ramp never does.
-     */
-    constexpr int kGrowthConfirmations = 120;
-    /** The remembered worst-case per-connection cost decays this much per step
-     *  once the workload genuinely lightens (≈35 steps, ~70s, to halve). */
-    constexpr double kPeakDecayPerStep = 0.98;
-
     /** worst per-connection cost seen recently — the cap is sized from this, not
      *  from the instantaneous sample, so a fan-out burst cannot be forgotten
      *  between measurements */
@@ -93,84 +71,26 @@ namespace {
      *  queues. Held back before dividing the rest among connections. */
     constexpr unsigned long long kBaseReserveBytes = 192ULL * 1024 * 1024;
 
-    unsigned long long readFirstNumber(const char* path) {
-        FILE* f = std::fopen(path, "r");
-        if (!f) {
-            return 0;
-        }
-        char buf[128] = {0};
-        unsigned long long v = 0;
-        if (std::fgets(buf, sizeof(buf), f)) {
-            if (std::strncmp(buf, "max", 3) == 0) { /** cgroup v2: uncapped */
-                v = 0;
-            } else {
-                v = std::strtoull(buf, nullptr, 10);
-            }
-        }
-        std::fclose(f);
-        return v;
-    }
-
-    /** value of a "Key: <n> kB" line in a /proc file, in bytes */
-    unsigned long long readProcKb(const char* path, const char* key) {
-        FILE* f = std::fopen(path, "r");
-        if (!f) {
-            return 0;
-        }
-        char line[256];
-        size_t keyLen = std::strlen(key);
-        unsigned long long out = 0;
-        while (std::fgets(line, sizeof(line), f)) {
-            if (std::strncmp(line, key, keyLen) == 0) {
-                out = std::strtoull(line + keyLen, nullptr, 10) * 1024ULL;
-                break;
-            }
-        }
-        std::fclose(f);
-        return out;
-    }
-
 } // namespace
 
 unsigned long long memoryLimitBytes() {
     static unsigned long long cached = []() -> unsigned long long {
         /** cgroup v2 (docker --memory maps here), then v1, then host RAM */
-        unsigned long long v = readFirstNumber("/sys/fs/cgroup/memory.max");
+        unsigned long long v = mgReadFirstNumber("/sys/fs/cgroup/memory.max");
         if (v == 0) {
-            v = readFirstNumber("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+            v = mgReadFirstNumber("/sys/fs/cgroup/memory/memory.limit_in_bytes");
             /** v1 reports a sentinel ~2^63 when uncapped */
             if (v >= (1ULL << 62)) {
                 v = 0;
             }
         }
         if (v == 0) {
-            v = readProcKb("/proc/meminfo", "MemTotal:");
+            v = mgReadProcKb("/proc/meminfo", "MemTotal:");
         }
         return v;
     }();
     return cached;
 }
-
-namespace {
-    /** value of a "<key> <n>" line in a cgroup memory.stat-style file, in bytes */
-    unsigned long long readCgroupStat(const char* path, const char* key) {
-        FILE* f = std::fopen(path, "r");
-        if (!f) {
-            return 0;
-        }
-        char line[256];
-        size_t keyLen = std::strlen(key);
-        unsigned long long out = 0;
-        while (std::fgets(line, sizeof(line), f)) {
-            if (std::strncmp(line, key, keyLen) == 0 && line[keyLen] == ' ') {
-                out = std::strtoull(line + keyLen + 1, nullptr, 10);
-                break;
-            }
-        }
-        std::fclose(f);
-        return out;
-    }
-} // namespace
 
 unsigned long long currentMemoryWorkingSetBytes() {
     /**
@@ -183,31 +103,28 @@ unsigned long long currentMemoryWorkingSetBytes() {
      * Working set = cgroup usage minus inactive file cache (reclaimable), the
      * same definition Kubernetes uses for eviction decisions.
      */
-    unsigned long long usage = readFirstNumber("/sys/fs/cgroup/memory.current");
+    unsigned long long usage = mgReadFirstNumber("/sys/fs/cgroup/memory.current");
     if (usage > 0) {
-        unsigned long long inactiveFile = readCgroupStat("/sys/fs/cgroup/memory.stat", "inactive_file");
+        unsigned long long inactiveFile = mgReadCgroupStat("/sys/fs/cgroup/memory.stat", "inactive_file");
         return (usage > inactiveFile) ? (usage - inactiveFile) : usage;
     }
 
     /** cgroup v1 */
-    usage = readFirstNumber("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+    usage = mgReadFirstNumber("/sys/fs/cgroup/memory/memory.usage_in_bytes");
     if (usage > 0) {
-        unsigned long long inactiveFile = readCgroupStat("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file");
+        unsigned long long inactiveFile = mgReadCgroupStat("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file");
         return (usage > inactiveFile) ? (usage - inactiveFile) : usage;
     }
 
     /** not containerized: fall back to this process's RSS */
-    unsigned long long v = readProcKb("/proc/self/status", "RssAnon:");
+    unsigned long long v = mgReadProcKb("/proc/self/status", "RssAnon:");
     if (v == 0) {
-        v = readProcKb("/proc/self/status", "VmRSS:");
+        v = mgReadProcKb("/proc/self/status", "VmRSS:");
     }
     return v;
 }
 
 int safeConnectionCap(unsigned long long limitBytes) {
-    if (limitBytes == 0) {
-        return 0; /** unknown: caller keeps the configured value */
-    }
     /**
      * 40 KB per ACTIVE connection, not the ~12-15 KB an idle socket costs.
      *
@@ -230,15 +147,7 @@ int safeConnectionCap(unsigned long long limitBytes) {
             perConn = v;
         }
     }
-    if (limitBytes <= kBaseReserveBytes) {
-        return 1000; /** tiny box: allow something, the watchdog governs */
-    }
-    unsigned long long usable = limitBytes - kBaseReserveBytes;
-    unsigned long long cap = usable / perConn;
-    if (cap > 2000000ULL) {
-        cap = 2000000ULL;
-    }
-    return static_cast<int>(cap);
+    return computeSafeConnectionCap(limitBytes, perConn, kBaseReserveBytes);
 }
 
 bool admissionPaused() {
@@ -284,100 +193,33 @@ namespace {
         if (!counter) {
             return;
         }
-        int conns = counter->load(std::memory_order_relaxed);
-        if (conns < kMinSampleConns) {
-            return;
-        }
 
-        unsigned long long baseline = g_baselineBytes.load(std::memory_order_relaxed);
-        if (workingSet <= baseline) {
-            return;
-        }
+        AdaptiveCapParams p;
+        p.limit = limit;
+        p.workingSet = workingSet;
+        p.baseline = g_baselineBytes.load(std::memory_order_relaxed);
+        p.conns = counter->load(std::memory_order_relaxed);
+        p.current = UserData::getInstance().connections;
+        p.hardMax = g_hardMax.load(std::memory_order_relaxed);
+        p.minBytesPerConn = minBytesPerConn();
 
-        unsigned long long perConn = (workingSet - baseline) / (unsigned long long)conns;
-        if (perConn < minBytesPerConn()) {
-            perConn = minBytesPerConn();
-        }
-        g_bytesPerConn.store(perConn, std::memory_order_relaxed);
+        /** g_peakBytesPerConn and g_growthStreak are only ever touched here, on the
+         *  single guard thread, so they need no synchronisation. computeAdaptiveCap
+         *  reads and updates them through this local mirror. */
+        AdaptiveCapState state{g_peakBytesPerConn, g_growthStreak};
+        AdaptiveCapDecision d = computeAdaptiveCap(p, state);
+        g_peakBytesPerConn = state.peakBytesPerConn;
+        g_growthStreak = state.growthStreak;
 
-        /** Size from the PEAK cost, not the latest sample. A connection that was
-         *  once expensive can become expensive again the moment traffic returns,
-         *  and by then it is too late to reclaim the memory. The peak decays
-         *  slowly so a genuinely lighter workload does eventually earn a bigger
-         *  cap — over a minute, not instantly. */
-        if ((double)perConn > g_peakBytesPerConn) {
-            g_peakBytesPerConn = (double)perConn;
-        } else {
-            g_peakBytesPerConn *= kPeakDecayPerStep;
-            if (g_peakBytesPerConn < (double)perConn) {
-                g_peakBytesPerConn = (double)perConn;
-            }
+        if (d.measured) {
+            g_bytesPerConn.store(d.measuredBytesPerConn, std::memory_order_relaxed);
         }
-
-        unsigned long long target = (unsigned long long)(limit * kAdaptiveTarget);
-        if (target <= baseline) {
-            return;
+        if (d.changed) {
+            log(LogLevel::INFO, "Adaptive cap: ", p.current, " -> ", d.newCap, " (measured ",
+                d.measuredBytesPerConn / 1024, " KiB/conn at ", p.conns, " connections, ", workingSet / (1024 * 1024),
+                " MiB used)");
+            setConnectionLimit(d.newCap);
         }
-        long long newCap = (long long)((target - baseline) / (unsigned long long)g_peakBytesPerConn);
-
-        int hardMax = g_hardMax.load(std::memory_order_relaxed);
-        int current = UserData::getInstance().connections;
-
-        /** Asymmetric response: shrinking is a safety action and takes effect at
-         *  once; growing is an optimisation and must earn its way — several
-         *  agreeing samples, then at most +20% per step. */
-        if (newCap > current) {
-            /**
-             * Only grow with proven headroom. A measurement taken mid-ramp is
-             * optimistic — connections that have not finished subscribing, and
-             * have not yet carried traffic, look cheap — and raising the cap on
-             * that optimism lets the rush fill the new headroom before the true
-             * cost is known (observed: an early 12 KiB/conn sample raised the cap
-             * to 59k, which filled before the cost resolved to 23 KiB/conn).
-             * Requiring usage below half the budget means growth only happens
-             * from a genuinely quiet state.
-             */
-            if (workingSet > (unsigned long long)(limit * 0.5)) {
-                g_growthStreak = 0;
-                return;
-            }
-            /** and only if the cap is actually the binding constraint — no point
-             *  raising a ceiling nobody is reaching */
-            if ((long long)conns * 10 < (long long)current * 9) {
-                g_growthStreak = 0;
-                return;
-            }
-            if (++g_growthStreak < kGrowthConfirmations) {
-                return;
-            }
-            g_growthStreak = 0;
-            long long maxGrown = (long long)(current * kMaxGrowthPerStep);
-            if (newCap > maxGrown) {
-                newCap = maxGrown;
-            }
-        } else {
-            g_growthStreak = 0;
-        }
-
-        if (newCap > hardMax) {
-            newCap = hardMax;
-        }
-        if (newCap < 1000) {
-            newCap = 1000;
-        }
-
-        /** ignore small wobbles: only move on a >10% change */
-        long long delta = newCap - current;
-        if (delta < 0) {
-            delta = -delta;
-        }
-        if (delta * 10 < current) {
-            return;
-        }
-
-        log(LogLevel::INFO, "Adaptive cap: ", current, " -> ", newCap, " (measured ", perConn / 1024, " KiB/conn at ",
-            conns, " connections, ", workingSet / (1024 * 1024), " MiB used)");
-        setConnectionLimit((int)newCap);
     }
 } // namespace
 

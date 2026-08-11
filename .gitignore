@@ -6,3 +6,4 @@ tests/.mockcerts/
 docker/loadgen
 srv_*.log
 tests/perfimg/
+mg_test_fixtures/

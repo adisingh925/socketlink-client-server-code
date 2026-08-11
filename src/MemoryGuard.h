@@ -12,15 +12,20 @@
  *   1. safeConnectionCap() — derives, from the cgroup/host memory limit, how many
  *      connections actually fit. main() clamps the configured cap to it at
  *      startup so the advertised limit is honest.
- *   2. startMemoryGuard() — a sampling thread that watches this process's
- *      anonymous RSS against the limit and flips admissionPaused() on at the high
- *      watermark and off at the low one (hysteresis). The WS upgrade handler
- *      rejects with 503 while paused, so the server sheds NEW connections and
- *      keeps serving established ones instead of being killed.
+ *   2. startMemoryGuard() — a sampling thread that watches the cgroup working set
+ *      against the limit and flips admissionPaused() on at the high watermark and
+ *      off at the low one (hysteresis). The WS upgrade handler rejects with 503
+ *      while paused, so the server sheds NEW connections and keeps serving
+ *      established ones instead of being killed. The same thread runs an adaptive
+ *      cap (see enableAdaptiveCap) that re-sizes `connections` from measured cost.
  *
- * Anonymous RSS (not cgroup memory.current) is the signal: page cache — notably
- * LMDB's MDB_WRITEMAP mapping — is reclaimable and would otherwise read as
- * permanent pressure.
+ * The signal is the cgroup charge minus reclaimable file cache (see
+ * currentMemoryWorkingSetBytes), NOT this process's anonymous RSS: with ~100k
+ * sockets most of the footprint is KERNEL socket buffers, which are charged to
+ * the cgroup but invisible in RssAnon — measuring RssAnon let a 1 GB container
+ * reach its limit and get OOM-killed while the guard still read ~90 MiB. The
+ * reclaimable page cache (notably LMDB's MDB_WRITEMAP mapping) is subtracted so
+ * it does not read as permanent pressure.
  */
 #include <atomic>
 #include <cstdint>

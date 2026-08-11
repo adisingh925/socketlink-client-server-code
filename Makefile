@@ -62,11 +62,16 @@ $(BUILD)/loadgen: tests/loadgen.cpp | $(BUILD)
 	$(CXX) -std=c++17 -O2 -pthread $< -o $@
 
 ## Unit tests for the pure functions — seconds to run, no server needed.
-test: $(BUILD)/unit_tests
+test: $(BUILD)/unit_tests $(BUILD)/memoryguard_test
 	@$(BUILD)/unit_tests
+	@$(BUILD)/memoryguard_test $(BUILD)/mg_test_fixtures
 
 $(BUILD)/unit_tests: tests/unit_tests.cpp src/Util.cpp src/Util.h | $(BUILD)
 	$(CXX) -std=c++17 -O2 -g tests/unit_tests.cpp src/Util.cpp -lssl -lcrypto -o $@
+
+## Memory-guard policy tests (pure cap arithmetic + cgroup parsers).
+$(BUILD)/memoryguard_test: tests/memoryguard_test.cpp src/MemoryGuardPolicy.h | $(BUILD)
+	$(CXX) -std=c++17 -O2 -g -Isrc tests/memoryguard_test.cpp -o $@
 
 clean:
 	rm -rf build build-uring
