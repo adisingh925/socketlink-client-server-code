@@ -2,6 +2,9 @@
   "client_api_key": "CHANGE_ME_client_key",
   "admin_api_key": "CHANGE_ME_admin_key",
 
+  "//connection_token_secret": "set to enforce per-user tokens when clients connect directly (see docs/CONNECTION_TOKENS.md)",
+  "connection_token_secret": "",
+
   "port": 8080,
 
   "connections": 100000,

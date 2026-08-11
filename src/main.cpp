@@ -70,6 +70,36 @@ int main() {
                             "{\"client_api_key\":..., \"admin_api_key\":...}.");
     }
 
+    /** Per-user connection tokens. SL_CONNECTION_TOKEN_SECRET turns them on at
+     *  startup (no /invalidate round-trip). When a secret is set, every uid-bearing
+     *  request must carry a token proving ownership of its uid. */
+    if (const char* s = std::getenv("SL_CONNECTION_TOKEN_SECRET")) {
+        if (s[0] != '\0') {
+            setConnectionTokenSecret(s);
+            log(LogLevel::INFO, "Per-user connection tokens ENABLED (uid must be proven by a signed token)");
+        }
+    }
+
+    /** The uid header is client-asserted. Without token auth, any holder of the
+     *  client key can present any uid — impersonate users, read their cache rooms,
+     *  block their reconnects. That is a valid posture ONLY when the client key
+     *  never reaches end users (a trusted backend connects on their behalf). Make
+     *  that assumption explicit: SL_TRUST_UID_HEADER=1 certifies it; otherwise warn
+     *  loudly so a direct-to-client deployment cannot ship the vulnerable config by
+     *  accident. */
+    if (UserData::getInstance().connectionTokenSecret.empty()) {
+        if (std::getenv("SL_TRUST_UID_HEADER")) {
+            log(LogLevel::INFO, "uid header trusted without tokens (SL_TRUST_UID_HEADER set): "
+                                "the client key must never reach end users.");
+        } else {
+            log(LogLevel::WARN,
+                "SECURITY: connection tokens are OFF, so the uid header is trusted as-is — any client "
+                "with the client key can impersonate any uid. Safe ONLY if the client key never reaches "
+                "end users. Set SL_CONNECTION_TOKEN_SECRET to enforce per-user tokens, or "
+                "SL_TRUST_UID_HEADER=1 to acknowledge this is a trusted-backend deployment.");
+        }
+    }
+
     /** Clamp the advertised connection limit to what memory can actually hold.
      *  The compiled-in default (100k) exceeds a 1 GB budget by ~2.5x, and an
      *  unreachable cap is worse than none: the kernel OOM-kills the process —

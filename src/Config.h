@@ -130,6 +130,10 @@ bool verifyConnectionToken(const std::string& uid, std::string_view token);
 /** Publish a new snapshot with `connections` set to `n` (startup memory clamp). */
 void setConnectionLimit(int n);
 
+/** Publish a new snapshot with the connection-token secret set. Empty disables
+ *  token auth (uid header is then trusted — see verifyConnectionToken). */
+void setConnectionTokenSecret(const std::string& secret);
+
 /** Raise maxBackpressureInBytes if it is too small to hold several messages of
  *  the configured maximum size; returns true if it changed anything. A buffer
  *  smaller than one message means large messages are dropped under the slightest

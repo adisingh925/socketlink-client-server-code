@@ -97,6 +97,19 @@ jobs:
           assert ratio >= 0.99, f"lost messages: only {ratio:.2%} delivered"
           PY
 
+      - name: Connection-token enforcement
+        # last — it replaces the shared server with a token-enabled one
+        run: |
+          set -eux
+          pkill -f 'build/socketlink' || true
+          sleep 1
+          mkdir -p /tmp/sltok/messages_db
+          ( cd /tmp/sltok && SL_CONNECTION_TOKEN_SECRET=ci-secret \
+              "$GITHUB_WORKSPACE/build/socketlink" > /tmp/tok.log 2>&1 & )
+          for _ in $(seq 1 60); do curl -fsS -m 2 http://127.0.0.1:8080/api/v1/ping >/dev/null 2>&1 && break; sleep 0.5; done
+          grep -q "connection tokens ENABLED" /tmp/tok.log
+          python3 tests/token_test.py 127.0.0.1 8080 ci-secret
+
       - name: Server log on failure
         if: failure()
-        run: tail -50 /tmp/server.log || true
+        run: tail -50 /tmp/server.log /tmp/tok.log || true
