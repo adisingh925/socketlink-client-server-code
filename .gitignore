@@ -5,3 +5,4 @@ docker/socketlink
 tests/.mockcerts/
 docker/loadgen
 srv_*.log
+tests/perfimg/
