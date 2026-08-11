@@ -144,6 +144,39 @@ floor is what stops the server writing a cheque its memory cannot honour later.
 deliberate trade: it roughly doubles capacity and removes the margin that
 protects against those connections waking up.
 
+## Overload behaviour past the ceiling (1 CPU / 1 GB, rooms of 10, 128 B)
+
+Stepping the offered rate through the ceiling:
+
+| Offered/s | Delivered/s | |
+|---|---|---|
+| 864,000 | 863,426 | lossless |
+| 1,008,000 | 1,006,998 | lossless (the knee) |
+| 1,152,000 | 421,213 | past the knee |
+| 1,728,000 | 442,859 | |
+| 2,880,000 | 465,518 | |
+| 5,760,000 | 422,205 | 5.7× overload |
+
+So the knee is ~1.0M deliveries/s, and past it delivery drops sharply to a
+**stable ~440k plateau** that holds from 1.3× to 5.7× overload — the server does
+NOT spiral toward zero under load, it settles at ~44% of its knee throughput and
+stays there no matter how hard it is pushed.
+
+**Ingress shedding was tried here and REJECTED.** The hypothesis was that at
+saturation the CPU spent parsing and publishing messages that then hit full
+socket buffers was stolen from delivery, so dropping excess before the parse
+would lift the plateau. Measured, it did the opposite: shedding cut delivery from
+570k to 453k at rate 16 (and a *silent* shed that sent no notice was no better,
+ruling out the extra notice-sends). Parsing was not competing with delivery for
+CPU — dropping ingress just discards messages that would have been delivered. The
+plateau is set by socket-buffer / TCP delivery dynamics under saturation, not by
+wasted application CPU, and is not improvable from application code. The change
+was reverted.
+
+The one genuine inefficiency — the plateau sitting at ~44% of the knee rather
+than holding near it — lives in the kernel/uWS write path and would need work
+there, not in this server.
+
 ## Idle connection capacity with light traffic (one core)
 
 Essentially-idle connections (0.02 msgs/s each, so keepalive pings dominate).
