@@ -6,6 +6,7 @@
 #include <cstring>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "Config.h"
@@ -137,25 +138,99 @@ void init_env() {
         UserData::getInstance().cacheHistoryBytesPerRoom / (1024 * 1024), " MiB/room).");
 }
 
-void write_worker(const std::string& room_id, const std::string& message_content, bool needsCommit) {
-    /** (rid, seq, message) stamped with the global arrival order at push time */
-    thread_local std::vector<std::tuple<std::string, uint64_t, std::string>> batch;
+namespace {
+    /** Per-thread write batch: (rid, seq, message) stamped with the global arrival
+     *  order at push time. Thread-local so the hot path never contends; a flush
+     *  commits only the calling thread's batch. */
+    thread_local std::vector<std::tuple<std::string, uint64_t, std::string>> t_batch;
 
+    /** Per-thread vacated rooms awaiting deletion: (rid, arrival sequence at the
+     *  moment of the vacate). Drained INSIDE the next flush transaction, so a
+     *  disconnect storm adds zero commits (see delete_worker). */
+    thread_local std::vector<std::pair<std::string, uint64_t>> t_pendingDeletes;
+
+    /** the big-endian arrival sequence in the last 8 bytes of a message key */
+    uint64_t seqOfMsgKey(const void* key, size_t keyLen) {
+        return getBE64(static_cast<const char*>(key) + (keyLen - 8), 8);
+    }
+} // namespace
+
+void write_worker(const std::string& room_id, const std::string& message_content, bool needsCommit) {
     if (!needsCommit) {
         uint64_t seq = g_seq.fetch_add(1, std::memory_order_relaxed);
-        batch.emplace_back(room_id, seq, message_content);
+        t_batch.emplace_back(room_id, seq, message_content);
     }
 
-    if (batch.size() >= static_cast<size_t>(UserData::getInstance().lmdbCommitBatchSize) ||
-        (needsCommit && !batch.empty())) {
+    /** Commit when there is anything to do and either the batch is full or a flush
+     *  was requested. Pending deletes count as work on their own: a vacate storm
+     *  with no new messages must still be applied at the next timer flush. */
+    const size_t batchLimit = static_cast<size_t>(UserData::getInstance().lmdbCommitBatchSize);
+    const bool haveWork = !t_batch.empty() || !t_pendingDeletes.empty();
+    const bool full = t_batch.size() + t_pendingDeletes.size() >= batchLimit;
+    if (haveWork && (full || needsCommit)) {
 
         const unsigned long long perRoomLimit = UserData::getInstance().cacheHistoryBytesPerRoom;
 
         MDB_txn* txn;
         if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
             log(LogLevel::ERROR, "Failed to begin write transaction.");
-            batch.clear();
+            t_batch.clear(); /* pending deletes are kept: they retry at the next flush */
             return;
+        }
+
+        /** Vacate cut-offs for this flush: rid -> highest sequence recorded at a
+         *  vacate. Applied FIRST, so a delete only ever touches already-committed
+         *  data; also used below to skip writing any batched message published
+         *  before its room vacated (it would be deleted in this same transaction). */
+        std::unordered_map<std::string, uint64_t> vacateSeq;
+        for (const auto& [rid, seq] : t_pendingDeletes) {
+            uint64_t& cut = vacateSeq[rid];
+            if (seq > cut) {
+                cut = seq;
+            }
+        }
+
+        for (const auto& [rid, cut] : vacateSeq) {
+            /** delete every message with seq < cut; one at or above it was published
+             *  AFTER the vacate (the room refilled) and is kept */
+            unsigned long long deletedBytes = 0;
+            bool remaining = false;
+            MDB_cursor* cur;
+            if (mdb_cursor_open(txn, g_dbi, &cur) == 0) {
+                std::string startK = rid;
+                startK.push_back(SEP_MSG);
+                MDB_val ck = val(startK), cv;
+                int rc = mdb_cursor_get(cur, &ck, &cv, MDB_SET_RANGE);
+                while (rc == 0 && isRoomMsgKey(ck.mv_data, ck.mv_size, rid)) {
+                    if (ck.mv_size != rid.size() + 9 || seqOfMsgKey(ck.mv_data, ck.mv_size) >= cut) {
+                        remaining = true; /* reached the post-vacate messages */
+                        break;
+                    }
+                    deletedBytes += cv.mv_size;
+                    if (mdb_cursor_del(cur, 0) != 0) {
+                        remaining = true; /* leave the meta alone on an LMDB error */
+                        break;
+                    }
+                    rc = mdb_cursor_get(cur, &ck, &cv, MDB_NEXT);
+                }
+                mdb_cursor_close(cur);
+            }
+
+            std::string metaK = roomMetaKey(rid);
+            MDB_val mk = val(metaK), mv;
+            if (!remaining) {
+                mdb_del(txn, g_dbi, &mk, nullptr); /* history gone: drop the meta too */
+            } else {
+                unsigned long long bytes = 0;
+                if (mdb_get(txn, g_dbi, &mk, &mv) == 0 && mv.mv_size == 8) {
+                    bytes = getBE64(mv.mv_data, mv.mv_size);
+                }
+                bytes = (bytes > deletedBytes) ? bytes - deletedBytes : 0;
+                std::string bv;
+                putBE64(bv, bytes);
+                MDB_val wmk = val(metaK), wmv = val(bv);
+                mdb_put(txn, g_dbi, &wmk, &wmv, 0);
+            }
         }
 
         uint64_t maxSeq = 0;
@@ -163,7 +238,11 @@ void write_worker(const std::string& room_id, const std::string& message_content
         std::unordered_map<std::string, unsigned long long> added;
 
         bool failed = false;
-        for (const auto& [rid, seq, msg] : batch) {
+        for (const auto& [rid, seq, msg] : t_batch) {
+            /** published before its room vacated: dead on arrival, never written */
+            if (auto it = vacateSeq.find(rid); it != vacateSeq.end() && seq < it->second) {
+                continue;
+            }
             std::string k = msgKey(rid, seq);
             MDB_val mk = val(k), mv = val(msg);
             int rc = mdb_put(txn, g_dbi, &mk, &mv, 0);
@@ -182,7 +261,9 @@ void write_worker(const std::string& room_id, const std::string& message_content
 
         if (failed) {
             mdb_txn_abort(txn);
-            batch.clear();
+            /** drop the messages (as before) but KEEP the pending deletes: on
+             *  MDB_MAP_FULL a delete-only flush is exactly what frees space */
+            t_batch.clear();
             return;
         }
 
@@ -240,37 +321,20 @@ void write_worker(const std::string& room_id, const std::string& message_content
         if (mdb_txn_commit(txn) != 0) {
             log(LogLevel::ERROR, "Failed to commit transaction.");
         }
-        batch.clear();
+        t_batch.clear();
+        t_pendingDeletes.clear();
     }
 }
 
 void delete_worker(const std::string& room_id) {
-    MDB_txn* txn;
-    if (mdb_txn_begin(env, nullptr, 0, &txn) != 0) {
-        log(LogLevel::ERROR, "Failed to begin delete transaction.");
-        return;
-    }
-
-    MDB_cursor* cur;
-    if (mdb_cursor_open(txn, g_dbi, &cur) == 0) {
-        std::string startK = room_id;
-        startK.push_back(SEP_MSG);
-        MDB_val ck = val(startK), cv;
-        int rc = mdb_cursor_get(cur, &ck, &cv, MDB_SET_RANGE);
-        while (rc == 0 && isRoomMsgKey(ck.mv_data, ck.mv_size, room_id)) {
-            mdb_cursor_del(cur, 0);
-            rc = mdb_cursor_get(cur, &ck, &cv, MDB_NEXT);
-        }
-        mdb_cursor_close(cur);
-    }
-
-    std::string metaK = roomMetaKey(room_id);
-    MDB_val mk = val(metaK);
-    mdb_del(txn, g_dbi, &mk, nullptr); /* ignore "not found" */
-
-    if (mdb_txn_commit(txn) != 0) {
-        log(LogLevel::ERROR, "Failed to commit delete transaction.");
-    }
+    /** Record the vacate; the range-delete itself runs inside write_worker's next
+     *  flush transaction on this thread (the 1s timer guarantees one). The cut-off
+     *  is the NEXT sequence to be assigned: every message already stamped has a
+     *  lower one and goes; anything stamped from here on (the room refilled) sorts
+     *  at or above it and stays. Deliberately never commits on its own — under
+     *  MDB_WRITEMAP every commit msyncs, and this runs on the event loop once per
+     *  room for every socket in a disconnect storm. */
+    t_pendingDeletes.emplace_back(room_id, g_seq.load(std::memory_order_relaxed));
 }
 
 std::string read_worker(const std::string& room_id, size_t limit) {

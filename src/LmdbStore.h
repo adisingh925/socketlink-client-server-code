@@ -18,7 +18,13 @@ void init_env();
  *  readers must fan a flush out to every worker loop (see the messages endpoint). */
 void write_worker(const std::string& room_id, const std::string& message_content, bool needsCommit = false);
 
-/** Delete a room's entire history (all its message keys + its meta). */
+/** Schedule deletion of a room's history AS OF NOW: records the current arrival
+ *  sequence and, at the calling thread's next write_worker flush (the 1s timer
+ *  guarantees one), range-deletes every message with a LOWER sequence inside that
+ *  flush's single transaction. Never commits on its own — a vacate storm costs zero
+ *  extra LMDB commits (each commit msyncs under MDB_WRITEMAP), and a room that
+ *  refills before the flush keeps its newer messages. Test code that reads back
+ *  right away must flush first: write_worker("", "", true). */
 void delete_worker(const std::string& room_id);
 
 /** Return a room's history as a JSON array of message strings, NEWEST FIRST, up to

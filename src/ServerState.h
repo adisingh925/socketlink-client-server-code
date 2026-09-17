@@ -117,6 +117,32 @@ enum class Rooms : uint8_t {
 };
 
 /**
+ * Room-type membership as bitmasks: one shift-and-mask instead of a hash-set
+ * lookup or a chain of == comparisons, and ONE definition shared by every call
+ * site (the same question used to be asked three different ways).
+ *
+ * parseRoomType() returns 255 for an unrecognized prefix and the message handler
+ * starts roomType at 255 — shifting by that is undefined behavior, hence the
+ * range guard; anything >= 32 is simply "not a member".
+ */
+constexpr uint32_t roomBit(Rooms r) {
+    return 1u << static_cast<uint8_t>(r);
+}
+/** rooms whose messages are persisted (LMDB history, plus MySQL when enabled) */
+constexpr uint32_t kCacheRoomMask = roomBit(Rooms::PUBLIC_CACHE) | roomBit(Rooms::PRIVATE_CACHE) |
+                                    roomBit(Rooms::PUBLIC_STATE_CACHE) | roomBit(Rooms::PRIVATE_STATE_CACHE);
+/** rooms that broadcast SOMEONE_JOINED / SOMEONE_LEFT presence events */
+constexpr uint32_t kStateRoomMask = roomBit(Rooms::PUBLIC_STATE) | roomBit(Rooms::PRIVATE_STATE) |
+                                    roomBit(Rooms::PUBLIC_STATE_CACHE) | roomBit(Rooms::PRIVATE_STATE_CACHE);
+
+inline bool isCacheRoom(uint8_t roomType) {
+    return roomType < 32 && ((kCacheRoomMask >> roomType) & 1u);
+}
+inline bool isStateRoom(uint8_t roomType) {
+    return roomType < 32 && ((kStateRoomMask >> roomType) & 1u);
+}
+
+/**
  * Derive the room type from a room id's prefix. Returns 255 when the prefix is
  * not a recognized room type. Longer/more-specific prefixes are checked first.
  * (Previously this ladder was copy-pasted in the subscribe/unsubscribe/ban handlers.)

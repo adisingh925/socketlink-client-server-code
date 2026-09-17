@@ -121,13 +121,37 @@ int main() {
         UserData::publish(u);
     }
 
-    // 5. Range delete (vacate) removes all of a room's history.
+    // 5. Range delete (vacate) removes all of a room's history. Deletion is
+    //    DEFERRED to the next flush (never a synchronous commit on the caller's
+    //    thread), so flush before reading back.
     delete_worker(rid);
+    write_worker("", "", true);
     {
         auto a = parseArr(read_worker(rid, 100));
         check("delete_worker clears room1", a.size() == 0);
         auto b = parseArr(read_worker(rid2, 100));
         check("delete_worker leaves room2 intact", b.size() == 1);
+    }
+
+    // 6. A vacate only deletes what was published BEFORE it (sequence cut-off): a
+    //    room that refills before the flush keeps its newer messages. `put` flushes
+    //    after "new1", so that single flush both applies the pending delete and
+    //    writes new1 in one transaction.
+    const std::string rr = "pub-cache-refill";
+    put(rr, "old1");
+    put(rr, "old2");
+    delete_worker(rr); // vacate: records the cut-off, commits nothing
+    put(rr, "new1");   // published after the vacate -> must survive
+    {
+        auto a = parseArr(read_worker(rr, 100));
+        check("refill: pre-vacate history gone, post-vacate kept", a.size() == 1 && a[0] == "new1");
+    }
+    // and a flush with NO messages, only a pending delete, must still run
+    delete_worker(rr);
+    write_worker("", "", true);
+    {
+        auto a = parseArr(read_worker(rr, 100));
+        check("delete-only flush (empty batch) still applies", a.size() == 0);
     }
 
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
