@@ -1,6 +1,7 @@
 #include "RoomLifecycle.h"
 
 #include <algorithm>
+#include <memory>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -57,8 +58,7 @@ namespace {
 } // namespace
 
 /** unsubscribe from the current room and do some cleanup */
-void closeConnection(
-    SLWebSocket* ws, worker_t* worker, std::string rid, std::string uid, uint8_t roomType, bool isClosed) {
+void closeConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t roomType, bool isClosed) {
     PerSocketData* ud = ws->getUserData();
 
     if (isClosed == false) {
@@ -118,13 +118,13 @@ void closeConnection(
         }
     }
 
-    log(LogLevel::DEBUG, "Unsubscribed: uid=", uid, " rid=", rid, " (room size ", size, ")");
+    log(LogLevel::DEBUG, "Unsubscribed: uid=", ud->uid, " rid=", rid, " (room size ", size, ")");
 
     /** Unsubscribe on the correct thread. Off-thread we must NOT capture the raw
      *  ws pointer (it may be freed before the deferred lambda runs) — re-look-up
      *  by uid on the owner thread instead. */
     if (worker->thread_->get_id() != std::this_thread::get_id()) {
-        runOnOwnerThread(worker, uid, [rid](SLWebSocket* aliveWs, worker_t*) { aliveWs->unsubscribe(rid); });
+        runOnOwnerThread(worker, ud->uid, [rid](SLWebSocket* aliveWs, worker_t*) { aliveWs->unsubscribe(rid); });
     } else {
         ws->unsubscribe(rid);
     }
@@ -139,20 +139,27 @@ void closeConnection(
 
     /** Broadcast disconnect message */
     if (isStateRoom(roomType)) {
-        std::string result = presencePayload("SOMEONE_LEFT_THE_ROOM", ud->metadata, rid);
-
         /** Publish only to workers that still hold a subscriber of this room —
          *  same rule the per-message path uses, so a leave in a small room does
          *  not wake every loop on the box. (The leaver is already removed, so
          *  the mask is exactly the remaining audience.) */
         uint64_t mask = roomWorkerMaskFor(rid);
         const bool maskUsable = ::workers.size() <= MAX_MASKED_WORKERS;
+
+        /** rid + payload in ONE shared allocation for every deferred publish (the
+         *  hot path's FanoutMsg) instead of a fresh copy of both per worker, and
+         *  built lazily so an audience of zero costs nothing at all. */
+        std::shared_ptr<FanoutMsg> fan;
         for (size_t wi = 0; wi < ::workers.size(); ++wi) {
             if (maskUsable && !(mask & (1ULL << wi))) {
                 continue;
             }
+            if (!fan) {
+                fan = std::make_shared<FanoutMsg>(
+                    FanoutMsg{rid, presencePayload("SOMEONE_LEFT_THE_ROOM", ud->metadata, rid)});
+            }
             worker_t& w = ::workers[wi];
-            w.loop_->defer([&w, rid, result]() { w.app_->publish(rid, result, uWS::OpCode::TEXT, true); });
+            w.loop_->defer([&w, fan]() { w.app_->publish(fan->rid, fan->data, uWS::OpCode::TEXT, true); });
         }
     }
 
@@ -171,7 +178,7 @@ void closeConnection(
 }
 
 /** subscribe to a new room */
-void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t roomType) {
+void openConnection(SLWebSocket* ws, worker_t* worker, const std::string& rid, uint8_t roomType) {
     if (!rid.empty()) {
         PerSocketData* ud = ws->getUserData();
         const auto& uid = ud->uid;
@@ -257,12 +264,18 @@ void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t 
 
             /** openConnection always runs on the socket's owner thread (REST and
              *  ban callers arrive via runOnOwnerThread), so publish locally here
-             *  and defer only to the OTHER workers that hold subscribers. */
+             *  and defer only to the OTHER workers that hold subscribers. uWS copies
+             *  the payload into the topic tree synchronously, so the string can be
+             *  moved into the shared message afterwards. */
             ws->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true);
 
             const size_t selfIdx = workerIndex(worker);
             uint64_t mask = roomWorkerMaskFor(rid);
             const bool maskUsable = ::workers.size() <= MAX_MASKED_WORKERS;
+
+            /** one shared rid + payload for every remote publish (FanoutMsg), built
+             *  only if some other worker actually needs it */
+            std::shared_ptr<FanoutMsg> fan;
             for (size_t wi = 0; wi < ::workers.size(); ++wi) {
                 if (wi == selfIdx) {
                     continue;
@@ -270,9 +283,11 @@ void openConnection(SLWebSocket* ws, worker_t* worker, std::string rid, uint8_t 
                 if (maskUsable && !(mask & (1ULL << wi))) {
                     continue;
                 }
+                if (!fan) {
+                    fan = std::make_shared<FanoutMsg>(FanoutMsg{rid, std::move(broadcastMessage)});
+                }
                 worker_t& w = ::workers[wi];
-                w.loop_->defer(
-                    [&w, broadcastMessage, rid]() { w.app_->publish(rid, broadcastMessage, uWS::OpCode::TEXT, true); });
+                w.loop_->defer([&w, fan]() { w.app_->publish(fan->rid, fan->data, uWS::OpCode::TEXT, true); });
             }
         }
 

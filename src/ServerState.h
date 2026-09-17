@@ -104,6 +104,16 @@ struct worker_t {
     std::shared_ptr<std::thread> thread_;
 };
 
+/** One cross-worker fan-out message: room id + built payload in a single
+ *  allocation, so a deferred publish holds ONE shared_ptr control block rather
+ *  than two (halves the cross-core refcount traffic — see the publish path in
+ *  Worker.cpp). Shared with the presence broadcasts in RoomLifecycle.cpp so a
+ *  join/leave no longer copies rid + payload once per target worker. */
+struct FanoutMsg {
+    std::string rid;
+    std::string data;
+};
+
 /** Rooms */
 enum class Rooms : uint8_t {
     PUBLIC = 0,
@@ -140,6 +150,12 @@ inline bool isCacheRoom(uint8_t roomType) {
 }
 inline bool isStateRoom(uint8_t roomType) {
     return roomType < 32 && ((kStateRoomMask >> roomType) & 1u);
+}
+/** the pri-* variants: a subscribe is gated by the ON_VERIFICATION_REQUEST webhook */
+constexpr uint32_t kPrivateRoomMask = roomBit(Rooms::PRIVATE) | roomBit(Rooms::PRIVATE_STATE) |
+                                      roomBit(Rooms::PRIVATE_CACHE) | roomBit(Rooms::PRIVATE_STATE_CACHE);
+inline bool isPrivateRoom(uint8_t roomType) {
+    return roomType < 32 && ((kPrivateRoomMask >> roomType) & 1u);
 }
 
 /**

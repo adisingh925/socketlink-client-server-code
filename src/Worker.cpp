@@ -38,13 +38,9 @@ static thread_local simdjson::ondemand::parser parser;
 /** smoothing factor */
 constexpr double alpha = 0.05;
 
-/** One cross-worker fan-out message: room id + built envelope in a single
- *  allocation, so the deferred publish holds ONE shared_ptr control block rather
- *  than two (halves the cross-core refcount traffic — see the publish path). */
-struct FanoutMsg {
-    std::string rid;
-    std::string data;
-};
+/* FanoutMsg (one shared allocation per cross-worker fan-out: rid + payload) is
+ * defined in ServerState.h so the presence broadcasts in RoomLifecycle.cpp use
+ * the same single-control-block pattern as the publish path below. */
 
 /** calculate latency for each thread */
 void update_ema(double newLatency) {
@@ -644,10 +640,7 @@ void worker_t::work() {
                                      std::memory_order_relaxed);
 
                                  /** cache rooms persist their messages (LMDB / SQL) */
-                                 if (roomType == static_cast<uint8_t>(Rooms::PUBLIC_CACHE) ||
-                                     roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) ||
-                                     roomType == static_cast<uint8_t>(Rooms::PUBLIC_STATE_CACHE) ||
-                                     roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
+                                 if (isCacheRoom(roomType)) {
                                      /** append to the room's bounded history (batched; the read
                                       *  endpoint forces a flush before reading) */
                                      write_worker(rid, std::string(msgBody));
@@ -778,7 +771,7 @@ void worker_t::work() {
                      if (ownedRegistryEntry) {
                          const size_t myIdx = workerIndex(this);
                          for (auto& entry : ws->getUserData()->rooms) {
-                             closeConnection(ws, this, entry.first, userId, entry.second.roomType, true);
+                             closeConnection(ws, this, entry.first, entry.second.roomType, true);
                              /** closeConnection skips this in the isClosed path, so release
                               *  this worker's claim on each room's publish mask here */
                              roomWorkersRemove(entry.first, myIdx);
@@ -1203,10 +1196,7 @@ void worker_t::work() {
                         }
                     }
 
-                    if (roomType == static_cast<uint8_t>(Rooms::PRIVATE) ||
-                        roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE) ||
-                        roomType == static_cast<uint8_t>(Rooms::PRIVATE_CACHE) ||
-                        roomType == static_cast<uint8_t>(Rooms::PRIVATE_STATE_CACHE)) {
+                    if (isPrivateRoom(roomType)) {
                         if (getWebhookStatus(Webhooks::ON_VERIFICATION_REQUEST) == 1) {
                             std::ostringstream payload;
 
@@ -1498,8 +1488,8 @@ void worker_t::work() {
                     /** close the connection for the given rid on the socket's owner
                      *  thread; re-validated there so a just-closed socket is skipped
                      *  instead of dereferenced after free */
-                    runOnOwnerThread(worker, uid, [rid, uid, roomType](SLWebSocket* aliveWs, worker_t* owner) {
-                        closeConnection(aliveWs, owner, rid, uid, roomType);
+                    runOnOwnerThread(worker, uid, [rid, roomType](SLWebSocket* aliveWs, worker_t* owner) {
+                        closeConnection(aliveWs, owner, rid, roomType);
                     });
 
                     replyJson(
@@ -1776,9 +1766,8 @@ void worker_t::work() {
                                             });
                                         } else {
                                             runOnOwnerThread(
-                                                worker, uid,
-                                                [rid, uid, roomType](SLWebSocket* aliveWs, worker_t* owner) {
-                                                    closeConnection(aliveWs, owner, rid, uid, roomType);
+                                                worker, uid, [rid, roomType](SLWebSocket* aliveWs, worker_t* owner) {
+                                                    closeConnection(aliveWs, owner, rid, roomType);
 
                                                     /** Tell the user in case of room ban */
                                                     aliveWs->send(
