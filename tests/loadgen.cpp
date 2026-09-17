@@ -478,9 +478,23 @@ static void worker(const Config& cfg, int firstConn, int lastConn) {
         }
     }
 
-    for (auto& c : conns)
-        if (c.fd >= 0)
+    /* Abortive teardown. Under --flood every send queue is full and the server is
+     * slow to read, so a plain close() queues the FIN BEHIND the unsent data — and
+     * the container's network namespace is torn down before it ever goes out. The
+     * server is then left holding a dead socket until its 120s idle timeout fires
+     * (measured: ~120s to drain after flood runs vs ~3s after rate runs, with
+     * identical server code). SO_LINGER{on,0} makes close() send an immediate RST
+     * instead, discarding the queued data, so the server learns of the disconnect
+     * at once and drain/recovery measurements reflect the server, not this client. */
+    for (auto& c : conns) {
+        if (c.fd >= 0) {
+            struct linger lg {};
+            lg.l_onoff = 1;  /* linger on ... */
+            lg.l_linger = 0; /* ... for zero seconds: close() sends RST immediately */
+            setsockopt(c.fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
             close(c.fd);
+        }
+    }
     close(ep);
 }
 
