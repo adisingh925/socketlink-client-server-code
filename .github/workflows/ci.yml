@@ -40,7 +40,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/sl-deps
-          key: sl-deps-uws20.67.0-simdjson3.9.4-json3.11.3
+          # v2: simdjson now fetched from the repo tree (the v3.9.4 release asset
+          # singleheader.zip was deleted upstream and started returning 404)
+          key: sl-deps-v2-uws20.67.0-simdjson3.9.4-json3.11.3
 
       - name: Fetch and build third-party dependencies
         if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -52,13 +54,17 @@ jobs:
           git clone --depth 1 --branch v20.67.0 --recurse-submodules \
             https://github.com/uNetworking/uWebSockets.git
           make -C uWebSockets/uSockets WITH_OPENSSL=1
-          # header-only dependencies
-          curl -sSL -o include/json.hpp \
+          # Header-only dependencies. -f everywhere: without it a 404 page lands
+          # in the output file and the failure surfaces later as a corrupt file —
+          # exactly how the deleted simdjson release asset broke this job.
+          # simdjson comes from the repo TREE at the pinned tag, not a release
+          # asset: tags can't be deleted out from under us the way assets were.
+          curl -fsSL -o include/json.hpp \
             https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
-          curl -sSL -o simdjson.zip \
-            https://github.com/simdjson/simdjson/releases/download/v3.9.4/singleheader.zip
-          unzip -o -j simdjson.zip -d . 'simdjson.h' 'simdjson.cpp'
-          mv simdjson.h include/simdjson.h
+          curl -fsSL -o include/simdjson.h \
+            https://raw.githubusercontent.com/simdjson/simdjson/v3.9.4/singleheader/simdjson.h
+          curl -fsSL -o simdjson.cpp \
+            https://raw.githubusercontent.com/simdjson/simdjson/v3.9.4/singleheader/simdjson.cpp
 
       - name: Build server
         run: make -j"$(nproc)"
