@@ -729,13 +729,19 @@ void worker_t::work() {
                      }
                  },
              .close =
-                 [this](auto* ws, int /* code */, std::string_view /* message */) {
+                 [this](auto* ws, int code, std::string_view message) {
                      std::string userId = ws->getUserData()->uid;
 
                      /** release the reserved connection slot (reserved in the upgrade handler) */
                      globalConnectionCounter.fetch_sub(1, std::memory_order_relaxed);
 
-                     log(LogLevel::DEBUG, "Connection closed: uid=", userId, " (",
+                     /** The code says WHO closed and WHY: 1000/1001 = clean client close,
+                      *  1006 = no close frame (TCP RST / vanished peer / kernel abort),
+                      *  1013 = our shedding, 1011+payload = our end() reasons. A stress run
+                      *  showed ~350 server-side closes the counters could not explain;
+                      *  without the code in the log that was undiagnosable. */
+                     log(LogLevel::DEBUG, "Connection closed: uid=", userId, " code=", code,
+                         " reason=", std::string(message), " (",
                          globalConnectionCounter.load(std::memory_order_relaxed), " remaining)");
 
                      /** A socket that lost the duplicate-uid race in .open gets end()ed while

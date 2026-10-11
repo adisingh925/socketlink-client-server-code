@@ -74,6 +74,14 @@ struct Config {
 std::atomic<long long> g_sent{0}, g_recv{0}, g_recvBytes{0}, g_connected{0}, g_connectFailed{0};
 std::atomic<bool> g_go{false}, g_stop{false};
 
+/** Why sockets died mid-run, from THIS side. A stress soak showed every server
+ *  connection vanish with WS code 1006 (no close frame) while both processes
+ *  stayed healthy; 1006 says nothing about direction. These do: eof = orderly
+ *  FIN from the server, err/hup = transport error (SO_ERROR / RST), senderr =
+ *  our send() failed hard. last_errno pins the kind. */
+std::atomic<long long> g_closeEof{0}, g_closeErrHup{0}, g_closeRecvErr{0}, g_closeSendErr{0};
+std::atomic<int> g_lastErrno{0};
+
 /* ------------------------------ small helpers ----------------------------- */
 /** Resolve a host (name or IPv4 literal) to dotted-quad, "" on failure. */
 static std::string resolveHost(const std::string& host) {
@@ -404,6 +412,12 @@ static void worker(const Config& cfg, int firstConn, int lastConn) {
         for (int e = 0; e < nev; ++e) {
             Conn& c = *(Conn*)events[e].data.ptr;
             if (events[e].events & (EPOLLERR | EPOLLHUP)) {
+                int soerr = 0;
+                socklen_t slen = sizeof(soerr);
+                getsockopt(c.fd, SOL_SOCKET, SO_ERROR, &soerr, &slen);
+                if (soerr)
+                    g_lastErrno.store(soerr, std::memory_order_relaxed);
+                g_closeErrHup.fetch_add(1, std::memory_order_relaxed);
                 epoll_ctl(ep, EPOLL_CTL_DEL, c.fd, nullptr);
                 close(c.fd);
                 c.fd = -1;
@@ -414,6 +428,12 @@ static void worker(const Config& cfg, int firstConn, int lastConn) {
                 while ((r = recv(c.fd, rbuf, sizeof(rbuf), 0)) > 0)
                     onBytes(c, rbuf, r);
                 if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) {
+                    if (r == 0) {
+                        g_closeEof.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        g_lastErrno.store(errno, std::memory_order_relaxed);
+                        g_closeRecvErr.fetch_add(1, std::memory_order_relaxed);
+                    }
                     epoll_ctl(ep, EPOLL_CTL_DEL, c.fd, nullptr);
                     close(c.fd);
                     c.fd = -1;
@@ -448,6 +468,8 @@ static void worker(const Config& cfg, int firstConn, int lastConn) {
                 }
                 if (w < 0 && errno == EINTR)
                     continue;
+                g_lastErrno.store(errno, std::memory_order_relaxed);
+                g_closeSendErr.fetch_add(1, std::memory_order_relaxed);
                 epoll_ctl(ep, EPOLL_CTL_DEL, c.fd, nullptr);
                 close(c.fd);
                 c.fd = -1;
@@ -605,10 +627,13 @@ int main(int argc, char** argv) {
         "  \"connected\": %lld, \"connect_failed\": %lld, \"setup_s\": %.1f,\n"
         "  \"group\": %d, \"rate\": %.1f, \"size\": %d, \"window_s\": %.1f,\n"
         "  \"sent\": %lld, \"recv\": %lld,\n"
-        "  \"send_rate_msgs_s\": %.0f, \"recv_rate_msgs_s\": %.0f, \"recv_MB_s\": %.1f\n"
+        "  \"send_rate_msgs_s\": %.0f, \"recv_rate_msgs_s\": %.0f, \"recv_MB_s\": %.1f,\n"
+        "  \"close_eof\": %lld, \"close_errhup\": %lld, \"close_recverr\": %lld, \"close_senderr\": %lld,"
+        " \"last_errno\": %d\n"
         "}\n",
         (long long)g_connected.load(), (long long)g_connectFailed.load(), setup, cfg.group, cfg.rate, cfg.size,
         cfg.duration, sent, recvd, (double)sent / cfg.duration, (double)recvd / cfg.duration,
-        (double)rbytes / cfg.duration / 1e6);
+        (double)rbytes / cfg.duration / 1e6, (long long)g_closeEof.load(), (long long)g_closeErrHup.load(),
+        (long long)g_closeRecvErr.load(), (long long)g_closeSendErr.load(), g_lastErrno.load());
     return 0;
 }
