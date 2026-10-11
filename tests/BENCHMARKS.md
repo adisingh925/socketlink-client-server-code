@@ -445,3 +445,98 @@ Client containers connect to `sl-server:8080` by name (loadgen resolves hostname
    opens). Prefer the cumulative counters when a run reports a long `setup_s`.
 5. `loadtest.py` reuses uids across runs, so back-to-back runs can see 409s from
    connections that have not yet closed.
+6. **Samplers must print wall timestamps.** Spinning a curl container per sample
+   costs 2–5 s each, so a loop's nominal `t=12s` label can be 30 s of wall time —
+   this manufactured a "mid-run mass disconnect" that was really the load
+   generator's own teardown at window end (postmortem below). Use `docker exec`
+   for sub-second samples and stamp every line with `date +%s`.
+7. **`connections` in `/metrics` is the app's counter.** When it disagrees with
+   reality, `ls /proc/1/fd | wc -l` inside the container is the kernel's answer.
+
+---
+
+# Hardening round 2 (Sep–Oct 2026)
+
+Everything below ran against the containerized server (1 CPU / 1 GB unless
+noted) with the C++ `loadgen`. Reproduce with `tests/sweep_matrix.sh` (+
+`tests/sweep_report.py`) and `tests/stress_suite.sh`.
+
+## Structured sweep (17 runs: room size × payload × rate × persistence × webhooks)
+
+OFAT from a baseline of 5 000 conns, rooms of 10, 1 KB, rate 5/conn. Key results:
+
+| dimension | finding |
+|---|---|
+| room size | delivery = `msg_rate × (group−1)`; rooms of 100 at rate 5 already saturate one core (delivers 137 k/s, drops 79 k/s) |
+| payload | 100 B and 1 KB deliver the **same** ~225 k msgs/s (cost = the send syscall); ~9.5 KB flips to bandwidth-bound at ~522 MB/s |
+| rate | lossless to ~225 k del/s on one core; past it, delivery plateaus ~144 k/s with backpressure drops (lossy, never fatal) |
+| persistence | LMDB write on the delivery path costs ~45 % (225 k → 123 k); MySQL adds little more (→ 102 k, dedicated writer thread) |
+| webhooks | barely dent delivery (225 k → 220 k, fire-and-forget); dispatcher caps ~11 k hooks/s and the byte-bounded queue sheds the excess |
+
+Two pitfalls encoded in the harness: the server must be **recreated per run**
+(a single 1-CPU server degrades across back-to-back 5 k-conn runs — later runs
+saw ~2.9 k connect failures from cumulative socket churn), and large-payload
+runs use **9 500-byte bodies** because `maxPayloadLength` (10 240) bounds the
+whole frame — a 10 240-byte body plus the JSON envelope is correctly rejected.
+
+## Segfault found and fixed: shedding inside TopicTree::drain
+
+The all-on 9.5 KB flood crashed the server (exit 139, not OOM) the moment
+memory-pressure shedding engaged. gdb (in-container, `--cap-add=SYS_PTRACE`)
+pinned it to `uWS::TopicTree::drain()` walking `s = s->next`: the `.dropped`
+handler ran `ws->end()` synchronously, freeing the very `Subscriber` the walk
+was on — a use-after-free. Fixed (`9cb898d`) by deferring the close past the
+drain via `runOnOwnerThread` (re-validates by uid, never dangles) with a
+`shedScheduled` guard. 6/6 post-fix floods survived with shedding fully active
+(4.1–4.4 k closes/run) where every pre-fix run crashed.
+
+## Vacate-delete batching (A/B)
+
+Emptying a cache room used to commit (and `msync`, under `MDB_WRITEMAP`) one
+LMDB transaction per room, on the event loop. 2 500 cache rooms vacating at
+once: loop drained to 0 connections in **~41 s before, ~5 s after** moving the
+range-deletes into the next batched flush (`2053b78`; sequence cut-off keeps
+messages published after a refill).
+
+## What a 1 GB all-on box's memory is (cgroup memory.stat, 4 000 conns, overload)
+
+anon **343 MiB** + LMDB page cache **393 MiB** (entirely clean, `file_dirty=0`)
++ kernel socket buffers **134 MiB** ≈ 900 MiB charge. The guard's working-set
+(charge − inactive_file) correctly excludes the reclaimable LMDB cache, and the
+adaptive cap's climb (43 → 130 KiB/conn) is genuine overload cost — buffers, not
+misattributed file pages.
+
+## Load-generator teardown artifact (fixed)
+
+After flood runs the server took ~120 s to reach 0 connections. Cause: client.
+Under flood each socket's send queue is full, so plain `close()` queued the FIN
+behind unsent data and the container's netns died before it was sent — the
+server held dead peers until `idleTimeout` (120 s) reaped them, exactly as
+designed for a vanished client. `loadgen` now closes with `SO_LINGER{on,0}`
+(immediate RST): measured flood drain **121 s → 1 s** on identical server code.
+This mattered beyond cosmetics — in multi-phase suites the zombie sockets of one
+phase contaminated the next (inflated memory, depressed throughput).
+
+## Stress suite, clean run (tests/stress_suite.sh, post-fixes)
+
+| phase | result |
+|---|---|
+| A all-on 9.5 KB flood, 768 MB, 30 s | survives; guard paused/recovered **4×**, shed 13, drain 1 s, peak 656 MiB, 0 errors |
+| B 5× churn, 1 500 cache-room vacates/cycle | drains 0–1 s, memory flat 21–25 MiB across cycles, 0 drops |
+| C 2 workers, 400 state rooms, flood | **316 717 deliveries/s**, drain 1 s (earlier 118 k/s figure was zombie-socket-depressed) |
+| D plain-flood + cache-r20 + state-r10 concurrently, all-on | all connect, drain 1 s, webhook queue sheds 124 k, 0 errors |
+| E 60 s all-on soak, 4 000 conns | **88 drops total**, zero pressure events, peak 293 MiB, +72 MiB first→last quarter (LMDB history filling; releases after) |
+
+## Postmortem: the mass-disconnect that wasn't
+
+A soak appeared to show every connection closing mid-run with nothing in the
+counters to explain it. After exonerating MySQL, webhooks, LMDB, conntrack
+(max 262 k, peak 4.6 k), kernel TCP aborts (all zero) and the client (new
+close-cause counters: zero closes on its side), the server's own log settled
+it: the adaptive cap read **4 000 connections four seconds before** the "mass
+close", every close line stamped the same second, and plain rooms delivered
+99.7 % over the full window at a sustained 40 k msgs/s in. The burst was the
+loadgen's deliberate RST teardown at window end; the "mid-run" appearance came
+from unstamped samplers drifting 2–5 s per sample (caveat 6). No server bug.
+Kept from the hunt: `.close` now logs the WS close code + reason at DEBUG, and
+`loadgen` reports why it closed each socket (`close_eof/errhup/recverr/senderr`).
